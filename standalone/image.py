@@ -114,6 +114,7 @@ def build_image(
         if data_seed is not None:
             run("stat", str(pending), "/data-seed/profiles/profiles.lst")
             run("stat", str(pending), f"/data-seed/prefix/drive_c/XCL/{LIBRARY_EXE}")
+            run("stat", str(pending), "/data-seed/prefix/drive_c/XCL/runtime-stamp.txt")
         with pending.open("rb") as stream:
             digest = file_digest(stream, "sha256").hexdigest()
         if output.exists() or output.is_symlink():

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 import zipfile
@@ -115,7 +118,16 @@ class StandaloneTests(unittest.TestCase):
         icon = Path(__file__).with_name("assets") / "icon0.png"
         self.assertEqual((library_output / "sce_sys/icon0.png").read_bytes(), icon.read_bytes())
         self.assertEqual((library_output / "profiles/profiles.lst").read_text(), "trinityxsx-library.profile\n")
+        stamp1 = (library_output / "prefix/drive_c/XCL/runtime-stamp.txt").read_text(encoding="ascii").strip()
+        self.assertEqual(len(stamp1), 64)
         self.assertFalse((runner / RUNNER_EXECUTABLE).exists())
+
+        library.write_bytes(b"MZ TrinityXSX: library window opened v2")
+        library_output_v2 = self.root / "library_v2/PPSA83601"
+        stage(None, runtime, library_output_v2, runner, seed, library_exe=library, launcher=launcher)
+        stamp2 = (library_output_v2 / "prefix/drive_c/XCL/runtime-stamp.txt").read_text(encoding="ascii").strip()
+        self.assertEqual(len(stamp2), 64)
+        self.assertNotEqual(stamp1, stamp2)
 
     def test_prefix_seed_registry_rewrite_preserves_other_sections(self):
         reg = (
@@ -150,6 +162,86 @@ class StandaloneTests(unittest.TestCase):
             param_mode = (zf.getinfo("PPSA83601/sce_sys/param.json").external_attr >> 16) & 0o777
             self.assertEqual(eboot_mode, 0o755)
             self.assertEqual(param_mode, 0o644)
+
+    def test_native_prefix_seed_sync_runtime_updates_binaries_and_keeps_user_data(self):
+        if os.name != "posix":
+            self.skipTest("POSIX C11 host test for prefix_seed.c runs on Linux/CI")
+        cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+        if not cc:
+            self.skipTest("No C compiler available on host")
+        native_dir = Path(__file__).with_name("native")
+        harness = self.root / "test_sync.c"
+        binary = self.root / "test_sync"
+        harness.write_text(
+            """
+            #include <assert.h>
+            #include <stdio.h>
+            #include <string.h>
+            int trinityxsx_prepare_storage(const char *source, const char *parent, const char *root, const char **step);
+            int trinityxsx_sync_runtime(const char *source, const char *root, const char **step);
+            int main(int argc, char **argv) {
+                assert(argc == 4);
+                const char *step = "none";
+                if (strcmp(argv[1], "prepare") == 0) {
+                    int rc = trinityxsx_prepare_storage(argv[2], argv[3], argv[3], &step);
+                    if (rc != 0) { fprintf(stderr, "prepare failed at %s\\n", step); return 1; }
+                    return 0;
+                }
+                int rc = trinityxsx_sync_runtime(argv[2], argv[3], &step);
+                printf("%d\\n", rc);
+                if (rc < 0) { fprintf(stderr, "sync failed at %s\\n", step); return 1; }
+                return 0;
+            }
+            """,
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O2", "-Wall", "-Wextra", "-Werror",
+             str(native_dir / "prefix_seed.c"), str(harness), "-o", str(binary)],
+            check=True,
+        )
+        # Also syntax-check launcher.c with -DTRINITYXSX_WITH_SEED -Wall -Wextra -Werror
+        subprocess.run(
+            [cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O2", "-Wall", "-Wextra", "-Werror", "-DTRINITYXSX_WITH_SEED",
+             "-c", str(native_dir / "launcher.c"), "-o", str(self.root / "launcher.o")],
+            check=True,
+        )
+
+        seed = self.root / "seed"
+        dest = self.root / "dest/PPSA83601"
+        (seed / "prefix/drive_c/XCL/games").mkdir(parents=True)
+        (seed / "profiles").mkdir(parents=True)
+        (seed / "prefix/drive_c/XCL/xcl-library.exe").write_bytes(b"v2-new-exe")
+        (seed / "prefix/drive_c/XCL/d3d12core.dll").write_bytes(b"v2-new-dll")
+        (seed / "prefix/drive_c/XCL/runtime-stamp.txt").write_text("stamp-v2\n", encoding="ascii")
+        (seed / "profiles/profiles.lst").write_text("trinityxsx-library.profile\n", encoding="ascii")
+        (seed / "profiles/trinityxsx-library.profile").write_text("default-profile\n", encoding="ascii")
+
+        # Existing v1 install with user saves, framegen profile, game_paths, and user game
+        (dest / "prefix/drive_c/XCL/games/mygame").mkdir(parents=True)
+        (dest / "prefix/drive_c/users/prospero/saves").mkdir(parents=True)
+        (dest / "profiles").mkdir(parents=True)
+        (dest / "prefix/drive_c/XCL/xcl-library.exe").write_bytes(b"v1-old-exe")
+        (dest / "prefix/drive_c/XCL/d3d12core.dll").write_bytes(b"v1-old-dll")
+        (dest / "prefix/drive_c/XCL/games/mygame/game.exe").write_bytes(b"user-game")
+        (dest / "prefix/drive_c/users/prospero/saves/world.dat").write_bytes(b"precious-save")
+        (dest / "profiles/trinityxsx-library.profile").write_text("framegen = 2\n", encoding="ascii")
+        (dest / "game_paths.txt").write_text("/mnt/ext1/xboxseries\n", encoding="ascii")
+
+        # First sync: missing stamp -> upgrades runtime binaries, preserves all user data!
+        r1 = subprocess.run([str(binary), "sync", str(seed), str(dest)], capture_output=True, text=True, check=True)
+        self.assertEqual(r1.stdout.strip(), "1")
+        self.assertEqual((dest / "prefix/drive_c/XCL/xcl-library.exe").read_bytes(), b"v2-new-exe")
+        self.assertEqual((dest / "prefix/drive_c/XCL/d3d12core.dll").read_bytes(), b"v2-new-dll")
+        self.assertEqual((dest / "prefix/drive_c/XCL/runtime-stamp.txt").read_text(), "stamp-v2\n")
+        self.assertEqual((dest / "prefix/drive_c/XCL/games/mygame/game.exe").read_bytes(), b"user-game")
+        self.assertEqual((dest / "prefix/drive_c/users/prospero/saves/world.dat").read_bytes(), b"precious-save")
+        self.assertEqual((dest / "profiles/trinityxsx-library.profile").read_text(), "framegen = 2\n")
+        self.assertEqual((dest / "game_paths.txt").read_text(), "/mnt/ext1/xboxseries\n")
+
+        # Second sync: stamp matches -> no-op (returns 0)
+        r2 = subprocess.run([str(binary), "sync", str(seed), str(dest)], capture_output=True, text=True, check=True)
+        self.assertEqual(r2.stdout.strip(), "0")
 
 
 if __name__ == "__main__":

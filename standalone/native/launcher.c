@@ -19,6 +19,7 @@ int sceSystemServiceLoadExec(const char *path, char *const arguments[]);
 #define LIBRARY_EXE "/prefix/drive_c/XCL/xcl-library.exe"
 
 int trinityxsx_prepare_storage(const char *source, const char *parent, const char *root, const char **step);
+int trinityxsx_sync_runtime(const char *source, const char *root, const char **step);
 
 static int library_ready(const char *index)
 {
@@ -85,6 +86,14 @@ int main(int argc, char **argv)
                 boot_log("library-incomplete", errno);
                 (void)sceSystemServiceLoadExec(targets[1], NULL);
                 return 1;
+            }
+        } else {
+            const char *failed_step = "runtime-sync";
+            int synced = trinityxsx_sync_runtime(SEED_ROOT, STORAGE_ROOT, &failed_step);
+            if (synced < 0) {
+                boot_log(failed_step, errno);
+            } else if (synced > 0) {
+                boot_log("runtime-updated", 0);
             }
         }
         boot_log("runner-start", 0);

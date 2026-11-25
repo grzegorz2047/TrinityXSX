@@ -2,7 +2,7 @@
 """Stage the TrinityXSX library or the original Minecraft test profile."""
 
 import argparse
-from hashlib import file_digest
+from hashlib import file_digest, sha256
 import json
 from pathlib import Path
 import shutil
@@ -226,6 +226,10 @@ def stage(
         for binary in sorted(xcl.iterdir()):
             with binary.open("rb") as stream:
                 hashes[binary.name] = file_digest(stream, "sha256").hexdigest()
+        stamp = sha256()
+        for name in sorted(hashes):
+            stamp.update(f"{name}:{hashes[name]}\n".encode("ascii"))
+        (xcl / "runtime-stamp.txt").write_text(f"{stamp.hexdigest()}\n", encoding="ascii", newline="\n")
         shutil.copytree(runtime / "licenses", xcl / "licenses")
         (tree / game_destination).mkdir(parents=True)
         if game is not None:
