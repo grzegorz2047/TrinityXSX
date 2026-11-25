@@ -1,0 +1,6 @@
+# patches apply to upstream trees byte for byte: never convert their line endings
+*.patch -text
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.env text eol=lf

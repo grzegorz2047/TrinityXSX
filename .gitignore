@@ -1,0 +1,14 @@
+# upstream checkouts (tools/setup-sources.sh) and other local clones
+/xcl/
+/vkd3d-proton/
+/AnyPS5/
+/TrinityX360/
+
+# downloads (DXVK, DXC, MSYS2, runtime kits), builds, packages, logs, dumps
+/tools/*/
+/dist/
+/analysis/
+/ps5-logs/
+/spirv-dump/
+*.log
+__pycache__/

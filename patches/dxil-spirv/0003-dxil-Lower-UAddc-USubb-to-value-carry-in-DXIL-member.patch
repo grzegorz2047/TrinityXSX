@@ -1,0 +1,78 @@
+From 5f18ff01db4322c71a93c2a8c228fa9b8bc62134 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 02:17:26 +0100
+Subject: [PATCH 3/3] dxil: Lower UAddc/USubb to { value, carry } in DXIL
+ member order.
+
+dx.op.binaryWithCarryOrBorrow returns %dx.types.i32c = { i32, i1 }. It
+went through the UMul/IMul path of emit_dxil_wide_arith_instruction(),
+which swaps the members (UMul returns { hi, lo }) and used the DXIL
+struct { uint, bool } as the OpIAddCarry/OpISubBorrow result type.
+spirv-val rejects that ("struct member types to be identical"), and
+the value read back had the carry where the sum belongs.
+
+Compute into { uint, uint }, keep the member order, turn the carry into
+a bool and construct the DXIL struct, the type ExtractValue and PHIs
+use for this value. UMul/IMul and the DXBC path are unchanged. DXC
+never emits these ops; XCL's direct DXIL emitter does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ opcodes/dxil/dxil_arithmetic.cpp | 44 ++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/opcodes/dxil/dxil_arithmetic.cpp b/opcodes/dxil/dxil_arithmetic.cpp
+index ce5018b..4d01aed 100644
+--- a/opcodes/dxil/dxil_arithmetic.cpp
++++ b/opcodes/dxil/dxil_arithmetic.cpp
+@@ -513,6 +513,50 @@ bool emit_dxil_wide_arith_instruction(spv::Op opcode, Converter::Impl &impl, con
+ 	auto &builder = impl.builder();
+ 	spv::Id u32_type = builder.makeUintType(32);
+ 
++	if ((opcode == spv::OpIAddCarry || opcode == spv::OpISubBorrow) && !spirv_semantics)
++	{
++		// dx.op.binaryWithCarryOrBorrow (UAddc / USubb) returns %dx.types.i32c = { i32 value, i1 carry/borrow },
++		// already in SPIR-V member order, so no swap (unlike UMul/IMul's { hi, lo }).
++		// SPIR-V requires both members of the OpIAddCarry/OpISubBorrow result to be the operand type,
++		// so compute into { u32, u32 } and rebuild the DXIL struct { u32, bool }, which is the type
++		// get_type_id() gives this value everywhere else (ExtractValue, PHI).
++		auto *result_type = instruction->getType();
++		if (result_type->getTypeID() != llvm::Type::TypeID::StructTyID ||
++		    result_type->getStructNumElements() != 2 ||
++		    result_type->getStructElementType(0)->getTypeID() != llvm::Type::TypeID::IntegerTyID ||
++		    result_type->getStructElementType(0)->getIntegerBitWidth() != 32 ||
++		    result_type->getStructElementType(1)->getTypeID() != llvm::Type::TypeID::IntegerTyID ||
++		    result_type->getStructElementType(1)->getIntegerBitWidth() != 1)
++			return false;
++
++		Operation *arith_op = impl.allocate(opcode, impl.get_struct_type({ u32_type, u32_type }, 0, "WideArithResult"));
++		arith_op->add_id(impl.get_id_for_value(instruction->getOperand(1)));
++		arith_op->add_id(impl.get_id_for_value(instruction->getOperand(2)));
++		impl.add(arith_op);
++
++		spv::Id members[2];
++		for (uint32_t i = 0; i < 2; i++)
++		{
++			auto *ext_op = impl.allocate(spv::OpCompositeExtract, u32_type);
++			ext_op->add_id(arith_op->id);
++			ext_op->add_literal(i);
++			impl.add(ext_op);
++			members[i] = ext_op->id;
++		}
++
++		// The carry/borrow member is 0 or 1.
++		auto *flag_op = impl.allocate(spv::OpINotEqual, builder.makeBoolType());
++		flag_op->add_id(members[1]);
++		flag_op->add_id(builder.makeUintConstant(0));
++		impl.add(flag_op);
++
++		auto *construct_op = impl.allocate(spv::OpCompositeConstruct, instruction);
++		construct_op->add_id(members[0]);
++		construct_op->add_id(flag_op->id);
++		impl.add(construct_op);
++		return true;
++	}
++
+ 	if ((opcode == spv::OpSMulExtended || opcode == spv::OpUMulExtended) && !spirv_semantics)
+ 	{
+ 		// Demote to plain multiply.

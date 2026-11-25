@@ -1,0 +1,227 @@
+From 0b31e0e2421e3c37a42856eb26568fe6a54338cf Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 02:22:44 +0100
+Subject: [PATCH 1/3] xcl run: --in-process runs the host in the launcher's
+ process
+
+Wine on the PS5 (prospero-win) runs one process per program: the child
+host process `xcl run` starts with CreateProcessW would not run there,
+and its profiles cannot set XCL_HOST either (only DXVK_/VKD3D_/... names).
+
+`xcl run --in-process <game> [-- args]` writes boot.json as before, then
+sets the game folder as the current directory and calls host_main() in
+this process. The title gets the command line the child would have had:
+kernelx answers GetCommandLineW / GetCommandLineA (kernel32 imports are
+routed there) with it, and the UCRT's cached _wcmdln / _acmdln, which a
+dynamic-CRT title builds argv from, point at it. Without the flag
+nothing changes: GetCommandLineW / A pass through to Windows.
+
+Test: e2e test_title_runs_in_the_launchers_process runs the test title
+with --in-process; its argv check fails without the command line
+(argv[0] = ...\xcl.exe), measured by disabling set_command_line().
+
+Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
+cargo test --workspace --no-fail-fast -- --test-threads=4: 976 passed,
+1 failed, 45 ignored, 23 SKIPPED (no wave64 etc.). The failure is
+execute_indirect_reads_the_arguments_written_before_it, which fails the
+same way on main on this GPU. cargo test -p xcl --test e2e: 4 passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/xcl/src/hle/kernelx.rs | 48 +++++++++++++++++++++++++++++++++++
+ crates/xcl/src/launcher.rs    | 19 +++++++++++++-
+ crates/xcl/src/main.rs        | 11 +++++---
+ crates/xcl/tests/e2e.rs       | 38 +++++++++++++++++++++++++++
+ 4 files changed, 112 insertions(+), 4 deletions(-)
+
+diff --git a/crates/xcl/src/hle/kernelx.rs b/crates/xcl/src/hle/kernelx.rs
+index c0b8c23..90fd065 100644
+--- a/crates/xcl/src/hle/kernelx.rs
++++ b/crates/xcl/src/hle/kernelx.rs
+@@ -93,6 +93,9 @@ pub fn exports() -> Vec<(&'static str, usize)> {
+         GetModuleHandleExA,
+         GetModuleFileNameW,
+         GetModuleFileNameA,
++        // the title's command line, also when the host runs in the launcher's process
++        GetCommandLineW,
++        GetCommandLineA,
+         FreeLibrary,
+         FreeLibraryWhenCallbackReturns,
+         DisableThreadLibraryCalls,
+@@ -1919,6 +1922,51 @@ pub unsafe extern "system" fn GetModuleFileNameA(h: usize, buf: *mut u8, size: u
+     }
+ }
+ 
++/// The title's command line when the host runs in the launcher's process (`xcl run
++/// --in-process`): NUL-terminated wide and ANSI copies, kept for the process's lifetime.
++static COMMAND_LINE: std::sync::OnceLock<(Box<[u16]>, Box<[u8]>)> = std::sync::OnceLock::new();
++
++/// `xcl run --in-process`: the command line GetCommandLineW / GetCommandLineA hand the title,
++/// also written to the UCRT's cached copies (`_wcmdln` / `_acmdln`), which a title's CRT
++/// startup builds argv from. Without it (a host process of its own) Windows' line is the title's.
++pub fn set_command_line(line: &str) {
++    let w: Box<[u16]> = line.encode_utf16().chain(Some(0)).collect();
++    let mut a = vec![0u8; line.len() * 4 + 1];
++    let n = unsafe { write_ansi_out(line, a.as_mut_ptr(), a.len() as u32) } as usize;
++    a.truncate(n + 1);
++    let (w, a) = COMMAND_LINE.get_or_init(|| (w, a.into_boxed_slice()));
++    unsafe { set_ucrt_command_line(w.as_ptr(), a.as_ptr()) };
++}
++
++unsafe fn set_ucrt_command_line(w: *const u16, a: *const u8) {
++    let ucrt = ll::GetModuleHandleW(crate::util::wide("ucrtbase.dll").as_ptr());
++    if ucrt.is_null() {
++        return;
++    }
++    type Wide = unsafe extern "C" fn() -> *mut *const u16;
++    type Ansi = unsafe extern "C" fn() -> *mut *const u8;
++    if let Some(f) = ll::GetProcAddress(ucrt, b"__p__wcmdln\0".as_ptr()) {
++        *std::mem::transmute::<unsafe extern "system" fn() -> isize, Wide>(f)() = w;
++    }
++    if let Some(f) = ll::GetProcAddress(ucrt, b"__p__acmdln\0".as_ptr()) {
++        *std::mem::transmute::<unsafe extern "system" fn() -> isize, Ansi>(f)() = a;
++    }
++}
++
++pub unsafe extern "system" fn GetCommandLineW() -> *const u16 {
++    match COMMAND_LINE.get() {
++        Some((w, _)) => w.as_ptr(),
++        None => windows_sys::Win32::System::Environment::GetCommandLineW(),
++    }
++}
++
++pub unsafe extern "system" fn GetCommandLineA() -> *const u8 {
++    match COMMAND_LINE.get() {
++        Some((_, a)) => a.as_ptr(),
++        None => windows_sys::Win32::System::Environment::GetCommandLineA(),
++    }
++}
++
+ pub unsafe extern "system" fn FreeLibrary(h: usize) -> BOOL {
+     if modules::find_mapped_by_base(h).is_some() || modules::hle_name_by_handle(h).is_some() {
+         return 1;
+diff --git a/crates/xcl/src/launcher.rs b/crates/xcl/src/launcher.rs
+index 60aeb8f..013d908 100644
+--- a/crates/xcl/src/launcher.rs
++++ b/crates/xcl/src/launcher.rs
+@@ -286,6 +286,11 @@ fn quote(a: &str) -> String {
+ }
+ 
+ pub fn run(target: &Path, args: &[String]) -> i32 {
++    run_with(target, args, false)
++}
++
++/// `run`, with the host in this process when `in_process` (`xcl run --in-process`).
++pub fn run_with(target: &Path, args: &[String], in_process: bool) -> i32 {
+     let (root, explicit_exe, title) = match resolve_location(target) {
+         Ok(x) => x,
+         Err(e) => {
+@@ -370,7 +375,8 @@ pub fn run(target: &Path, args: &[String]) -> i32 {
+         cmdline.push(' ');
+         cmdline.push_str(&quote(a));
+     }
+-    let code = match spawn_host(&cmdline, &root, &boot_path) {
++    let started = if in_process { run_host_here(&cmdline, &root, &boot_path) } else { spawn_host(&cmdline, &root, &boot_path) };
++    let code = match started {
+         Ok(c) => c,
+         Err(e) => {
+             eprintln!("xcl: failed to start the game process: {e}");
+@@ -430,6 +436,17 @@ pub fn missing_console_cpu_features() -> Vec<&'static str> {
+     })
+ }
+ 
++/// The host in this process (`xcl run --in-process`): Wine on the PS5 (prospero-win) runs one
++/// process per program, so the child `spawn_host` starts would not run. The title gets what the
++/// child would have: its command line (kernelx's GetCommandLineW / A and the UCRT's copy) and
++/// the game folder as the current directory. A title that ends with ExitProcess ends XCL too,
++/// so the launcher's summary is printed only when the host returns.
++fn run_host_here(cmdline: &str, cwd: &Path, boot_path: &Path) -> Result<u32, String> {
++    std::env::set_current_dir(cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
++    crate::hle::kernelx::set_command_line(cmdline);
++    Ok(crate::host::host_main(boot_path) as u32)
++}
++
+ fn spawn_host(cmdline: &str, cwd: &Path, boot_path: &Path) -> Result<u32, String> {
+     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+     use windows_sys::Win32::System::Threading::{
+diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
+index 6291b5d..5ee51fe 100644
+--- a/crates/xcl/src/main.rs
++++ b/crates/xcl/src/main.rs
+@@ -24,6 +24,9 @@ Usage:
+   xcl run <game folder | file.exe> [-- game arguments]
+       Runs the game. The game folder is only read; writes, game saves and logs go to
+       %LOCALAPPDATA%\\XCL\\<title>\\ (or %XCL_DATA_ROOT%\\<title>\\).
++  xcl run --in-process <game folder | file.exe> [-- game arguments]
++      The same, with the game in this process instead of a child (for runtimes with one
++      process per program, such as Wine on the PS5).
+   xcl inspect <file.exe|file.dll> [--json]
+       Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
+   xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
+@@ -59,12 +62,14 @@ fn main() {
+ 
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     let code = match args.first().map(String::as_str) {
+-        Some("run") if args.len() >= 2 => {
++        Some("run") if args.len() >= 2 && !(args[1] == "--in-process" && args.len() < 3) => {
++            let in_process = args[1] == "--in-process";
++            let target = if in_process { 2 } else { 1 };
+             let rest: Vec<String> = match args.iter().position(|a| a == "--") {
+                 Some(i) => args[i + 1..].to_vec(),
+-                None => args[2..].to_vec(),
++                None => args[target + 1..].to_vec(),
+             };
+-            xcl::launcher::run(&PathBuf::from(&args[1]), &rest)
++            xcl::launcher::run_with(&PathBuf::from(&args[target]), &rest, in_process)
+         }
+         Some("inspect") if args.len() >= 2 => {
+             let json = args.iter().any(|a| a == "--json");
+diff --git a/crates/xcl/tests/e2e.rs b/crates/xcl/tests/e2e.rs
+index 3c54144..e2b1f0e 100644
+--- a/crates/xcl/tests/e2e.rs
++++ b/crates/xcl/tests/e2e.rs
+@@ -84,6 +84,44 @@ fn launcher_uses_configured_exe_in_an_ambiguous_folder() {
+     assert_eq!(exe.file_name().unwrap(), "game.exe");
+ }
+ 
++/// `xcl run --in-process`: the title runs in xcl's own process (as on Wine on the PS5, which runs
++/// one process per program), sees its own command line (it checks `--hello` in its argv) and the
++/// game folder as its current directory (it reads `data\hello.txt` by a relative path).
++#[test]
++fn test_title_runs_in_the_launchers_process() {
++    let xcl = PathBuf::from(env!("CARGO_BIN_EXE_xcl"));
++    let bin_dir = xcl.parent().unwrap();
++    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
++    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-in-process");
++    let _ = std::fs::remove_dir_all(&root);
++    let game = root.join("game");
++    let data = root.join("data");
++    copy_dir(&manifest.join("..").join("..").join("tests").join("data").join("testgame"), &game);
++    for f in ["xcl_testtitle.exe", "testgame_mw.dll"] {
++        std::fs::copy(bin_dir.join(f), game.join(f)).unwrap_or_else(|e| panic!("{f}: {e} – build first: cargo build --workspace"));
++    }
++    let before = snapshot(&game);
++
++    let out = Command::new(&xcl)
++        .arg("run")
++        .arg("--in-process")
++        .arg(&game)
++        .arg("--")
++        .arg("--hello")
++        .env("XCL_DATA_ROOT", &data)
++        .output()
++        .expect("spawn xcl");
++    let stdout = String::from_utf8_lossy(&out.stdout);
++    let stderr = String::from_utf8_lossy(&out.stderr);
++    println!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
++
++    let fails: Vec<&str> = stdout.lines().filter(|l| l.starts_with("[FAIL]")).collect();
++    assert!(fails.is_empty(), "failed checks in the test title:\n{}", fails.join("\n"));
++    assert!(stdout.contains("xcl_testtitle: done, failures: 0"), "the test title did not run to the end");
++    assert!(out.status.success(), "exit code {:?}", out.status.code());
++    assert_eq!(snapshot(&game), before, "the game folder must stay untouched");
++}
++
+ #[test]
+ fn test_title_runs_and_game_folder_is_untouched() {
+     let xcl = PathBuf::from(env!("CARGO_BIN_EXE_xcl"));

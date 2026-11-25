@@ -1,0 +1,204 @@
+From 982dca12dc0386e6694089fb05eac83d682d440a Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 02:51:53 +0100
+Subject: [PATCH 3/3] PE loader: sections sharing a host page get the union of
+ their access
+
+Under Wine on the PS5 (prospero-win) the host has 16 KiB pages. The
+loader protected each section with VirtualProtect at 4 KiB granularity,
+one section after the other, and a host page holds only one protection:
+the last call on it wins. In the test title, .rdata's last 8 KiB and
+.data share the host page at +0x7C000, so .data became read-only and the
+title's first write to its stdout state at +0x7E068 faulted (Wine
+reported the 16 KiB-aligned host page, 0x10015fc000, as the address).
+
+protection_runs() now computes the protections as runs of pages: pages
+in one host page get the union of the access of the sections in it, so
+code there stays executable and data writable. Under Wine the host page
+is taken as 16 KiB (its size cannot be asked there; on a 4 KiB host it
+only widens a section's neighbour within the same 16 KiB); on Windows it
+is 4 KiB and every section keeps exactly its own protection, as before.
+
+Tests: the test title's real section layout with 4 KiB host pages
+(each section's own protection) and 16 KiB host pages (.data writable,
+.text executable), and pages of no section left alone. The PS5 failure
+itself was found from the PS5 logs (Wine +virtual views, the faulting
+instruction at xcl_testtitle.exe+0x4a385); it cannot run in CI.
+
+Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
+cargo test --workspace --no-fail-fast -- --test-threads=4: 978 passed,
+1 failed, 45 ignored, 23 SKIPPED; the failure is
+execute_indirect_reads_the_arguments_written_before_it, as on main on
+this GPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/xcl/src/loader.rs | 136 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 130 insertions(+), 6 deletions(-)
+
+diff --git a/crates/xcl/src/loader.rs b/crates/xcl/src/loader.rs
+index 52c49af..492cca3 100644
+--- a/crates/xcl/src/loader.rs
++++ b/crates/xcl/src/loader.rs
+@@ -37,10 +37,75 @@ fn cache_dir() -> PathBuf {
+         .unwrap_or_else(|| std::env::temp_dir().join("xcl_cache"))
+ }
+ 
+-fn section_protection(ch: u32) -> u32 {
+-    let x = ch & pe::SCN_MEM_EXECUTE != 0;
+-    let r = ch & pe::SCN_MEM_READ != 0;
+-    let w = ch & pe::SCN_MEM_WRITE != 0;
++const PROT_R: u8 = 1;
++const PROT_W: u8 = 2;
++const PROT_X: u8 = 4;
++
++/// A section's access as `PROT_*` bits.
++fn section_flags(ch: u32) -> u8 {
++    let mut f = 0;
++    if ch & pe::SCN_MEM_READ != 0 {
++        f |= PROT_R;
++    }
++    if ch & pe::SCN_MEM_WRITE != 0 {
++        f |= PROT_W;
++    }
++    if ch & pe::SCN_MEM_EXECUTE != 0 {
++        f |= PROT_X;
++    }
++    f
++}
++
++/// Page size of the host under the process. Windows has 4 KiB pages. Wine on the PS5
++/// (prospero-win) runs on the console's 16 KiB pages, where one host page holds the end of a
++/// section and the start of the next and can have only one protection: the last VirtualProtect
++/// on it wins (`.rdata` made the first 8 KiB of the test title's `.data` read-only). Under Wine
++/// the page size of the host cannot be asked, so 16 KiB is assumed there: on a 4 KiB host this
++/// only leaves a section's neighbour in the same 16 KiB with the section's access too.
++fn host_page() -> usize {
++    if crate::util::under_wine() {
++        0x4000
++    } else {
++        0x1000
++    }
++}
++
++/// The protections to set on an image, as runs of 4 KiB pages `(offset, length, PROT_* bits)` in
++/// address order. `regions` are the headers and the sections `(offset, length, bits)`. Pages in
++/// one `host_page` get the union of the bits of the regions in it, so code there stays
++/// executable and data writable; with 4 KiB host pages each page keeps its region's bits.
++/// Pages of no region are left out (not changed).
++fn protection_runs(regions: &[(usize, usize, u8)], host_page: usize) -> Vec<(usize, usize, u8)> {
++    const PAGE: usize = 0x1000;
++    let pages = regions.iter().map(|&(o, l, _)| (o + l).div_ceil(PAGE)).max().unwrap_or(0);
++    let mut flags: Vec<Option<u8>> = vec![None; pages];
++    for &(o, l, f) in regions {
++        for p in flags.iter_mut().take((o + l).div_ceil(PAGE)).skip(o / PAGE) {
++            *p = Some(p.unwrap_or(0) | f);
++        }
++    }
++    let per_host = (host_page / PAGE).max(1);
++    for block in flags.chunks_mut(per_host) {
++        let union = block.iter().flatten().fold(0, |a, &f| a | f);
++        for p in block.iter_mut().flatten() {
++            *p = union;
++        }
++    }
++    let mut runs: Vec<(usize, usize, u8)> = Vec::new();
++    for (i, f) in flags.iter().enumerate() {
++        let Some(f) = *f else { continue };
++        match runs.last_mut() {
++            Some((o, l, g)) if *g == f && *o + *l == i * PAGE => *l += PAGE,
++            _ => runs.push((i * PAGE, PAGE, f)),
++        }
++    }
++    runs
++}
++
++fn protection(f: u8) -> u32 {
++    let x = f & PROT_X != 0;
++    let r = f & PROT_R != 0;
++    let w = f & PROT_W != 0;
+     match (x, r, w) {
+         (true, _, true) => PAGE_EXECUTE_READWRITE,
+         (true, true, false) => PAGE_EXECUTE_READ,
+@@ -206,13 +271,16 @@ fn map_image_ex(path: &Path, is_main: bool) -> Result<Arc<MappedModule>, String>
+     // 6. page protections
+     unsafe {
+         let mut old = 0u32;
+-        VirtualProtect(base as *const c_void, pe.size_of_headers as usize, PAGE_READONLY, &mut old);
++        let mut regions = vec![(0, pe.size_of_headers as usize, PROT_R)];
+         for s in &pe.sections {
+             let len = ((s.mapped_size() as usize) + 0xFFF) & !0xFFF;
+             if len == 0 {
+                 continue;
+             }
+-            VirtualProtect((base + s.va as usize) as *const c_void, len, section_protection(s.characteristics), &mut old);
++            regions.push((s.va as usize, len, section_flags(s.characteristics)));
++        }
++        for (offset, len, flags) in protection_runs(&regions, host_page()) {
++            VirtualProtect((base + offset) as *const c_void, len, protection(flags), &mut old);
+         }
+         windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache(
+             windows_sys::Win32::System::Threading::GetCurrentProcess(),
+@@ -423,6 +491,62 @@ pub fn on_tls_event(reason: u32) {
+ mod tests {
+     use super::*;
+ 
++    /// The test title's layout (release build): headers, .text, .rdata, .data, .pdata, .reloc
++    /// as `map_image` passes them (lengths rounded up to 4 KiB).
++    const TITLE: [(usize, usize, u8); 6] = [
++        (0, 0x400, PROT_R),
++        (0x1000, 0x5B000, PROT_R | PROT_X),
++        (0x5C000, 0x22000, PROT_R),
++        (0x7E000, 0x1000, PROT_R | PROT_W),
++        (0x7F000, 0x5000, PROT_R),
++        (0x84000, 0x1000, PROT_R),
++    ];
++
++    fn flags_at(runs: &[(usize, usize, u8)], at: usize) -> Option<u8> {
++        runs.iter().find(|&&(o, l, _)| (o..o + l).contains(&at)).map(|r| r.2)
++    }
++
++    #[test]
++    fn with_4k_host_pages_every_section_keeps_its_own_protection() {
++        let runs = protection_runs(&TITLE, 0x1000);
++        assert_eq!(
++            runs,
++            vec![
++                (0, 0x1000, PROT_R),
++                (0x1000, 0x5B000, PROT_R | PROT_X),
++                (0x5C000, 0x22000, PROT_R),
++                (0x7E000, 0x1000, PROT_R | PROT_W),
++                (0x7F000, 0x6000, PROT_R),
++            ]
++        );
++    }
++
++    /// On the PS5 (16 KiB pages) .rdata's last 8 KiB and .data share a host page: protected one
++    /// section after the other, .data ended up read-only and the title's first write to its
++    /// stdout state there (+0x7E068) faulted.
++    #[test]
++    fn with_16k_host_pages_a_shared_page_gets_the_union() {
++        let runs = protection_runs(&TITLE, 0x4000);
++        assert_eq!(flags_at(&runs, 0x7E068), Some(PROT_R | PROT_W), "{runs:x?}");
++        assert_eq!(flags_at(&runs, 0x7C000), Some(PROT_R | PROT_W), "{runs:x?}");
++        // the headers share their host page with the start of .text, which must stay executable
++        assert_eq!(flags_at(&runs, 0x1000), Some(PROT_R | PROT_X), "{runs:x?}");
++        assert_eq!(flags_at(&runs, 0x0), Some(PROT_R | PROT_X), "{runs:x?}");
++        // a host page of one section only keeps that section's protection
++        assert_eq!(flags_at(&runs, 0x60000), Some(PROT_R), "{runs:x?}");
++        assert_eq!(flags_at(&runs, 0x20000), Some(PROT_R | PROT_X), "{runs:x?}");
++        // runs are in order and do not overlap
++        assert!(runs.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0), "{runs:x?}");
++    }
++
++    /// A page of no section is not touched, also inside a shared host page.
++    #[test]
++    fn pages_of_no_section_are_left_out() {
++        let regions = [(0, 0x1000, PROT_R), (0x2000, 0x1000, PROT_R | PROT_W)];
++        assert_eq!(protection_runs(&regions, 0x1000), vec![(0, 0x1000, PROT_R), (0x2000, 0x1000, PROT_R | PROT_W)]);
++        assert_eq!(protection_runs(&regions, 0x4000), vec![(0, 0x1000, PROT_R | PROT_W), (0x2000, 0x1000, PROT_R | PROT_W)]);
++    }
++
+     /// A PE32+ DLL of one section (.text at RVA 0x1000) holding `code`, its entry point at the
+     /// start of it, preferred at `image_base` and relocatable (one empty block at RVA 0x1100);
+     /// `import_dir`: (RVA, size) of the import directory, if any.

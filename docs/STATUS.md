@@ -1,0 +1,68 @@
+# Status (2026-11-25)
+
+Hardware: Windows 11, NVIDIA GeForce RTX 3060 Laptop GPU (+ Intel UHD), Rust 1.100; PS5 with
+prospero-win v0.3.0.
+
+## Windows
+
+`cargo test --workspace --no-fail-fast -- --test-threads=4` in `xcl/` with the patches:
+
+| Backend | Passed | Failed | Ignored | Failures |
+|---|---|---|---|---|
+| Windows D3D12 | 978 | 1 | 45 | `execute_indirect_reads_the_arguments_written_before_it` (also fails on upstream `main` on this GPU) |
+| vkd3d-proton 3.1 (patched, `b_ndebug`) + DXVK 3.1.1 | 975 | 2 | 45 | `gpu_depth_buffer_created_for_unordered_access_is_placed`, `set_predication_buffer_state_and_kickoff` |
+
+23 GPU tests report `SKIPPED` on this GPU (no wave64). The vkd3d-proton row was measured before
+the PE-loader patch; the e2e test title passes on both backends.
+
+What it took to get XCL onto vkd3d-proton:
+
+- **Asserts.** vkd3d-proton's release builds keep asserts; its `impl_from_*()` helpers assert on the
+  vtable pointer, which XCL replaces with an extended copy. Built with `-Db_ndebug=true`.
+- **Object identity** (`patches/vkd3d-proton`). Command allocators, bundles and command lists are
+  recognised by their vtable pointer even without asserts (`E_INVALIDARG` from
+  CreateCommandList, a crash in ExecuteCommandLists). `VKD3D_VTBL_IS()` also accepts a vtable
+  whose element [-1] is vkd3d's – where XCL keeps the original.
+- **Swap chain.** Windows' `dxgi.dll` cannot make one for a vkd3d-proton queue (`E_NOTIMPL`):
+  DXVK's `dxgi.dll` / `d3d11.dll` go next to `xcl.exe`.
+- **Media Foundation** (`patches/xcl`). XCL's companion D3D11 device for MFResetDXGIDeviceManagerX
+  made Windows' `d3d11.dll` dereference null on DXVK's adapter; skipped on vkd3d-proton (Windows'
+  Media Foundation takes the D3D12 device directly there).
+- **dxil-spirv** (`patches/dxil-spirv`), found with XCL's direct DXIL emitter and recompiler:
+  - the `dx.op.udiv` helpers were typed by the {quotient, remainder} pair (invalid SPIR-V,
+    NVIDIA's driver crashed compiling it);
+  - the structured stride was read positionally from the resource tags, so a ByteAddressBuffer
+    with 64-bit atomics (tags `{3, 1}`) got stride 1 and loads with an undef offset – a GPU hang
+    and wrong atomic results;
+  - `UAddc` / `USubb` swapped value and carry and used an invalid result type.
+
+Left as they are:
+
+- `gpu_depth_buffer_…`: vkd3d-proton does not refuse UNORDERED_ACCESS as an initial state without
+  `ALLOW_UNORDERED_ACCESS`; the test checks that Windows does. XCL's own mapping works.
+- Predication: vkd3d-proton implements it with VK_EXT_conditional_rendering, which does not cover
+  copies; D3D12 predicates `CopyBufferRegion` too.
+
+## PS5 (prospero-win)
+
+1. Wine could not create the `default` prefix (`run_wineboot failed … c00000bb`, then
+   `could not load kernel32.dll`): process creation is off on the console. A prefix made by Wine
+   on a PC went to `/data/prospero-win/prefix`.
+2. XCL started in one process (`xcl run --in-process`) and passed the test title's first checks:
+   argv, static TLS (main and new threads), C++ exceptions through the `RtlPcToFileHeader` hook,
+   kernelx, XMemVirtualAlloc in unified memory. vkd3d-proton made a device on
+   `PS5 (radv 26.2.0)` (SM 6.8, DXR 1.1, descriptor buffer). Then the title faulted writing its
+   own `.data`.
+3. Cause: the console has 16 KiB pages. The loader protected `.rdata` and `.data` at 4 KiB
+   granularity; both share a host page, the last VirtualProtect (`.rdata`, read-only) won. Found
+   from Wine's `+virtual` views and the faulting instruction (the fault address is the 16 KiB
+   host page). Fixed in `patches/xcl/0003`; not yet run on the console.
+
+Open on the PS5:
+
+- vkd3d-proton refuses feature level 12_0 there (`Feature level 0xc000 is not supported`); XCL then
+  takes its WARP path, which DXVK maps to the console GPU, and labels the adapter "WARP".
+- vkd3d-proton disables mesh shaders (no fragment-shader barycentrics, its UE5 workaround); XCL
+  needs them for NGG programs. vkd3d-proton has a per-executable opt-in list.
+- RADV's `maxBufferSize` is 4 GiB − 4; XCL's three sparse windows are 4 GiB buffers (vkd3d-proton
+  warns and creates them).
