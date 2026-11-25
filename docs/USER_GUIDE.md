@@ -82,6 +82,7 @@ You can add any folder on your PS5 right from the controller:
 | **R1** | Edit game `xcl.toml` settings | — | — |
 | **OPTIONS** | Switch offline profile & UI language (EN/PL/PT/ES) | — | — |
 | **L1** | Open Phone/PC Web Companion & QR | — | — |
+| **Touchpad click** (or **L3+R3**) | Open/close **TrinityXSX Quick Menu** (works in-game too: Resume, Return to Library, On-Screen Keyboard, Exit to PS5 Home) | Open/close Quick Menu | Open/close Quick Menu |
 | **Triangle (Δ)** | Rescan all folders | Remove folder from list | Use current folder |
 | **Circle (O)** | Exit to PS5 Home | Back to library | Go up one level |
 
