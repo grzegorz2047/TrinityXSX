@@ -70,6 +70,14 @@ Left as they are:
    `hello.txt`, the whiteout of `delete_me.txt`) and fails two file checks; the overlay
    (`…/XCL/XCL.TestTitle/overlay`) has to be emptied between runs: `tools/ftp_rm_tree.py`.
 
+6. Presentation on the console screen (captured with the PS5's own recorder): with the test
+   title's `--present-seconds 10` (patch 0005) the frames fill the whole screen – prospero-win shows
+   the Vulkan swap chain full screen – and change colour every half second as the title clears
+   them: **602 frames in 10.0 s (60 per second)**, 50 checks passed, 1 failed (cloaking). The title's
+   own, uncloaked window shows for about half a second before the first frame, nothing more. With a
+   single frame (no `--present-seconds`) the program ended before the frame could be seen, which
+   looked like a black XCL window.
+
 `tools/vkcaps` on the console (`PS5`, Vulkan 1.4.354, RADV): sparse binding and residency for
 buffers and 2D / 3D images are there, but `shaderResourceResidency` and
 `residencyNonResidentStrict` are 0, so vkd3d-proton stops at tiled resources tier 1 and feature
