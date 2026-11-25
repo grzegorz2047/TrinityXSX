@@ -81,7 +81,8 @@ Open on the PS5:
 
 - Feature level 12_0 is out of reach while RADV on the console lacks `shaderResourceResidency` and
   `residencyNonResidentStrict` (tiled resources tier 1); XCL runs at 11_0 there.
-- vkd3d-proton disables mesh shaders (no fragment-shader barycentrics, its UE5 workaround); XCL
-  needs them for NGG programs. vkd3d-proton has a per-executable opt-in list.
+- vkd3d-proton disables mesh shaders without fragment-shader barycentrics (its UE5 workaround);
+  XCL needs them for NGG programs and does not use SV_Barycentrics. `patches/vkd3d-proton/0002`
+  opts `xcl.exe` in (vkd3d logs "Detected game xcl.exe"); not yet run on the console.
 - RADV's `maxBufferSize` is 4 GiB − 4; XCL's three sparse windows are 4 GiB buffers (vkd3d-proton
   warns and creates them).

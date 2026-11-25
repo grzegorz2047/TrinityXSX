@@ -21,7 +21,7 @@ Status: [docs/STATUS.md](docs/STATUS.md).
 |---|---|
 | `pins.env` | upstream revisions the patches apply to; DXVK / DXC versions and checksums |
 | `patches/xcl/` | XCL: `xcl run --in-process` (one process, as Wine on the PS5 needs), no D3D11 bridge for Media Foundation on vkd3d-proton, PE section protections on 16 KiB host pages, a GPU without feature level 12_0 used at 11_0 before WARP |
-| `patches/vkd3d-proton/` | vkd3d-proton 3.1: accept D3D12 objects whose vtable XCL extended (`VKD3D_VTBL_IS`) |
+| `patches/vkd3d-proton/` | vkd3d-proton 3.1: accept D3D12 objects whose vtable XCL extended (`VKD3D_VTBL_IS`); mesh shaders without barycentrics for `xcl.exe` |
 | `patches/dxil-spirv/` | dxil-spirv: `dx.op.udiv` helper types, structured stride read from the resource tags by tag, `UAddc` / `USubb` |
 | `tools/setup-sources.sh` | fetch XCL and vkd3d-proton at the pinned revisions and apply the patches |
 | `tools/fetch-deps.sh` | download DXVK and DXC releases (checksums verified) |
