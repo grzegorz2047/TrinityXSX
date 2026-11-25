@@ -68,7 +68,7 @@ Left as they are:
    feature level 11_0") instead of WARP, and the GPU checks still pass. The test title is not
    repeatable on one data folder: a second run sees the first run's overlay (its appended
    `hello.txt`, the whiteout of `delete_me.txt`) and fails two file checks; the overlay
-   (`…/XCL/XCL.TestTitle/overlay`) has to be emptied between runs.
+   (`…/XCL/XCL.TestTitle/overlay`) has to be emptied between runs: `tools/ftp_rm_tree.py`.
 
 `tools/vkcaps` on the console (`PS5`, Vulkan 1.4.354, RADV): sparse binding and residency for
 buffers and 2D / 3D images are there, but `shaderResourceResidency` and
@@ -83,6 +83,7 @@ Open on the PS5:
   `residencyNonResidentStrict` (tiled resources tier 1); XCL runs at 11_0 there.
 - vkd3d-proton disables mesh shaders without fragment-shader barycentrics (its UE5 workaround);
   XCL needs them for NGG programs and does not use SV_Barycentrics. `patches/vkd3d-proton/0002`
-  opts `xcl.exe` in (vkd3d logs "Detected game xcl.exe"); not yet run on the console.
+  opts `xcl.exe` in: on the console vkd3d logs "Detected game xcl.exe", XCL's "no mesh shaders"
+  warning is gone, and the test title passes 49 of 50 (the cloaking check fails, as before).
 - RADV's `maxBufferSize` is 4 GiB − 4; XCL's three sparse windows are 4 GiB buffers (vkd3d-proton
   warns and creates them).
