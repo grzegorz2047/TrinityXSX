@@ -69,6 +69,9 @@ pub struct RaceAudio {
     sfx_voices: Vec<*mut c_void>,
     next_sfx: usize,
     clips: [Vec<u8>; 6],
+    last_ratio: f32,
+    last_vol: f32,
+    last_mvol: f32,
 }
 
 impl RaceAudio {
@@ -166,11 +169,14 @@ impl RaceAudio {
                 sfx_voices,
                 next_sfx: 0,
                 clips,
+                last_ratio: -1.0,
+                last_vol: -1.0,
+                last_mvol: -1.0,
             })
         }
     }
 
-    pub fn set_turbine(&self, speed_ratio: f32, boosting: bool, active: bool) {
+    pub fn set_turbine(&mut self, speed_ratio: f32, boosting: bool, active: bool) {
         unsafe {
             let ratio = (0.62 + speed_ratio.clamp(0.0, 1.4) * 1.15 + if boosting { 0.25 } else { 0.0 }).clamp(0.5, 2.4);
             let vol = if active {
@@ -178,10 +184,19 @@ impl RaceAudio {
             } else {
                 0.03
             };
-            let _ = vslot::<SetFreqRatioFn>(self.turbine_voice, 26)(self.turbine_voice, ratio, 0);
-            let _ = vslot::<SetVolumeFn>(self.turbine_voice, 12)(self.turbine_voice, vol, 0);
             let mvol = if active { 0.16 } else { 0.11 };
-            let _ = vslot::<SetVolumeFn>(self.music_voice, 12)(self.music_voice, mvol, 0);
+            if (ratio - self.last_ratio).abs() > 0.005 {
+                let _ = vslot::<SetFreqRatioFn>(self.turbine_voice, 26)(self.turbine_voice, ratio, 0);
+                self.last_ratio = ratio;
+            }
+            if (vol - self.last_vol).abs() > 0.005 {
+                let _ = vslot::<SetVolumeFn>(self.turbine_voice, 12)(self.turbine_voice, vol, 0);
+                self.last_vol = vol;
+            }
+            if (mvol - self.last_mvol).abs() > 0.005 {
+                let _ = vslot::<SetVolumeFn>(self.music_voice, 12)(self.music_voice, mvol, 0);
+                self.last_mvol = mvol;
+            }
         }
     }
 

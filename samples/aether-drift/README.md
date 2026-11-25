@@ -1,36 +1,35 @@
-# AETHER DRIFT
+# AETHER DRIFT v2.0 (Xbox Series X|S / Scarlett — TrinityXSX on PS5)
 
-An original, MIT-licensed, open-source **3D 1080p 60 FPS anti-gravity racing game** built in pure Rust + **D3D12.X** for **Xbox Series X|S (Scarlett)** running natively on **PlayStation 5 via TrinityXSX**.
+An original, MIT-licensed, open-source **1080p 60 FPS 3D anti-gravity racing game** built natively in Rust + **D3D12.X** (`d3d12_xs.dll` `PresentX`), **XGameRuntime** (`XUser` + `PLS` saves/ghosts), **XInput** (DualSense analog triggers & rumble), and **XAudio2** (continuous pitch-shifted turbine + 128 BPM synthwave soundtrack).
 
-Zero proprietary SDKs, zero DRM — compiles cleanly with standard Rust (`cargo build --release`) and exercises true 3D D3D12.X depth rendering, PBR-inspired wet reflections, DualSense analog triggers + airbrakes + haptics, continuous pitch-shifted XAudio2 turbine synthesis, and Persistent Local Storage ghost replays.
+## Highlights (v2.0)
+- **Sculpted Blender 5.2 LTS 3D Models** (`tools/gen_blender_assets.py`): smooth beveled 2,420-tri Twin-Pod Interceptor (`hero_craft.bin`), 1,344-tri Rival Craft (`rival_craft.bin`), and multi-tier cyberpunk skyscraper spires (`skyscraper_spire.bin`).
+- **Hardware PBR Textures** (`tools/gen_textures.py`): wet brushed-titanium track deck with expansion joints, organic rain-puddle reflection & micro-normal map, glowing cyberpunk billboards (`NEO-KYOTO`, `VORTEX ENERGY`, `CHRONOS TECN`, `AETHER-1` + animated turn chevrons), and illuminated skyscraper window facades.
+- **Real-Time GPU Volumetric Storm Clouds & Megacity Mist** (`shaders/aether_v2.hlsl`): 22-step GPU 3D raymarched storm thunderheads (5-octave FBM, Beer-Lambert self-shadowing, Henyey-Greenstein twilight scattering) + analytical volumetric height fog + 6 layered drifting megacity mist sheets weaving between skyscrapers.
+- **True Stencil-Masked Wet-Track Mirror Reflections**: hardware `D24_UNORM_S8_UINT` stencil pass mirrors all 8 hovercrafts, plasma thruster cones, neon rail bars, and billboards across the banked curves inside rain puddles.
+- **Offscreen HDR Bloom & ACES Tone Mapping**: `R16G16B16A16_FLOAT` HDR scene target -> quarter-res bright-pass + separable Gaussian blur -> ACES filmic composite with subtle hyperspeed chromatic aberration.
+- **3 Banked Spline Circuits & 2 Modes**: *Neo-Kyoto Skyway*, *Orbital Ring*, *Canyon Storm*; 8-racer **Grand Prix** + solo **Time Trial** with saved translucent cyan **Ghost** replays in Xbox `PLS` (`S:\`).
 
-## Highlights
-- **Full 3D D3D12.X Engine (`1920×1080 60 FPS`, `D32_FLOAT` Depth Buffer)**:
-  - Wet reflective metallic track surface, glowing neon guardrails, chevron boost pads, overhead neon arches, and a procedural cyberpunk megacity skyline rising from twilight mist.
-  - Additive 3D glow pass for sculpted hovercraft plasma thrusters, tapering 3D ribbon trails, wall-scrape sparks, and hyperspeed motion streaks.
-- **3 Distinct 3D Banked Circuits**:
-  1. **NEON SKYWAY** — fast twilight megacity circuit with sweeping banked turns.
-  2. **ORBITAL RING** — high-altitude rollercoaster with dramatic climbs and corkscrew banking.
-  3. **CANYON STORM** — twin hyper-straights and sharp 90° hairpins demanding `L1`/`R1` airbrakes.
-- **Grand Prix (8 Racers) & Time Trial with Saved Ghosts (`pls/`)**:
-  - Race 7 competitive AI hovercrafts or set records in Time Trial — your best run is saved to `pls/ghost_<track>.txt` and replayed as a translucent holographic cyan ghost ship!
-- **DualSense-First Controls & Continuous XAudio2 Audio**:
-  - Analog throttle (`R2`), WipEout-style left/right airbrakes (`L1`/`R1`), Turbo Boost (`Square`/`Triangle`) with dynamic FOV surge (`62° → 82°`), directional wall-scrape & boost rumble, plus a continuous pitch-shifted turbine hum and 128 BPM synthwave soundtrack.
+## DualSense Controls
+- `R2` / `Cross (X)` — Analog throttle
+- `Left Stick` — Steer & bank craft
+- `L1` / `R1` — Left / right airbrake (tight hairpin carving)
+- `Square` / `Triangle` — Turbo Boost (recharge via track boost chevrons)
+- `L2` — Hard brake
+- `Options` — Return to track select
+- `Touchpad` — TrinityXSX Quick Menu
 
-## Controls
-| DualSense | Action |
-| --- | --- |
-| **R2** or **Cross (X)** | Analog throttle (Cross also starts/restarts race) |
-| **Left Stick / D-pad** | Steer & bank craft (or select track in menu) |
-| **L1 / R1** | Left / Right Airbrake (sharp corner carving) |
-| **Square (□) / Triangle (Δ)** | Turbo Boost (or switch Grand Prix / Time Trial in menu) |
-| **L2** | Hard brake |
-| **OPTIONS** | Return to Track Select |
-| **Touchpad click** | Open TrinityXSX Quick Menu (live FPS/VRAM, Diagnostic Dump, Return to Library) |
-
-## Building from source
-```powershell
-cd samples/aether-drift
-cargo build --release
-```
-Copy `target/release/aether_drift.exe`, `assets/MicrosoftGame.config`, and `assets/Cover.png` into `/mnt/ext1/xboxseries/aether-drift/` on your PS5.
+## Building from Source
+1. *(Optional)* Regenerate meshes in Blender 5.2+:
+   ```bash
+   blender --background --python tools/gen_blender_assets.py
+   ```
+2. *(Optional)* Regenerate PBR textures (using Python + NumPy):
+   ```bash
+   python tools/gen_textures.py
+   ```
+3. Build the Scarlett executable:
+   ```bash
+   cargo build --release
+   ```
+Requires TrinityXSX with XCL patch `0022` (PC-pipeline root CBV & SRV descriptor-table replay).

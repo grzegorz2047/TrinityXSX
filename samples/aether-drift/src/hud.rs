@@ -47,6 +47,20 @@ impl HudBatch {
         self.tri(a, c, d, col);
     }
 
+    /// Translucent dark-glass HUD panel with crisp glowing cyan border outline (concept art style).
+    pub fn glass_panel(&mut self, x: f32, y: f32, w: f32, h: f32, skew: f32, bg: [f32; 4], border: [f32; 4]) {
+        let a = [x + skew, y];
+        let b = [x + w + skew, y];
+        let c = [x + w, y + h];
+        let d = [x, y + h];
+        self.tri(a, b, c, bg);
+        self.tri(a, c, d, bg);
+        self.line(a[0], a[1], b[0], b[1], 2.5, border);
+        self.line(b[0], b[1], c[0], c[1], 2.5, border);
+        self.line(c[0], c[1], d[0], d[1], 2.5, border);
+        self.line(d[0], d[1], a[0], a[1], 2.5, border);
+    }
+
     pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, thick: f32, col: [f32; 4]) {
         let dx = x2 - x1;
         let dy = y2 - y1;

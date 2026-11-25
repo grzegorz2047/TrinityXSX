@@ -2,6 +2,7 @@
 //! AETHER DRIFT — Open-source 3D 1080p 60 FPS anti-gravity racer for Xbox Series X|S (Scarlett)
 //! running natively on PS5 via TrinityXSX.
 
+mod assets;
 mod audio;
 mod hud;
 mod math;
@@ -13,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use assets::{emit_mesh_reflected, emit_mesh_world, GameAssets};
 use audio::{RaceAudio, Sfx};
 use hud::{fmt_time, HudBatch};
 use math::{Mat4, Vec3};
@@ -21,7 +23,7 @@ use scarlett::{
     BTN_DOWN, BTN_L1, BTN_LEFT, BTN_R1, BTN_RIGHT, BTN_SQUARE, BTN_START, BTN_TRIANGLE, BTN_UP,
     SCREEN_H, SCREEN_W,
 };
-use track::{Circuit, Sample, TRACKS, TRACK_COUNT, TRACK_HALF_WIDTH};
+use track::{Circuit, TRACKS, TRACK_COUNT, TRACK_HALF_WIDTH};
 
 const TOTAL_LAPS: u32 = 3;
 const TOTAL_RACERS: usize = 8;
@@ -136,6 +138,7 @@ impl TrackRecords {
 }
 
 struct App {
+    assets: GameAssets,
     phase: Phase,
     mode: RaceMode,
     track_idx: usize,
@@ -164,12 +167,14 @@ struct App {
 
 impl App {
     fn new(renderer: &mut Renderer, id: &ConsoleIdentity) -> Result<Self, String> {
-        let circuit = Circuit::build(0);
-        renderer.upload_static_world(&circuit.static_verts)?;
+        let assets = GameAssets::load_meshes();
+        let circuit = Circuit::build(0, &assets.skyscraper);
+        renderer.upload_static_world(&circuit.static_world)?;
         let records = TrackRecords::load(id.pls_dir.as_deref());
         records.save(id.pls_dir.as_deref(), &id.gamertag);
 
         let mut app = Self {
+            assets,
             phase: Phase::Menu,
             mode: RaceMode::GrandPrix,
             track_idx: 0,
@@ -196,6 +201,34 @@ impl App {
             rng: 0xAE74_0001_2026_1125,
         };
         app.spawn_grid();
+
+            // Optional PC screenshot demo mode (AETHER_AUTO_DEMO=1) jumps right into banked-curve action!
+        if std::env::var_os("AETHER_AUTO_DEMO").is_some() {
+            app.phase = Phase::Racing;
+            app.race_time = 74.32;
+            app.lap_start_time = 74.0;
+            let base_s = app.circuit.total_len * 0.145;
+            for (i, r) in app.racers.iter_mut().enumerate() {
+                r.lap = 2;
+                r.speed = if r.is_player { 234.0 } else { 230.0 };
+                r.boost_timer = if r.is_player { 2.5 } else { 0.0 };
+                r.s = match i {
+                    0 => base_s,
+                    1 => base_s + 26.0,
+                    2 => base_s + 52.0,
+                    3 => base_s + 78.0,
+                    _ => base_s - 22.0 * (i as f32),
+                };
+                r.lateral = match i {
+                    0 => 3.5,
+                    1 => -1.5,
+                    2 => 5.2,
+                    3 => -4.8,
+                    _ => ((i as f32) - 4.0) * 2.5,
+                };
+                r.roll = -0.22;
+            }
+        }
         Ok(app)
     }
 
@@ -206,8 +239,8 @@ impl App {
 
     fn load_track(&mut self, idx: usize, renderer: &mut Renderer) -> Result<(), String> {
         self.track_idx = idx % TRACK_COUNT;
-        self.circuit = Circuit::build(self.track_idx);
-        renderer.upload_static_world(&self.circuit.static_verts)?;
+        self.circuit = Circuit::build(self.track_idx, &self.assets.skyscraper);
+        renderer.upload_static_world(&self.circuit.static_world)?;
         self.spawn_grid();
         Ok(())
     }
@@ -219,9 +252,9 @@ impl App {
         self.ghost_sample_acc = 0.0;
 
         let palettes: [([f32; 4], [f32; 4]); TOTAL_RACERS] = [
-            ([0.86, 0.94, 0.98, 1.0], [0.16, 0.96, 1.00, 1.0]), // Player: Pearl White + Cyan
-            ([0.96, 0.44, 0.12, 1.0], [1.00, 0.62, 0.16, 1.0]), // Rival 1: Solar Orange
-            ([0.90, 0.18, 0.56, 1.0], [1.00, 0.30, 0.78, 1.0]), // Rival 2: Cyber Magenta
+            ([0.42, 0.68, 0.78, 1.0], [0.16, 0.96, 1.00, 1.0]), // Player: Metallic Titanium-Cyan + Neon Cyan
+            ([0.82, 0.36, 0.10, 1.0], [1.00, 0.62, 0.16, 1.0]), // Rival 1: Solar Orange
+            ([0.78, 0.16, 0.48, 1.0], [1.00, 0.30, 0.78, 1.0]), // Rival 2: Cyber Magenta
             ([0.36, 0.92, 0.46, 1.0], [0.44, 1.00, 0.65, 1.0]), // Rival 3: Neon Mint
             ([0.56, 0.34, 0.96, 1.0], [0.74, 0.48, 1.00, 1.0]), // Rival 4: Ultraviolet
             ([0.96, 0.80, 0.18, 1.0], [1.00, 0.92, 0.35, 1.0]), // Rival 5: Chrome Gold
@@ -334,7 +367,7 @@ impl App {
                 self.cam_target = ahead.pos.add(ahead.up.mul(3.0));
                 self.cam_up = Vec3::UP;
                 self.cam_fov = 66.0f32.to_radians();
-                if let Some(a) = audio.as_ref() { a.set_turbine(0.15, false, false); }
+                if let Some(a) = audio.as_mut() { a.set_turbine(0.15, false, false); }
                 pad.update_rumble(0.0, 0.0);
                 return;
             }
@@ -618,36 +651,40 @@ impl App {
             }
         }
 
-        // Dynamic Chase Camera with banking follow + boost FOV surge!
+        // Dynamic Chase Camera locked tightly behind the sculpted hero craft (zero longitudinal lag at 900 km/h!)
         let p = &self.racers[0];
         let sm = self.circuit.sample_at(p.s);
-        let ahead = self.circuit.sample_at(p.s + 30.0);
-        let hover_bob = (self.time * 5.2 + p.ai_skill * 7.0).sin() * 0.22;
-        let ship_pos = sm.pos.add(sm.right.mul(p.lateral)).add(sm.up.mul(2.05 + hover_bob));
+        let ahead = self.circuit.sample_at(p.s + 38.0);
+        let hover_bob = (self.time * 5.2 + p.ai_skill * 7.0).sin() * 0.16;
+        let ship_pos = sm.pos.add(sm.right.mul(p.lateral)).add(sm.up.mul(1.85 + hover_bob));
 
         let speed_ratio = (p.speed / 230.0).clamp(0.0, 1.35);
-        let back_dist = 13.5 + speed_ratio * 2.8 + if p.boost_timer > 0.0 { 2.4 } else { 0.0 };
-        let up_dist = 4.6 + speed_ratio * 0.6;
+        let back_dist = 10.6 + speed_ratio * 1.4 + if p.boost_timer > 0.0 { 1.3 } else { 0.0 };
+        let up_dist = 3.75 + speed_ratio * 0.35;
         let shake_v = if self.cam_shake > 0.01 {
-            sm.right.mul((self.time * 67.0).sin() * self.cam_shake * 0.6)
-                .add(sm.up.mul((self.time * 53.0).cos() * self.cam_shake * 0.45))
+            sm.right.mul((self.time * 67.0).sin() * self.cam_shake * 0.45)
+                .add(sm.up.mul((self.time * 53.0).cos() * self.cam_shake * 0.35))
         } else {
             Vec3::ZERO
         };
 
-        let desired_pos = ship_pos.sub(sm.forward.mul(back_dist)).add(sm.up.mul(up_dist)).add(shake_v);
-        let desired_tgt = ahead.pos.add(ahead.right.mul(p.lateral * 0.65)).add(ahead.up.mul(2.4));
-        let desired_up = sm.up.lerp(Vec3::UP, 0.35).norm();
-        let target_fov = (62.0 + speed_ratio * 11.0 + if p.boost_timer > 0.0 { 9.0 } else { 0.0 }).to_radians();
+        let desired_pos = ship_pos
+            .sub(sm.forward.mul(back_dist))
+            .add(sm.up.mul(up_dist))
+            .add(sm.right.mul(-p.roll * 2.2))
+            .add(shake_v);
+        let desired_tgt = ahead.pos.add(ahead.right.mul(p.lateral * 0.55)).add(ahead.up.mul(2.1));
+        let desired_up = sm.up.lerp(Vec3::UP, 0.30).norm();
+        let target_fov = (64.0 + speed_ratio * 10.0 + if p.boost_timer > 0.0 { 7.0 } else { 0.0 }).to_radians();
 
-        let smooth = (dt * 11.0).min(1.0);
-        self.cam_pos = self.cam_pos.lerp(desired_pos, smooth);
-        self.cam_target = self.cam_target.lerp(desired_tgt, (dt * 14.0).min(1.0));
-        self.cam_up = self.cam_up.lerp(desired_up, (dt * 7.0).min(1.0)).norm();
+        // Keep exact longitudinal distance behind ship so hero craft always fills foreground like concept art!
+        self.cam_pos = desired_pos;
+        self.cam_target = self.cam_target.lerp(desired_tgt, (dt * 18.0).min(1.0));
+        self.cam_up = self.cam_up.lerp(desired_up, (dt * 8.0).min(1.0)).norm();
         self.cam_fov += (target_fov - self.cam_fov) * (dt * 6.0).min(1.0);
 
         // Live XAudio2 turbine pitch + subtle continuous high-speed rumble
-        if let Some(a) = audio.as_ref() {
+        if let Some(a) = audio.as_mut() {
             a.set_turbine(speed_ratio, p.boost_timer > 0.0, racing);
         }
         let cont_low = if racing && p.boost_timer > 0.0 { 0.45 } else { 0.0 };
@@ -655,38 +692,102 @@ impl App {
         pad.update_rumble(cont_low, cont_high);
     }
 
-    fn build_dynamic_scene(&self, dyn3d: &mut Vec<Vertex3D>, fx3d: &mut Vec<Vertex3D>) {
-        dyn3d.clear();
+    fn build_dynamic_scene(
+        &self,
+        craft3d: &mut Vec<Vertex3D>,
+        dyn_refl3d: &mut Vec<Vertex3D>,
+        fx3d: &mut Vec<Vertex3D>,
+    ) {
+        craft3d.clear();
+        dyn_refl3d.clear();
         fx3d.clear();
 
-        // 1. Draw all 8 sculpted 3D Anti-Gravity Hovercrafts
+        // 1. Draw all 8 Sculpted Blender 5.2 Anti-Gravity Hovercrafts + TRUE Wet-Track Mirror Reflections!
         for r in &self.racers {
             let sm = self.circuit.sample_at(r.s);
-            let bob = (self.time * 5.2 + r.ai_skill * 7.0).sin() * 0.22;
-            let pos = sm.pos.add(sm.right.mul(r.lateral)).add(sm.up.mul(2.05 + bob));
-            emit_hovercraft(dyn3d, Some(fx3d), pos, sm, r.roll, r.pitch, r.body_col, r.glow_col, r.boost_timer > 0.0, false);
+            let bob = (self.time * 5.2 + r.ai_skill * 7.0).sin() * 0.16;
+            let pos = sm.pos.add(sm.right.mul(r.lateral)).add(sm.up.mul(1.85 + bob));
+            let plane_origin = sm.pos.add(sm.right.mul(r.lateral));
+            let mesh = if r.is_player {
+                &self.assets.hero_craft
+            } else {
+                &self.assets.rival_craft
+            };
+
+            let (sr, cr) = r.roll.sin_cos();
+            let right = sm.right.mul(cr).add(sm.up.mul(sr)).norm();
+            let up0 = sm.forward.cross(right).norm();
+            let (sp, cp) = r.pitch.sin_cos();
+            let fwd = sm.forward.mul(cp).add(up0.mul(sp)).norm();
+            let up = fwd.cross(right).norm();
+
+            emit_mesh_world(
+                mesh,
+                craft3d,
+                pos,
+                right,
+                up,
+                fwd,
+                Vec3::new(1.05, 1.05, 1.05),
+                r.body_col,
+                r.glow_col,
+                None,
+            );
+            // Real 3D mirrored reflection of this hovercraft on the wet track surface!
+            emit_mesh_reflected(
+                mesh,
+                dyn_refl3d,
+                pos,
+                right,
+                up,
+                fwd,
+                Vec3::new(1.05, 1.05, 1.05),
+                plane_origin,
+                sm.up,
+                r.body_col,
+                r.glow_col,
+            );
+
+            // Multi-layered volumetric blazing plasma exhaust plumes (+ mirrored plumes on wet track!)
+            emit_thruster_plumes(
+                fx3d,
+                Some(dyn_refl3d),
+                pos,
+                right,
+                up,
+                fwd,
+                plane_origin,
+                sm.up,
+                r.is_player,
+                r.glow_col,
+                r.boost_timer > 0.0,
+                (r.speed / 230.0).clamp(0.25, 1.4),
+            );
             emit_trail(fx3d, &r.trail, r.glow_col, r.boost_timer > 0.0);
         }
 
-        // 2. Time Trial Ghost Ship (translucent cyan hologram!)
+        // 2. Time Trial Ghost Ship (translucent cyan hologram Blender craft!)
         if self.mode == RaceMode::TimeTrial && self.phase == Phase::Racing {
             let ghost = &self.records.ghosts[self.track_idx];
             if !ghost.is_empty() {
                 let idx = ((self.race_time * 10.0) as usize).min(ghost.len() - 1);
                 let gf = ghost[idx];
                 let sm = self.circuit.sample_at(gf.s);
-                let pos = sm.pos.add(sm.right.mul(gf.lat)).add(sm.up.mul(2.15));
-                emit_hovercraft(
+                let pos = sm.pos.add(sm.right.mul(gf.lat)).add(sm.up.mul(2.0));
+                let (sr, cr) = gf.roll.sin_cos();
+                let right = sm.right.mul(cr).add(sm.up.mul(sr)).norm();
+                let up = sm.forward.cross(right).norm();
+                emit_mesh_world(
+                    &self.assets.hero_craft,
                     fx3d,
-                    None,
                     pos,
-                    sm,
-                    gf.roll,
-                    0.0,
-                    [0.25, 0.95, 1.0, 0.35],
-                    [0.35, 1.0, 1.0, 0.5],
-                    false,
-                    true,
+                    right,
+                    up,
+                    sm.forward,
+                    Vec3::new(1.05, 1.05, 1.05),
+                    [0.22, 0.95, 1.0, 0.35],
+                    [0.35, 1.0, 1.0, 0.55],
+                    Some(0.32),
                 );
             }
         }
@@ -699,45 +800,48 @@ impl App {
             let c = sp.pos.sub(sp.vel.mul(0.035));
             let col = [sp.col[0], sp.col[1], sp.col[2], sp.life.clamp(0.0, 1.0)];
             fx3d.extend_from_slice(&[
-                Vertex3D { pos: a.to_arr(), normal: [0.0, 1.0, 0.0], col, mat: [0.0, 2.0] },
-                Vertex3D { pos: b.to_arr(), normal: [0.0, 1.0, 0.0], col, mat: [0.0, 2.0] },
-                Vertex3D { pos: c.to_arr(), normal: [0.0, 1.0, 0.0], col, mat: [0.0, 2.0] },
+                Vertex3D { pos: a.to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col, mat: [0.0, 2.4] },
+                Vertex3D { pos: b.to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col, mat: [0.0, 2.4] },
+                Vertex3D { pos: c.to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col, mat: [0.0, 2.4] },
             ]);
         }
 
-        // 4. Hyperspeed rain / speed-tunnel motion streaks around camera
+        // 4. Diagonal storm rain + hyperspeed motion streaks around camera (concept art rain!)
         let speed_f = if self.phase == Phase::Racing {
-            (self.racers[0].speed / 240.0).clamp(0.15, 1.35)
+            (self.racers[0].speed / 230.0).clamp(0.25, 1.4)
         } else {
             0.35
         };
         let fwd = self.cam_target.sub(self.cam_pos).norm();
         let right = self.cam_up.cross(fwd).norm();
         let up = fwd.cross(right).norm();
-        let streak_count = if self.racers[0].boost_timer > 0.0 { 72 } else { 44 };
+        let streak_count = if self.racers[0].boost_timer > 0.0 { 96 } else { 64 };
         for i in 0..streak_count {
             let fi = i as f32;
             let ang = fi * 2.39996;
-            let rad = 9.0 + ((fi * 7.13).sin() * 0.5 + 0.5) * 26.0;
-            let z_off = ((fi * 19.7 + self.time * (95.0 * speed_f)) % 90.0) + 6.0;
-            let z_pos = 96.0 - z_off;
+            let rad = 7.0 + ((fi * 7.13).sin() * 0.5 + 0.5) * 28.0;
+            let z_off = ((fi * 19.7 + self.time * (90.0 * speed_f)) % 88.0) + 5.0;
+            let z_pos = 93.0 - z_off;
+            let fall = (self.time * 42.0 + fi * 13.1) % 36.0;
             let base = self.cam_pos
                 .add(fwd.mul(z_pos))
                 .add(right.mul(ang.cos() * rad))
-                .add(up.mul(ang.sin() * rad * 0.65));
-            let len = 3.5 + speed_f * 9.0;
-            let tip = base.sub(fwd.mul(len));
-            let w = right.mul(0.09);
-            let alpha = (0.16 + speed_f * 0.25) * (1.0 - (z_pos / 96.0)).clamp(0.0, 1.0);
+                .add(up.mul(ang.sin() * rad * 0.6 + 14.0 - fall));
+            let rain_dir = fwd.mul(-0.65 * speed_f).add(up.mul(-1.0)).add(right.mul(-0.18)).norm();
+            let len = 2.6 + speed_f * 4.2;
+            let tip = base.add(rain_dir.mul(len));
+            let w = right.mul(0.055);
+            let alpha = (0.14 + speed_f * 0.16) * (1.0 - (z_pos / 93.0)).clamp(0.0, 1.0);
             let col = if self.racers[0].boost_timer > 0.0 {
-                [0.45, 0.98, 1.0, alpha]
+                [0.52, 0.96, 1.0, alpha]
             } else {
-                [0.65, 0.85, 0.96, alpha * 0.8]
+                [0.68, 0.84, 0.98, alpha]
             };
-            let v0 = Vertex3D { pos: base.sub(w).to_arr(), normal: [0.0, 1.0, 0.0], col, mat: [0.0, 1.5] };
-            let v1 = Vertex3D { pos: base.add(w).to_arr(), normal: [0.0, 1.0, 0.0], col, mat: [0.0, 1.5] };
-            let v2 = Vertex3D { pos: tip.to_arr(), normal: [0.0, 1.0, 0.0], col: [col[0], col[1], col[2], 0.0], mat: [0.0, 1.5] };
-            fx3d.extend_from_slice(&[v0, v1, v2]);
+            fx3d.extend_from_slice(&[
+                Vertex3D { pos: base.sub(w).to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col, mat: [0.0, 1.2] },
+                Vertex3D { pos: base.add(w).to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col, mat: [0.0, 1.2] },
+                Vertex3D { pos: tip.to_arr(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], col: [col[0], col[1], col[2], 0.0], mat: [0.0, 1.2] },
+            ]);
         }
     }
 
@@ -813,70 +917,80 @@ impl App {
                 let p = &self.racers[0];
                 let kmh = (p.speed * 3.6) as u32;
                 let pos = self.player_position();
+                let glass_bg = [0.03, 0.08, 0.16, 0.62];
+                let border_c = [0.32, 0.88, 1.0, 0.85];
 
-                // Top-left Race Telemetry Panel
-                h.skewed_rect(48.0, 36.0, 430.0, 134.0, 18.0, panel);
-                h.skewed_rect(48.0, 36.0, 430.0, 5.0, 18.0, cyan);
+                // Top-left stacked concept-art glassmorphism POS & LAP cards
+                h.glass_panel(42.0, 32.0, 210.0, 108.0, 0.0, glass_bg, border_c);
+                h.text(64.0, 48.0, if self.mode == RaceMode::GrandPrix { "POS" } else { "MODE" }, 2.4, muted);
                 if self.mode == RaceMode::GrandPrix {
-                    h.text(78.0, 54.0, &format!("POS {pos}/{TOTAL_RACERS}"), 4.5, gold);
+                    h.text(64.0, 82.0, &format!("{pos}/{TOTAL_RACERS}"), 5.4, snow);
                 } else {
-                    h.text(78.0, 54.0, "TIME TRIAL", 4.0, cyan);
+                    h.text(64.0, 84.0, "TRIAL", 4.4, cyan);
                 }
-                h.text(78.0, 102.0, &format!("LAP {}/{TOTAL_LAPS}   TIME {}", p.lap.min(TOTAL_LAPS), fmt_time(self.race_time)), 2.6, snow);
-                h.text(78.0, 136.0, &format!("BEST {}", fmt_time(self.records.best_race[self.track_idx])), 2.2, muted);
 
-                // Top-right 2D Live Circuit Minimap
-                let mx = 1650.0;
-                let my = 36.0;
-                let ms = 216.0;
-                h.rect(mx, my, ms, ms, [0.04, 0.08, 0.13, 0.72]);
-                h.rect(mx, my, ms, 4.0, cyan);
-                let pad_m = 20.0;
+                h.glass_panel(42.0, 152.0, 210.0, 108.0, 0.0, glass_bg, border_c);
+                h.text(64.0, 168.0, "LAP", 2.4, muted);
+                h.text(64.0, 202.0, &format!("{}/{TOTAL_LAPS}", p.lap.min(TOTAL_LAPS)), 5.4, snow);
+
+                // Top-right concept-art slanted TIME card
+                h.glass_panel(1600.0, 32.0, 272.0, 108.0, 16.0, glass_bg, border_c);
+                h.text(1748.0, 48.0, "TIME:", 2.4, muted);
+                h.text(1624.0, 84.0, &fmt_time(self.race_time), 4.4, snow);
+
+                // Bottom-left concept-art glassmorphism Circuit Minimap
+                let mx = 42.0;
+                let my = 796.0;
+                let ms = 242.0;
+                h.glass_panel(mx, my, ms, ms, 0.0, [0.03, 0.07, 0.15, 0.66], border_c);
+                let pad_m = 24.0;
                 let pts = &self.circuit.minimap_pts;
                 for i in 0..pts.len() {
                     let a = pts[i];
                     let b = pts[(i + 1) % pts.len()];
-                    h.line(
-                        mx + pad_m + a[0] * (ms - pad_m * 2.0),
-                        my + pad_m + a[1] * (ms - pad_m * 2.0),
-                        mx + pad_m + b[0] * (ms - pad_m * 2.0),
-                        my + pad_m + b[1] * (ms - pad_m * 2.0),
-                        3.5,
-                        [0.35, 0.65, 0.78, 0.85],
-                    );
+                    let ax = mx + pad_m + a[0] * (ms - pad_m * 2.0);
+                    let ay = my + pad_m + a[1] * (ms - pad_m * 2.0);
+                    let bx = mx + pad_m + b[0] * (ms - pad_m * 2.0);
+                    let by = my + pad_m + b[1] * (ms - pad_m * 2.0);
+                    h.line(ax, ay, bx, by, 7.0, [0.16, 0.24, 0.34, 0.85]);
+                    h.line(ax, ay, bx, by, 2.5, [0.68, 0.84, 0.94, 0.92]);
                 }
-                // Racer radar blips
                 for r in self.racers.iter().rev() {
                     let sm = self.circuit.sample_at(r.s);
                     let mp = self.circuit.minimap_coord(sm.pos);
                     let rx = mx + pad_m + mp[0] * (ms - pad_m * 2.0);
                     let ry = my + pad_m + mp[1] * (ms - pad_m * 2.0);
-                    let sz = if r.is_player { 10.0 } else { 7.0 };
-                    h.rect(rx - sz * 0.5, ry - sz * 0.5, sz, sz, if r.is_player { cyan } else { r.glow_col });
+                    if r.is_player {
+                        // Bright cyan directional player chevron on minimap
+                        h.tri([rx, ry - 11.0], [rx + 8.0, ry + 9.0], [rx - 8.0, ry + 9.0], cyan);
+                    } else {
+                        let c = [r.glow_col[0], r.glow_col[1], r.glow_col[2], 1.0];
+                        h.rect(rx - 4.0, ry - 4.0, 8.0, 8.0, c);
+                    }
                 }
+                h.text(mx + 12.0, my + ms - 22.0, &format!("{fps:.0} FPS"), 1.8, muted);
 
-                // Bottom-right Speedometer & Boost Gauge
-                h.skewed_rect(1380.0, 886.0, 480.0, 146.0, 22.0, panel);
+                // Bottom-right concept-art Speedometer + Segmented Slanted Boost Bar!
                 let spd_col = if p.boost_timer > 0.0 { gold } else { cyan };
-                h.skewed_rect(1380.0, 886.0, 480.0, 5.0, 22.0, spd_col);
-                let spd_txt = format!("{kmh:03} KM/H");
-                h.text(1426.0, 906.0, &spd_txt, 6.5, snow);
+                h.text(1468.0, 916.0, "SPEED:", 2.5, muted);
+                h.text(1588.0, 898.0, &format!("{kmh:03}"), 6.2, snow);
+                h.text(1720.0, 916.0, "KM/H", 2.6, muted);
 
-                // Boost bar
-                h.rect(1424.0, 976.0, 340.0, 22.0, [0.12, 0.18, 0.24, 0.9]);
-                let fill_col = if p.boost_timer > 0.0 {
-                    gold
-                } else if p.boost_energy >= 0.35 {
-                    cyan
-                } else {
-                    mag
-                };
-                h.rect(1424.0, 976.0, 340.0 * p.boost_energy, 22.0, fill_col);
-                h.text(1424.0, 1006.0, if p.boost_timer > 0.0 { "TURBO ACTIVE!" } else if p.boost_energy >= 0.35 { "SQUARE: TURBO READY" } else { "RECHARGING BOOST..." }, 2.1, fill_col);
-
-                // Bottom-left Track & FPS pill
-                h.skewed_rect(48.0, 978.0, 540.0, 54.0, 14.0, panel);
-                h.text(72.0, 996.0, &format!("{}   |   {fps:.0} FPS   |   L1/R1 AIRBRAKE", self.circuit.meta.name), 2.3, muted);
+                // 6 slanted glowing segmented boost cells (matching concept art!)
+                let cells = 6usize;
+                for c_idx in 0..cells {
+                    let cx = 1480.0 + c_idx as f32 * 40.0;
+                    let cy = 964.0;
+                    let frac = (c_idx as f32 + 0.5) / cells as f32;
+                    let lit = p.boost_energy >= frac;
+                    let col = if lit { spd_col } else { [0.10, 0.18, 0.28, 0.65] };
+                    h.skewed_rect(cx, cy, 32.0, 34.0, 12.0, col);
+                }
+                // Secondary sub-bar below boost cells
+                h.glass_panel(1480.0, 1008.0, 240.0, 16.0, 6.0, [0.05, 0.12, 0.20, 0.72], border_c);
+                h.skewed_rect(1482.0, 1010.0, 236.0 * p.boost_energy, 12.0, 5.0, spd_col);
+                h.glass_panel(1748.0, 956.0, 126.0, 68.0, 14.0, glass_bg, border_c);
+                h.text(1772.0, 982.0, if p.boost_timer > 0.0 { "BOOST" } else { "TURBO" }, 2.4, spd_col);
 
                 // Countdown / Lap banner
                 if self.phase == Phase::Countdown {
@@ -925,114 +1039,104 @@ impl App {
     }
 }
 
-/// Sculpted sleek 3D twin-nacelle anti-gravity hovercraft (WipEout-inspired angular silhouette).
-fn emit_hovercraft(
-    body_out: &mut Vec<Vertex3D>,
-    fx_out: Option<&mut Vec<Vertex3D>>,
+/// Blazing volumetric multi-layered dual plasma thruster plumes (+ real wet-track mirrored plumes!).
+#[allow(clippy::too_many_arguments)]
+fn emit_thruster_plumes(
+    fx_out: &mut Vec<Vertex3D>,
+    refl_out: Option<&mut Vec<Vertex3D>>,
     pos: Vec3,
-    sm: Sample,
-    roll: f32,
-    pitch: f32,
-    body_col: [f32; 4],
+    right: Vec3,
+    up: Vec3,
+    fwd: Vec3,
+    plane_origin: Vec3,
+    plane_up: Vec3,
+    is_hero: bool,
     glow_col: [f32; 4],
     boosting: bool,
-    ghost: bool,
+    throttle: f32,
 ) {
-    let (sr, cr) = roll.sin_cos();
-    let right = sm.right.mul(cr).add(sm.up.mul(sr)).norm();
-    let up0 = sm.forward.cross(right).norm();
-    let (sp, cp) = pitch.sin_cos();
-    let fwd = sm.forward.mul(cp).add(up0.mul(sp)).norm();
-    let up = fwd.cross(right).norm();
-
     let pt = |x: f32, y: f32, z: f32| pos.add(right.mul(x)).add(up.mul(y)).add(fwd.mul(z));
-    let tri = |out: &mut Vec<Vertex3D>, a: Vec3, b: Vec3, c: Vec3, col: [f32; 4], mat: [f32; 2]| {
-        let n = b.sub(a).cross(c.sub(a)).norm().to_arr();
-        out.extend_from_slice(&[
-            Vertex3D { pos: a.to_arr(), normal: n, col, mat },
-            Vertex3D { pos: b.to_arr(), normal: n, col, mat },
-            Vertex3D { pos: c.to_arr(), normal: n, col, mat },
-        ]);
+    let reflect_pt = |p: Vec3| p.sub(plane_up.mul(2.0 * p.sub(plane_origin).dot(plane_up)));
+
+    let noz_x = if is_hero { 1.55f32 } else { 1.20f32 };
+    let noz_z = if is_hero { -3.55f32 } else { -3.50f32 };
+    let outer_len = (2.6 + throttle * 2.1) * if boosting { 1.38 } else { 1.0 };
+    let inner_len = outer_len * 0.55;
+
+    let outer_col = if boosting {
+        [0.35, 0.95, 1.0, 0.62]
+    } else {
+        [glow_col[0], glow_col[1], glow_col[2], 0.55]
+    };
+    let core_col = [0.92, 0.99, 1.0, 0.88];
+
+    let mut refl_tmp: Vec<Vertex3D> = Vec::new();
+    let emit_cone = |out: &mut Vec<Vertex3D>, refl: &mut Vec<Vertex3D>, sx: f32, rad: f32, len: f32, col: [f32; 4], emiss: f32| {
+        let segs = 8usize;
+        let tip = pt(sx, 0.12, noz_z - len);
+        let tip_c = [col[0], col[1], col[2], 0.0];
+        for k in 0..segs {
+            let a0 = (k as f32 / segs as f32) * std::f32::consts::TAU;
+            let a1 = ((k + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+            let p0 = pt(sx + a0.cos() * rad, 0.12 + a0.sin() * rad, noz_z);
+            let p1 = pt(sx + a1.cos() * rad, 0.12 + a1.sin() * rad, noz_z);
+            let n = [0.0, 1.0, 0.0];
+            out.extend_from_slice(&[
+                Vertex3D { pos: p0.to_arr(), normal: n, uv: [0.0, 0.0], col, mat: [0.0, emiss] },
+                Vertex3D { pos: p1.to_arr(), normal: n, uv: [0.0, 0.0], col, mat: [0.0, emiss] },
+                Vertex3D { pos: tip.to_arr(), normal: n, uv: [0.0, 0.0], col: tip_c, mat: [0.0, emiss] },
+            ]);
+            let rc = [col[0], col[1], col[2], col[3] * 0.75];
+            refl.extend_from_slice(&[
+                Vertex3D { pos: reflect_pt(p0).to_arr(), normal: n, uv: [0.0, 0.0], col: rc, mat: [0.0, emiss * 0.8] },
+                Vertex3D { pos: reflect_pt(tip).to_arr(), normal: n, uv: [0.0, 0.0], col: tip_c, mat: [0.0, emiss * 0.8] },
+                Vertex3D { pos: reflect_pt(p1).to_arr(), normal: n, uv: [0.0, 0.0], col: rc, mat: [0.0, emiss * 0.8] },
+            ]);
+        }
     };
 
-    let nose = pt(0.0, -0.05, 4.4);
-    let spine = pt(0.0, 0.92, 0.2);
-    let tail_top = pt(0.0, 0.65, -3.2);
-    let tail_bot = pt(0.0, -0.35, -2.9);
-    let wing_l = pt(-2.85, -0.15, -2.3);
-    let wing_r = pt(2.85, -0.15, -2.3);
-    let mid_l = pt(-1.25, 0.25, 0.8);
-    let mid_r = pt(1.25, 0.25, 0.8);
-    let fin_l = pt(-2.65, 0.95, -2.9);
-    let fin_r = pt(2.65, 0.95, -2.9);
-
-    let hull_mat = if ghost { [0.2, 1.4] } else { [0.85, 0.05] };
-    let dark_col = [body_col[0] * 0.22, body_col[1] * 0.26, body_col[2] * 0.34, body_col[3]];
-    let canopy_col = [0.06, 0.14, 0.22, body_col[3]];
-
-    // Sculpted upper fuselage & twin delta wings
-    tri(body_out, nose, spine, mid_l, body_col, hull_mat);
-    tri(body_out, nose, mid_r, spine, body_col, hull_mat);
-    tri(body_out, spine, tail_top, wing_l, body_col, hull_mat);
-    tri(body_out, spine, wing_r, tail_top, body_col, hull_mat);
-    tri(body_out, nose, mid_l, wing_l, body_col, hull_mat);
-    tri(body_out, nose, wing_r, mid_r, body_col, hull_mat);
-    // Dark sleek cockpit canopy
-    tri(body_out, pt(0.0, 0.35, 2.2), pt(-0.55, 0.55, -0.2), pt(0.0, 1.04, 0.1), canopy_col, [0.98, 0.1]);
-    tri(body_out, pt(0.0, 0.35, 2.2), pt(0.0, 1.04, 0.1), pt(0.55, 0.55, -0.2), canopy_col, [0.98, 0.1]);
-    // Underside & vertical stabilizer fins
-    tri(body_out, nose, wing_l, tail_bot, dark_col, hull_mat);
-    tri(body_out, nose, tail_bot, wing_r, dark_col, hull_mat);
-    tri(body_out, wing_l, fin_l, pt(-1.95, 0.05, -0.8), glow_col, [0.2, 1.4]);
-    tri(body_out, wing_r, pt(1.95, 0.05, -0.8), fin_r, glow_col, [0.2, 1.4]);
-    // Rear engine cowling
-    tri(body_out, wing_l, tail_top, tail_bot, dark_col, hull_mat);
-    tri(body_out, wing_r, tail_bot, tail_top, dark_col, hull_mat);
-
-    // Glowing plasma thruster cones (additive glow pass!)
-    let flame_len = if boosting { 6.2 } else { 2.9 };
-    let flame_col = if boosting { [0.95, 0.98, 0.55, 0.92] } else { [glow_col[0], glow_col[1], glow_col[2], 0.85] };
-    let flame_target = fx_out.unwrap_or(body_out);
-    for sx in [-0.72f32, 0.72f32] {
-        let e0 = pt(sx - 0.36, 0.18, -3.1);
-        let e1 = pt(sx + 0.36, 0.18, -3.1);
-        let e2 = pt(sx, 0.45, -3.1);
-        let tip = pt(sx, 0.15, -3.1 - flame_len);
-        tri(flame_target, e0, e1, tip, flame_col, [0.0, 2.2]);
-        tri(flame_target, e2, e0, tip, flame_col, [0.0, 2.2]);
-        tri(flame_target, e1, e2, tip, flame_col, [0.0, 2.2]);
+    for sx in [-noz_x, noz_x] {
+        emit_cone(fx_out, &mut refl_tmp, sx, 0.44, outer_len, outer_col, 2.2);
+        emit_cone(fx_out, &mut refl_tmp, sx, 0.24, inner_len, core_col, 3.2);
+    }
+    if let Some(ro) = refl_out {
+        ro.extend_from_slice(&refl_tmp);
     }
 }
 
-/// Glowing twin 3D ribbon thruster trails behind each racing craft.
+/// Glowing twin sleek 3D ribbon thruster trails behind each racing craft's left & right pods.
 fn emit_trail(fx_out: &mut Vec<Vertex3D>, trail: &VecDeque<(Vec3, Vec3)>, glow_col: [f32; 4], boosting: bool) {
     if trail.len() < 2 {
         return;
     }
     let len = trail.len() as f32;
-    let base_w = if boosting { 1.35 } else { 0.85 };
-    for i in 0..trail.len() - 1 {
-        let t0 = 1.0 - (i as f32 / len);
-        let t1 = 1.0 - ((i + 1) as f32 / len);
-        let (p0, r0) = trail[i];
-        let (p1, r1) = trail[i + 1];
-        let w0 = r0.mul(base_w * t0);
-        let w1 = r1.mul(base_w * t1);
-        let c0 = [glow_col[0], glow_col[1], glow_col[2], t0 * t0 * 0.62];
-        let c1 = [glow_col[0], glow_col[1], glow_col[2], t1 * t1 * 0.62];
-        let n = [0.0, 1.0, 0.0];
-        let va = Vertex3D { pos: p0.sub(w0).to_arr(), normal: n, col: c0, mat: [0.0, 1.8] };
-        let vb = Vertex3D { pos: p0.add(w0).to_arr(), normal: n, col: c0, mat: [0.0, 1.8] };
-        let vc = Vertex3D { pos: p1.add(w1).to_arr(), normal: n, col: c1, mat: [0.0, 1.8] };
-        let vd = Vertex3D { pos: p1.sub(w1).to_arr(), normal: n, col: c1, mat: [0.0, 1.8] };
-        fx_out.extend_from_slice(&[va, vb, vc, va, vc, vd]);
+    let base_w = if boosting { 0.46 } else { 0.32 };
+    for side in [-1.35f32, 1.35f32] {
+        for i in 0..trail.len() - 1 {
+            let t0 = 1.0 - (i as f32 / len);
+            let t1 = 1.0 - ((i + 1) as f32 / len);
+            let (p0, r0) = trail[i];
+            let (p1, r1) = trail[i + 1];
+            let o0 = p0.add(r0.mul(side));
+            let o1 = p1.add(r1.mul(side));
+            let w0 = r0.mul(base_w * t0);
+            let w1 = r1.mul(base_w * t1);
+            let c0 = [glow_col[0], glow_col[1], glow_col[2], t0 * t0 * 0.38];
+            let c1 = [glow_col[0], glow_col[1], glow_col[2], t1 * t1 * 0.38];
+            let n = [0.0, 1.0, 0.0];
+            let va = Vertex3D { pos: o0.sub(w0).to_arr(), normal: n, uv: [0.0, 0.0], col: c0, mat: [0.0, 1.4] };
+            let vb = Vertex3D { pos: o0.add(w0).to_arr(), normal: n, uv: [0.0, 0.0], col: c0, mat: [0.0, 1.4] };
+            let vc = Vertex3D { pos: o1.add(w1).to_arr(), normal: n, uv: [0.0, 0.0], col: c1, mat: [0.0, 1.4] };
+            let vd = Vertex3D { pos: o1.sub(w1).to_arr(), normal: n, uv: [0.0, 0.0], col: c1, mat: [0.0, 1.4] };
+            fx_out.extend_from_slice(&[va, vb, vc, va, vc, vd]);
+        }
     }
 }
 
 fn main() {
     let identity = init_console_runtime();
     println!(
-        "AETHER DRIFT: gamertag={} console={} pls={:?}",
+        "AETHER DRIFT v2.0 (Blender PBR + Reflections + Bloom): gamertag={} console={} pls={:?}",
         identity.gamertag, identity.console_label, identity.pls_dir
     );
 
@@ -1053,8 +1157,9 @@ fn main() {
         }
     };
 
-    let mut dyn3d = Vec::with_capacity(16_384);
-    let mut fx3d = Vec::with_capacity(16_384);
+    let mut craft3d = Vec::with_capacity(32_768);
+    let mut dyn_refl3d = Vec::with_capacity(32_768);
+    let mut fx3d = Vec::with_capacity(24_576);
     let mut hud = HudBatch::new();
 
     let mut last = Instant::now();
@@ -1069,11 +1174,11 @@ fn main() {
 
         pad.poll(dt);
         app.update(dt, &mut pad, &mut audio, &mut renderer, &identity);
-        app.build_dynamic_scene(&mut dyn3d, &mut fx3d);
+        app.build_dynamic_scene(&mut craft3d, &mut dyn_refl3d, &mut fx3d);
         app.build_hud(&mut hud, fps, &identity);
 
         let view = Mat4::look_at_lh(app.cam_pos, app.cam_target, app.cam_up);
-        let proj = Mat4::perspective_lh(app.cam_fov, SCREEN_W as f32 / SCREEN_H as f32, 0.5, 2400.0);
+        let proj = Mat4::perspective_lh(app.cam_fov, SCREEN_W as f32 / SCREEN_H as f32, 0.5, 2800.0);
         let vp = proj.mul(view);
         let boost_glow = if app.racers.first().is_some_and(|r| r.boost_timer > 0.0) { 1.0 } else { 0.0 };
 
@@ -1083,7 +1188,8 @@ fn main() {
             app.time,
             app.circuit.meta.fog_rgb,
             boost_glow,
-            &dyn3d,
+            &craft3d,
+            &dyn_refl3d,
             &fx3d,
             &hud.verts,
         ) {

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! Xbox Series X|S (Scarlett) 3D D3D12.X renderer, DualSense XInput bridge, and XUser/PLS runtime.
+//! Xbox Series X|S (Scarlett) AA D3D12.X PBR Renderer (Hardware Textures, Stencil-Masked
+//! Planar Wet-Track Mirror Reflections, HDR Quarter-Res Bloom, ACES Tone Mapping),
+//! DualSense XInput bridge, and XUser/PLS runtime.
 
 use std::ffi::c_void;
 use std::mem::{size_of, transmute_copy, ManuallyDrop};
@@ -12,13 +14,19 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice1;
 
+use crate::assets::{GameAssets, RawTexture};
 use crate::math::Mat4;
+use crate::track::{build_sky_dome_mesh, StaticWorld};
 
 type HRESULT = i32;
 
 pub const SCREEN_W: u32 = 1920;
 pub const SCREEN_H: u32 = 1080;
-pub const MAX_DYN3D_VERTS: usize = 65_536;
+const BLOOM_W: u32 = SCREEN_W / 4;
+const BLOOM_H: u32 = SCREEN_H / 4;
+
+pub const MAX_CRAFT_VERTS: usize = 48_000;
+pub const MAX_REFL_VERTS: usize = 48_000;
 pub const MAX_FX3D_VERTS: usize = 48_000;
 pub const MAX_HUD2D_VERTS: usize = 48_000;
 
@@ -27,8 +35,9 @@ pub const MAX_HUD2D_VERTS: usize = 48_000;
 pub struct Vertex3D {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
+    pub uv: [f32; 2],
     pub col: [f32; 4],
-    pub mat: [f32; 2], // x = wetness/metallic, y = emissive
+    pub mat: [f32; 2], // x = metallic/wetness (or scroll flag for billboards), y = emissive
 }
 
 #[repr(C)]
@@ -40,11 +49,11 @@ pub struct Vertex2D {
 
 #[repr(C, align(256))]
 #[derive(Clone, Copy)]
-pub struct FrameCB {
-    pub view_proj: [[f32; 4]; 4],
-    pub cam_pos_time: [f32; 4],
-    pub fog_params: [f32; 4],
-    pub sun_dir_glow: [f32; 4],
+struct FrameCB {
+    view_proj: [[f32; 4]; 4],
+    cam_pos_time: [f32; 4],
+    fog_params: [f32; 4],
+    sun_dir_glow: [f32; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +99,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 // ---------------------------------------------------------------------------
-// DualSense Input + Rumble
+// DualSense Input + Throttled Rumble
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -146,6 +155,8 @@ pub struct Pad {
     rumble_pulse: f32,
     pulse_low: f32,
     pulse_high: f32,
+    last_low: u16,
+    last_high: u16,
 }
 
 impl Pad {
@@ -177,6 +188,8 @@ impl Pad {
                 rumble_pulse: 0.0,
                 pulse_low: 0.0,
                 pulse_high: 0.0,
+                last_low: 0,
+                last_high: 0,
             }
         }
     }
@@ -215,19 +228,22 @@ impl Pad {
         }
     }
 
-    pub fn update_rumble(&self, continuous_low: f32, continuous_high: f32) {
+    pub fn update_rumble(&mut self, continuous_low: f32, continuous_high: f32) {
         if let Some(set) = self.set_state {
             let (pl, ph) = if self.rumble_pulse > 0.0 {
                 (self.pulse_low, self.pulse_high)
             } else {
                 (0.0, 0.0)
             };
-            let v = XInputVibration {
-                left_motor: (continuous_low.max(pl).clamp(0.0, 1.0) * 65535.0) as u16,
-                right_motor: (continuous_high.max(ph).clamp(0.0, 1.0) * 65535.0) as u16,
-            };
-            unsafe {
-                let _ = set(0, &v);
+            let left_motor = (continuous_low.max(pl).clamp(0.0, 1.0) * 65535.0) as u16;
+            let right_motor = (continuous_high.max(ph).clamp(0.0, 1.0) * 65535.0) as u16;
+            if left_motor != self.last_low || right_motor != self.last_high {
+                self.last_low = left_motor;
+                self.last_high = right_motor;
+                let v = XInputVibration { left_motor, right_motor };
+                unsafe {
+                    let _ = set(0, &v);
+                }
             }
         }
     }
@@ -238,7 +254,7 @@ fn deadzone(v: f32, dz: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Console identity & PLS
+// Console Identity & PLS
 // ---------------------------------------------------------------------------
 
 pub struct ConsoleIdentity {
@@ -296,12 +312,16 @@ pub fn init_console_runtime() -> ConsoleIdentity {
 }
 
 // ---------------------------------------------------------------------------
-// D3D12.X 3D Renderer (Opaque PBR + Additive Glow FX + 2D Alpha HUD + D32 Depth)
+// D3D12.X AA PBR + Mirror Reflections + HDR Bloom Renderer
 // ---------------------------------------------------------------------------
 
 type D3D12CreateDeviceFn = unsafe extern "system" fn(*mut c_void, u32, *const c_void, *mut *mut c_void) -> HRESULT;
 type D3D12SerializeRootSignatureFn = unsafe extern "system" fn(*const c_void, u32, *mut *mut c_void, *mut *mut c_void) -> HRESULT;
+type OmSetStencilRefFn = unsafe extern "system" fn(*mut c_void, u32);
+type SetDescriptorHeapsFn = unsafe extern "system" fn(*mut c_void, u32, *const *mut c_void);
 type SetRootSignatureFn = unsafe extern "system" fn(*mut c_void, *mut c_void);
+type SetRootTableFn = unsafe extern "system" fn(*mut c_void, u32, u64);
+type SetRootConstsFn = unsafe extern "system" fn(*mut c_void, u32, u32, *const u32, u32);
 type SetRootCbvFn = unsafe extern "system" fn(*mut c_void, u32, u64);
 type IaSetVertexBuffersFn = unsafe extern "system" fn(*mut c_void, u32, u32, *const D3D12_VERTEX_BUFFER_VIEW);
 type OmSetRenderTargetsFn = unsafe extern "system" fn(*mut c_void, u32, *const D3D12_CPU_DESCRIPTOR_HANDLE, i32, *const D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -312,15 +332,43 @@ type ScheduleFrameEventXFn = unsafe extern "system" fn(*mut c_void, u32, u32, *c
 type WaitFrameEventXFn = unsafe extern "system" fn(*mut c_void, u32, u32, *const u8, u32, *mut u64) -> HRESULT;
 type PresentXFn = unsafe extern "system" fn(*mut c_void, u32, *const u8, *const u8) -> HRESULT;
 
+const X_OM_SET_STENCIL_REF: usize = 24;
+const X_SET_DESCRIPTOR_HEAPS: usize = 32;
 const X_SET_GRAPHICS_ROOT_SIGNATURE: usize = 34;
+const X_SET_GRAPHICS_ROOT_TABLE: usize = 36;
+const X_SET_GRAPHICS_ROOT_32BIT_CONSTS: usize = 40;
 const X_SET_GRAPHICS_ROOT_CBV: usize = 42;
 const X_IA_SET_VERTEX_BUFFERS: usize = 48;
 const X_OM_SET_RENDER_TARGETS: usize = 50;
 const X_CLEAR_DEPTH_STENCIL_VIEW: usize = 51;
 const X_CLEAR_RENDER_TARGET_VIEW: usize = 52;
 
-static WORLD_VS: &[u8] = include_bytes!("../shaders/world3d_vs.dxbc");
-static WORLD_PS: &[u8] = include_bytes!("../shaders/world3d_ps.dxbc");
+// SRV slot indices in our shader-visible heap
+const SRV_TRACK_ALBEDO: u64 = 0;
+const SRV_TRACK_PUDDLE: u64 = 1;
+const SRV_BILLBOARD: u64 = 2;
+const SRV_CITY_FACADE: u64 = 3;
+const SRV_SKY_TWILIGHT: u64 = 4;
+const SRV_SCENE_HDR: u64 = 5;
+const SRV_BLOOM_A: u64 = 6;
+const SRV_BLOOM_B: u64 = 7;
+
+// Embedded compiled DXBC shaders
+static V2_WORLD_VS: &[u8] = include_bytes!("../shaders/v2_world_vs.dxbc");
+static V2_SKY_VS: &[u8] = include_bytes!("../shaders/v2_sky_vs.dxbc");
+static V2_SKY_PS: &[u8] = include_bytes!("../shaders/v2_sky_ps.dxbc");
+static V2_TRACK_PS: &[u8] = include_bytes!("../shaders/v2_track_ps.dxbc");
+static V2_CRAFT_PS: &[u8] = include_bytes!("../shaders/v2_craft_ps.dxbc");
+static V2_REFL_PS: &[u8] = include_bytes!("../shaders/v2_refl_ps.dxbc");
+static V2_CITY_PS: &[u8] = include_bytes!("../shaders/v2_city_ps.dxbc");
+static V2_BILLBOARD_PS: &[u8] = include_bytes!("../shaders/v2_billboard_ps.dxbc");
+static V2_MIST_PS: &[u8] = include_bytes!("../shaders/v2_mist_ps.dxbc");
+static V2_FX_PS: &[u8] = include_bytes!("../shaders/v2_fx_ps.dxbc");
+static V2_FULL_VS: &[u8] = include_bytes!("../shaders/v2_full_vs.dxbc");
+static V2_BLOOM_EXT_PS: &[u8] = include_bytes!("../shaders/v2_bloom_extract_ps.dxbc");
+static V2_BLOOM_H_PS: &[u8] = include_bytes!("../shaders/v2_bloom_blur_h_ps.dxbc");
+static V2_BLOOM_V_PS: &[u8] = include_bytes!("../shaders/v2_bloom_blur_v_ps.dxbc");
+static V2_COMPOSITE_PS: &[u8] = include_bytes!("../shaders/v2_composite_ps.dxbc");
 static HUD_VS: &[u8] = include_bytes!("../shaders/hud2d_vs.dxbc");
 static HUD_PS: &[u8] = include_bytes!("../shaders/hud2d_ps.dxbc");
 
@@ -371,19 +419,95 @@ fn create_upload_buf(dev: &ID3D12Device, bytes: u64) -> Result<(ID3D12Resource, 
     }
 }
 
+fn create_rt_tex(dev: &ID3D12Device, w: u32, h: u32, fmt: DXGI_FORMAT, init_state: D3D12_RESOURCE_STATES) -> Result<ID3D12Resource, String> {
+    unsafe {
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: w as u64,
+            Height: h,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: fmt,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            ..Default::default()
+        };
+        let mut res: Option<ID3D12Resource> = None;
+        dev.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+            D3D12_HEAP_FLAG_NONE,
+            &desc,
+            init_state,
+            None,
+            &mut res,
+        )
+        .map_err(|e| format!("CreateRT({w}x{h}): {e}"))?;
+        res.ok_or_else(|| "RT null".into())
+    }
+}
+
+struct GpuBucket {
+    _buf: ID3D12Resource,
+    gpu: u64,
+    count: u32,
+}
+
+impl GpuBucket {
+    fn from_verts(dev: &ID3D12Device, verts: &[Vertex3D]) -> Result<Self, String> {
+        let bytes = (verts.len().max(1) * size_of::<Vertex3D>()) as u64;
+        let (buf, ptr, gpu) = create_upload_buf(dev, bytes)?;
+        if !verts.is_empty() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(verts.as_ptr(), ptr as *mut Vertex3D, verts.len());
+            }
+        }
+        Ok(Self { _buf: buf, gpu, count: verts.len() as u32 })
+    }
+}
+
+struct UploadedStaticWorld {
+    track: GpuBucket,
+    rails: GpuBucket,
+    city: GpuBucket,
+    billboards: GpuBucket,
+    refl: GpuBucket,
+    mist: GpuBucket,
+}
+
 pub struct Renderer {
     dev: ID3D12Device,
     queue: ID3D12CommandQueue,
     bb: ID3D12Resource,
+    scene_rt: ID3D12Resource,
+    bloom_a: ID3D12Resource,
+    bloom_b: ID3D12Resource,
     _depth: ID3D12Resource,
+    _textures: Vec<ID3D12Resource>,
     _rtv_heap: ID3D12DescriptorHeap,
     _dsv_heap: ID3D12DescriptorHeap,
-    rtv: D3D12_CPU_DESCRIPTOR_HANDLE,
+    srv_heap: ID3D12DescriptorHeap,
+    rtv_bb: D3D12_CPU_DESCRIPTOR_HANDLE,
+    rtv_scene: D3D12_CPU_DESCRIPTOR_HANDLE,
+    rtv_bloom_a: D3D12_CPU_DESCRIPTOR_HANDLE,
+    rtv_bloom_b: D3D12_CPU_DESCRIPTOR_HANDLE,
     dsv: D3D12_CPU_DESCRIPTOR_HANDLE,
+    srv_gpu_start: u64,
+    srv_inc: u64,
     rs_world: ID3D12RootSignature,
+    rs_post: ID3D12RootSignature,
     rs_hud: ID3D12RootSignature,
-    pso_world: ID3D12PipelineState,
+    pso_sky: ID3D12PipelineState,
+    pso_track: ID3D12PipelineState,
+    pso_city: ID3D12PipelineState,
+    pso_billboard: ID3D12PipelineState,
+    pso_craft: ID3D12PipelineState,
+    pso_refl: ID3D12PipelineState,
+    pso_mist: ID3D12PipelineState,
     pso_fx: ID3D12PipelineState,
+    pso_bloom_ext: ID3D12PipelineState,
+    pso_bloom_h: ID3D12PipelineState,
+    pso_bloom_v: ID3D12PipelineState,
+    pso_composite: ID3D12PipelineState,
     pso_hud: ID3D12PipelineState,
     alloc: ID3D12CommandAllocator,
     list: ID3D12GraphicsCommandList,
@@ -393,10 +517,14 @@ pub struct Renderer {
     _cb_buf: ID3D12Resource,
     cb_ptr: *mut FrameCB,
     cb_gpu: u64,
-    static_buf: Option<(ID3D12Resource, u64, u32)>,
-    _dyn3d_buf: ID3D12Resource,
-    dyn3d_ptr: *mut Vertex3D,
-    dyn3d_gpu: u64,
+    sky_bucket: GpuBucket,
+    static_world: Option<UploadedStaticWorld>,
+    _craft_buf: ID3D12Resource,
+    craft_ptr: *mut Vertex3D,
+    craft_gpu: u64,
+    _dyn_refl_buf: ID3D12Resource,
+    dyn_refl_ptr: *mut Vertex3D,
+    dyn_refl_gpu: u64,
     _fx3d_buf: ID3D12Resource,
     fx3d_ptr: *mut Vertex3D,
     fx3d_gpu: u64,
@@ -441,44 +569,26 @@ impl Renderer {
                 return Err("ScheduleFrameEventX failed".into());
             }
 
-            // 1920x1080 RGBA8 backbuffer
-            let bb_desc = D3D12_RESOURCE_DESC {
-                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-                Width: SCREEN_W as u64,
-                Height: SCREEN_H,
-                DepthOrArraySize: 1,
-                MipLevels: 1,
-                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-                ..Default::default()
-            };
-            let mut bb: Option<ID3D12Resource> = None;
-            dev.CreateCommittedResource(
-                &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
-                D3D12_HEAP_FLAG_NONE,
-                &bb_desc,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-                None,
-                &mut bb,
-            )
-            .map_err(|e| format!("backbuffer: {e}"))?;
-            let bb = bb.ok_or("bb null")?;
+            // Render Targets: Backbuffer (RGBA8), Scene HDR (RGBA16F), Bloom A & B (Quarter-Res RGBA16F)
+            let bb = create_rt_tex(&dev, SCREEN_W, SCREEN_H, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_RENDER_TARGET)?;
+            let scene_rt = create_rt_tex(&dev, SCREEN_W, SCREEN_H, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_RENDER_TARGET)?;
+            let bloom_a = create_rt_tex(&dev, BLOOM_W, BLOOM_H, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)?;
+            let bloom_b = create_rt_tex(&dev, BLOOM_W, BLOOM_H, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)?;
 
-            // 1920x1080 D32_FLOAT hardware depth buffer
+            // Depth-Stencil Buffer (D24_UNORM_S8_UINT -> hardware 8-bit stencil for wet-track mirror reflections!)
             let depth_desc = D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
                 Width: SCREEN_W as u64,
                 Height: SCREEN_H,
                 DepthOrArraySize: 1,
                 MipLevels: 1,
-                Format: DXGI_FORMAT_D32_FLOAT,
+                Format: DXGI_FORMAT_D24_UNORM_S8_UINT,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
                 ..Default::default()
             };
             let depth_clear = D3D12_CLEAR_VALUE {
-                Format: DXGI_FORMAT_D32_FLOAT,
+                Format: DXGI_FORMAT_D24_UNORM_S8_UINT,
                 Anonymous: D3D12_CLEAR_VALUE_0 {
                     DepthStencil: D3D12_DEPTH_STENCIL_VALUE { Depth: 1.0, Stencil: 0 },
                 },
@@ -492,19 +602,27 @@ impl Renderer {
                 Some(&depth_clear),
                 &mut depth,
             )
-            .map_err(|e| format!("depth buffer: {e}"))?;
+            .map_err(|e| format!("depth-stencil: {e}"))?;
             let depth = depth.ok_or("depth null")?;
 
+            // Descriptor Heaps: RTV (4), DSV (1), Shader-Visible SRV (16)
             let rtv_heap: ID3D12DescriptorHeap = dev
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-                    NumDescriptors: 1,
+                    NumDescriptors: 4,
                     ..Default::default()
                 })
                 .map_err(|e| format!("RTV heap: {e}"))?;
-            let rtv_start: unsafe extern "system" fn(*mut c_void) -> usize = vslot(rtv_heap.as_raw(), 9);
-            let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv_start(rtv_heap.as_raw()) };
-            dev.CreateRenderTargetView(&bb, None, rtv);
+            let rtv_base = vslot::<unsafe extern "system" fn(*mut c_void) -> usize>(rtv_heap.as_raw(), 9)(rtv_heap.as_raw());
+            let rtv_inc = dev.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
+            let rtv_bb = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv_base };
+            let rtv_scene = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv_base + rtv_inc };
+            let rtv_bloom_a = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv_base + rtv_inc * 2 };
+            let rtv_bloom_b = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv_base + rtv_inc * 3 };
+            dev.CreateRenderTargetView(&bb, None, rtv_bb);
+            dev.CreateRenderTargetView(&scene_rt, None, rtv_scene);
+            dev.CreateRenderTargetView(&bloom_a, None, rtv_bloom_a);
+            dev.CreateRenderTargetView(&bloom_b, None, rtv_bloom_b);
 
             let dsv_heap: ID3D12DescriptorHeap = dev
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
@@ -513,108 +631,245 @@ impl Renderer {
                     ..Default::default()
                 })
                 .map_err(|e| format!("DSV heap: {e}"))?;
-            let dsv_start: unsafe extern "system" fn(*mut c_void) -> usize = vslot(dsv_heap.as_raw(), 9);
-            let dsv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: dsv_start(dsv_heap.as_raw()) };
+            let dsv = D3D12_CPU_DESCRIPTOR_HANDLE {
+                ptr: vslot::<unsafe extern "system" fn(*mut c_void) -> usize>(dsv_heap.as_raw(), 9)(dsv_heap.as_raw()),
+            };
             dev.CreateDepthStencilView(&depth, None, dsv);
 
-            // Root signature 1: 3D world with 1 root CBV (register b0)
+            let srv_heap: ID3D12DescriptorHeap = dev
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: 16,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    ..Default::default()
+                })
+                .map_err(|e| format!("SRV heap: {e}"))?;
+            let srv_cpu_start = vslot::<unsafe extern "system" fn(*mut c_void) -> u64>(srv_heap.as_raw(), 9)(srv_heap.as_raw());
+            let srv_gpu_start = vslot::<unsafe extern "system" fn(*mut c_void) -> u64>(srv_heap.as_raw(), 10)(srv_heap.as_raw());
+            let srv_inc = dev.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as u64;
+
+            let make_srv = |slot_idx: u64, res: &ID3D12Resource, fmt: DXGI_FORMAT| {
+                let mut desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: fmt,
+                    ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    ..Default::default()
+                };
+                desc.Anonymous.Texture2D.MipLevels = 1;
+                let cpu = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: (srv_cpu_start + slot_idx * srv_inc) as usize };
+                dev.CreateShaderResourceView(res, Some(&desc), cpu);
+            };
+            make_srv(SRV_SCENE_HDR, &scene_rt, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            make_srv(SRV_BLOOM_A, &bloom_a, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            make_srv(SRV_BLOOM_B, &bloom_b, DXGI_FORMAT_R16G16B16A16_FLOAT);
+
+            // Command Allocator, List & Fence (also used for one-shot texture upload!)
+            let alloc: ID3D12CommandAllocator = dev
+                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+                .map_err(|e| format!("alloc: {e}"))?;
+            let list: ID3D12GraphicsCommandList = dev
+                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
+                .map_err(|e| format!("list: {e}"))?;
+            let fence: ID3D12Fence = dev
+                .CreateFence(0, D3D12_FENCE_FLAG_NONE)
+                .map_err(|e| format!("fence: {e}"))?;
+            let fence_ev = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+
+            // Decode & Upload all 5 embedded AA PBR textures + Twilight Sky Dome!
+            let raw_texs = GameAssets::decode_textures();
+            let mut textures = Vec::with_capacity(raw_texs.len());
+            let mut staging_keep = Vec::with_capacity(raw_texs.len());
+            for (idx, rt) in raw_texs.iter().enumerate() {
+                let (tex_res, stg) = upload_texture_2d(&dev, &list, rt)?;
+                make_srv(idx as u64, &tex_res, DXGI_FORMAT_R8G8B8A8_UNORM);
+                textures.push(tex_res);
+                staging_keep.push(stg);
+            }
+            list.Close().map_err(|e| format!("upload list.Close: {e}"))?;
+            let cmd: ID3D12CommandList = list.cast().map_err(|e| format!("cast: {e}"))?;
+            queue.ExecuteCommandLists(&[Some(cmd)]);
+            let fence_val = 1u64;
+            queue.Signal(&fence, fence_val).map_err(|e| format!("upload Signal: {e}"))?;
+            fence.SetEventOnCompletion(fence_val, HANDLE(fence_ev)).map_err(|e| format!("upload SetEvent: {e}"))?;
+            let _ = WaitForSingleObject(fence_ev, 5000);
+            drop(staging_keep);
+
+            // Root Signatures (with built-in Static Samplers s0=WRAP, s1=CLAMP!)
             let serialize: D3D12SerializeRootSignatureFn = xs("D3D12SerializeRootSignature")?;
-            let cbv_param = D3D12_ROOT_PARAMETER {
-                ParameterType: D3D12_ROOT_PARAMETER_TYPE_CBV,
-                Anonymous: D3D12_ROOT_PARAMETER_0 {
-                    Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 },
-                },
-                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-            };
-            let rs_world_desc = D3D12_ROOT_SIGNATURE_DESC {
-                NumParameters: 1,
-                pParameters: &cbv_param,
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
-                ..Default::default()
-            };
-            let (mut b1, mut e1) = (std::ptr::null_mut(), std::ptr::null_mut());
-            if serialize(&rs_world_desc as *const _ as *const c_void, 1, &mut b1, &mut e1) < 0 || b1.is_null() {
-                return Err("Serialize world RS failed".into());
-            }
-            let b1 = ID3DBlob::from_raw(b1);
-            let rs_world: ID3D12RootSignature = dev
-                .CreateRootSignature(0, std::slice::from_raw_parts(b1.GetBufferPointer() as *const u8, b1.GetBufferSize()))
-                .map_err(|e| format!("CreateRootSignature(world): {e}"))?;
-
-            // Root signature 2: 2D HUD (empty)
-            let rs_hud_desc = D3D12_ROOT_SIGNATURE_DESC {
-                Flags: D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
-                ..Default::default()
-            };
-            let (mut b2, mut e2) = (std::ptr::null_mut(), std::ptr::null_mut());
-            if serialize(&rs_hud_desc as *const _ as *const c_void, 1, &mut b2, &mut e2) < 0 || b2.is_null() {
-                return Err("Serialize hud RS failed".into());
-            }
-            let b2 = ID3DBlob::from_raw(b2);
-            let rs_hud: ID3D12RootSignature = dev
-                .CreateRootSignature(0, std::slice::from_raw_parts(b2.GetBufferPointer() as *const u8, b2.GetBufferSize()))
-                .map_err(|e| format!("CreateRootSignature(hud): {e}"))?;
-
-            // 3D Input Layout
-            let elem3d = [
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"POSITION\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32B32_FLOAT,
-                    AlignedByteOffset: 0,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+            let static_samplers = [
+                D3D12_STATIC_SAMPLER_DESC {
+                    Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                    AddressU: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                    AddressV: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                    AddressW: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                    ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
+                    MaxLOD: f32::MAX,
+                    ShaderRegister: 0,
+                    RegisterSpace: 0,
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
                     ..Default::default()
                 },
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"NORMAL\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32B32_FLOAT,
-                    AlignedByteOffset: 12,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
-                    ..Default::default()
-                },
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"COLOR\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
-                    AlignedByteOffset: 24,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
-                    ..Default::default()
-                },
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"TEXCOORD\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32_FLOAT,
-                    AlignedByteOffset: 40,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                D3D12_STATIC_SAMPLER_DESC {
+                    Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                    AddressU: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                    AddressV: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                    AddressW: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                    ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
+                    MaxLOD: f32::MAX,
+                    ShaderRegister: 1,
+                    RegisterSpace: 0,
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
                     ..Default::default()
                 },
             ];
 
-            // PSO 1: Opaque 3D World with depth test & write
-            let mut pso_w = D3D12_GRAPHICS_PIPELINE_STATE_DESC::default();
-            pso_w.pRootSignature = transmute_copy(&rs_world);
-            pso_w.VS = D3D12_SHADER_BYTECODE { pShaderBytecode: WORLD_VS.as_ptr() as *const c_void, BytecodeLength: WORLD_VS.len() };
-            pso_w.PS = D3D12_SHADER_BYTECODE { pShaderBytecode: WORLD_PS.as_ptr() as *const c_void, BytecodeLength: WORLD_PS.len() };
-            pso_w.InputLayout = D3D12_INPUT_LAYOUT_DESC { pInputElementDescs: elem3d.as_ptr(), NumElements: elem3d.len() as u32 };
-            pso_w.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8;
-            pso_w.SampleMask = u32::MAX;
-            pso_w.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-            pso_w.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-            pso_w.RasterizerState.DepthClipEnable = true.into();
-            pso_w.DepthStencilState.DepthEnable = true.into();
-            pso_w.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-            pso_w.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-            pso_w.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-            pso_w.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-            pso_w.NumRenderTargets = 1;
-            pso_w.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-            pso_w.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
-            let pso_world: ID3D12PipelineState = dev
-                .CreateGraphicsPipelineState(&pso_w)
-                .map_err(|e| format!("PSO(world): {e}"))?;
+            let r_t0 = [D3D12_DESCRIPTOR_RANGE { RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV, NumDescriptors: 1, BaseShaderRegister: 0, OffsetInDescriptorsFromTableStart: 0, ..Default::default() }];
+            let r_t1 = [D3D12_DESCRIPTOR_RANGE { RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV, NumDescriptors: 1, BaseShaderRegister: 1, OffsetInDescriptorsFromTableStart: 0, ..Default::default() }];
+            let r_t2 = [D3D12_DESCRIPTOR_RANGE { RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV, NumDescriptors: 1, BaseShaderRegister: 2, OffsetInDescriptorsFromTableStart: 0, ..Default::default() }];
 
-            // PSO 2: Additive 3D Glow FX (depth test ON, depth write OFF, additive blend!)
-            let mut pso_f = pso_w.clone();
-            pso_f.pRootSignature = transmute_copy(&rs_world);
-            pso_f.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-            let fb = &mut pso_f.BlendState.RenderTarget[0];
+            let world_params = [
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_CBV,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+                },
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE { NumDescriptorRanges: 1, pDescriptorRanges: r_t0.as_ptr() } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE { NumDescriptorRanges: 1, pDescriptorRanges: r_t1.as_ptr() } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE { NumDescriptorRanges: 1, pDescriptorRanges: r_t2.as_ptr() } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+            ];
+            let rs_world = make_rs(&dev, serialize, &world_params, &static_samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)?;
+
+            let post_params = [
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { Constants: D3D12_ROOT_CONSTANTS { ShaderRegister: 0, RegisterSpace: 0, Num32BitValues: 4 } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE { NumDescriptorRanges: 1, pDescriptorRanges: r_t0.as_ptr() } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+                D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 { DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE { NumDescriptorRanges: 1, pDescriptorRanges: r_t1.as_ptr() } },
+                    ShaderVisibility: D3D12_SHADER_VISIBILITY_PIXEL,
+                },
+            ];
+            let rs_post = make_rs(&dev, serialize, &post_params, &static_samplers, D3D12_ROOT_SIGNATURE_FLAG_NONE)?;
+            let rs_hud = make_rs(&dev, serialize, &[], &[], D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)?;
+
+            // Input Layout for 3D Vertex3D (56 bytes)
+            let elem3d = [
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"POSITION\0".as_ptr()), Format: DXGI_FORMAT_R32G32B32_FLOAT, AlignedByteOffset: 0, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"NORMAL\0".as_ptr()), Format: DXGI_FORMAT_R32G32B32_FLOAT, AlignedByteOffset: 12, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"TEXCOORD\0".as_ptr()), SemanticIndex: 0, Format: DXGI_FORMAT_R32G32_FLOAT, AlignedByteOffset: 24, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"COLOR\0".as_ptr()), Format: DXGI_FORMAT_R32G32B32A32_FLOAT, AlignedByteOffset: 32, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"TEXCOORD\0".as_ptr()), SemanticIndex: 1, Format: DXGI_FORMAT_R32G32_FLOAT, AlignedByteOffset: 48, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+            ];
+
+            let base_hdr_pso = |vs: &[u8], ps: &[u8]| -> D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+                let mut d = D3D12_GRAPHICS_PIPELINE_STATE_DESC::default();
+                d.pRootSignature = transmute_copy(&rs_world);
+                d.VS = D3D12_SHADER_BYTECODE { pShaderBytecode: vs.as_ptr() as *const c_void, BytecodeLength: vs.len() };
+                d.PS = D3D12_SHADER_BYTECODE { pShaderBytecode: ps.as_ptr() as *const c_void, BytecodeLength: ps.len() };
+                d.InputLayout = D3D12_INPUT_LAYOUT_DESC { pInputElementDescs: elem3d.as_ptr(), NumElements: elem3d.len() as u32 };
+                d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8;
+                d.SampleMask = u32::MAX;
+                d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                d.RasterizerState.DepthClipEnable = true.into();
+                d.DepthStencilState.DepthEnable = true.into();
+                d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+                d.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+                d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                d.NumRenderTargets = 1;
+                d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                d.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+                d
+            };
+
+            // PSO: Sky Dome (depth test LESS_EQUAL, depth write OFF)
+            let mut d_sky = base_hdr_pso(V2_SKY_VS, V2_SKY_PS);
+            d_sky.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            d_sky.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            let pso_sky = dev.CreateGraphicsPipelineState(&d_sky).map_err(|e| format!("PSO(sky): {e}"))?;
+
+            // PSO: Track Surface (writes Stencil = 1 so mirror reflections stay strictly on wet asphalt!)
+            let mut d_track = base_hdr_pso(V2_WORLD_VS, V2_TRACK_PS);
+            d_track.DepthStencilState.StencilEnable = true.into();
+            d_track.DepthStencilState.StencilReadMask = 0xFF;
+            d_track.DepthStencilState.StencilWriteMask = 0xFF;
+            let st_write = D3D12_DEPTH_STENCILOP_DESC {
+                StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                StencilPassOp: D3D12_STENCIL_OP_REPLACE,
+                StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
+            };
+            d_track.DepthStencilState.FrontFace = st_write;
+            d_track.DepthStencilState.BackFace = st_write;
+            let pso_track = dev.CreateGraphicsPipelineState(&d_track).map_err(|e| format!("PSO(track): {e}"))?;
+
+            // PSO: City Skyscrapers, Billboards, Sculpted Blender Hovercrafts
+            let pso_city = dev.CreateGraphicsPipelineState(&base_hdr_pso(V2_WORLD_VS, V2_CITY_PS)).map_err(|e| format!("PSO(city): {e}"))?;
+            let pso_billboard = dev.CreateGraphicsPipelineState(&base_hdr_pso(V2_WORLD_VS, V2_BILLBOARD_PS)).map_err(|e| format!("PSO(billboard): {e}"))?;
+            let pso_craft = dev.CreateGraphicsPipelineState(&base_hdr_pso(V2_WORLD_VS, V2_CRAFT_PS)).map_err(|e| format!("PSO(craft): {e}"))?;
+
+            // PSO: True Wet-Track Mirror Reflections (Stencil == 1 ONLY, Depth OFF, Additive HDR blend!)
+            let mut d_refl = base_hdr_pso(V2_WORLD_VS, V2_REFL_PS);
+            d_refl.DepthStencilState.DepthEnable = false.into();
+            d_refl.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            d_refl.DepthStencilState.StencilEnable = true.into();
+            d_refl.DepthStencilState.StencilReadMask = 0xFF;
+            d_refl.DepthStencilState.StencilWriteMask = 0x00;
+            let st_test = D3D12_DEPTH_STENCILOP_DESC {
+                StencilFailOp: D3D12_STENCIL_OP_KEEP,
+                StencilDepthFailOp: D3D12_STENCIL_OP_KEEP,
+                StencilPassOp: D3D12_STENCIL_OP_KEEP,
+                StencilFunc: D3D12_COMPARISON_FUNC_EQUAL,
+            };
+            d_refl.DepthStencilState.FrontFace = st_test;
+            d_refl.DepthStencilState.BackFace = st_test;
+            let rb = &mut d_refl.BlendState.RenderTarget[0];
+            rb.BlendEnable = true.into();
+            rb.SrcBlend = D3D12_BLEND_ONE;
+            rb.DestBlend = D3D12_BLEND_ONE;
+            rb.BlendOp = D3D12_BLEND_OP_ADD;
+            rb.SrcBlendAlpha = D3D12_BLEND_ONE;
+            rb.DestBlendAlpha = D3D12_BLEND_ZERO;
+            rb.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            let pso_refl = dev.CreateGraphicsPipelineState(&d_refl).map_err(|e| format!("PSO(refl): {e}"))?;
+
+            // PSO: Volumetric Swirling Megacity Mist Banks (Depth test ON, write OFF, standard Alpha blend!)
+            let mut d_mist = base_hdr_pso(V2_WORLD_VS, V2_MIST_PS);
+            d_mist.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            let mb = &mut d_mist.BlendState.RenderTarget[0];
+            mb.BlendEnable = true.into();
+            mb.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            mb.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+            mb.BlendOp = D3D12_BLEND_OP_ADD;
+            mb.SrcBlendAlpha = D3D12_BLEND_ONE;
+            mb.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+            mb.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            let pso_mist = dev.CreateGraphicsPipelineState(&d_mist).map_err(|e| format!("PSO(mist): {e}"))?;
+
+            // PSO: Volumetric Additive 3D FX (Depth test ON, write OFF, SrcAlpha + One)
+            let mut d_fx = base_hdr_pso(V2_WORLD_VS, V2_FX_PS);
+            d_fx.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            let fb = &mut d_fx.BlendState.RenderTarget[0];
             fb.BlendEnable = true.into();
             fb.SrcBlend = D3D12_BLEND_SRC_ALPHA;
             fb.DestBlend = D3D12_BLEND_ONE;
@@ -622,26 +877,33 @@ impl Renderer {
             fb.SrcBlendAlpha = D3D12_BLEND_ONE;
             fb.DestBlendAlpha = D3D12_BLEND_ZERO;
             fb.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-            let pso_fx: ID3D12PipelineState = dev
-                .CreateGraphicsPipelineState(&pso_f)
-                .map_err(|e| format!("PSO(fx): {e}"))?;
+            let pso_fx = dev.CreateGraphicsPipelineState(&d_fx).map_err(|e| format!("PSO(fx): {e}"))?;
 
-            // PSO 3: 2D Alpha HUD (no depth)
+            // Post-Processing PSOs (Bloom Extract, Blur H, Blur V, Final ACES Composite)
+            let make_post_pso = |ps: &[u8], rt_fmt: DXGI_FORMAT| -> Result<ID3D12PipelineState, String> {
+                let mut d = D3D12_GRAPHICS_PIPELINE_STATE_DESC::default();
+                d.pRootSignature = transmute_copy(&rs_post);
+                d.VS = D3D12_SHADER_BYTECODE { pShaderBytecode: V2_FULL_VS.as_ptr() as *const c_void, BytecodeLength: V2_FULL_VS.len() };
+                d.PS = D3D12_SHADER_BYTECODE { pShaderBytecode: ps.as_ptr() as *const c_void, BytecodeLength: ps.len() };
+                d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8;
+                d.SampleMask = u32::MAX;
+                d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                d.NumRenderTargets = 1;
+                d.RTVFormats[0] = rt_fmt;
+                d.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+                dev.CreateGraphicsPipelineState(&d).map_err(|e| format!("PSO(post): {e}"))
+            };
+            let pso_bloom_ext = make_post_pso(V2_BLOOM_EXT_PS, DXGI_FORMAT_R16G16B16A16_FLOAT)?;
+            let pso_bloom_h = make_post_pso(V2_BLOOM_H_PS, DXGI_FORMAT_R16G16B16A16_FLOAT)?;
+            let pso_bloom_v = make_post_pso(V2_BLOOM_V_PS, DXGI_FORMAT_R16G16B16A16_FLOAT)?;
+            let pso_composite = make_post_pso(V2_COMPOSITE_PS, DXGI_FORMAT_R8G8B8A8_UNORM)?;
+
+            // PSO: 2D Glassmorphism HUD (drawn onto RGBA8 backbuffer after ACES composite!)
             let elem2d = [
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"POSITION\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32_FLOAT,
-                    AlignedByteOffset: 0,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
-                    ..Default::default()
-                },
-                D3D12_INPUT_ELEMENT_DESC {
-                    SemanticName: PCSTR(b"COLOR\0".as_ptr()),
-                    Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
-                    AlignedByteOffset: 8,
-                    InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
-                    ..Default::default()
-                },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"POSITION\0".as_ptr()), Format: DXGI_FORMAT_R32G32_FLOAT, AlignedByteOffset: 0, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
+                D3D12_INPUT_ELEMENT_DESC { SemanticName: PCSTR(b"COLOR\0".as_ptr()), Format: DXGI_FORMAT_R32G32B32A32_FLOAT, AlignedByteOffset: 8, InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, ..Default::default() },
             ];
             let mut pso_h = D3D12_GRAPHICS_PIPELINE_STATE_DESC::default();
             pso_h.pRootSignature = transmute_copy(&rs_hud);
@@ -664,53 +926,67 @@ impl Renderer {
             pso_h.NumRenderTargets = 1;
             pso_h.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
             pso_h.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
-            let pso_hud: ID3D12PipelineState = dev
-                .CreateGraphicsPipelineState(&pso_h)
-                .map_err(|e| format!("PSO(hud): {e}"))?;
+            let pso_hud = dev.CreateGraphicsPipelineState(&pso_h).map_err(|e| format!("PSO(hud): {e}"))?;
 
+            // Persistent-mapped dynamic buffers + Sky Dome sphere
             let (cb_buf, cb_raw, cb_gpu) = create_upload_buf(&dev, size_of::<FrameCB>() as u64)?;
-            let (dyn3d_buf, dyn3d_raw, dyn3d_gpu) = create_upload_buf(&dev, (MAX_DYN3D_VERTS * size_of::<Vertex3D>()) as u64)?;
+            let sky_bucket = GpuBucket::from_verts(&dev, &build_sky_dome_mesh())?;
+            let (craft_buf, craft_raw, craft_gpu) = create_upload_buf(&dev, (MAX_CRAFT_VERTS * size_of::<Vertex3D>()) as u64)?;
+            let (dyn_refl_buf, dyn_refl_raw, dyn_refl_gpu) = create_upload_buf(&dev, (MAX_REFL_VERTS * size_of::<Vertex3D>()) as u64)?;
             let (fx3d_buf, fx3d_raw, fx3d_gpu) = create_upload_buf(&dev, (MAX_FX3D_VERTS * size_of::<Vertex3D>()) as u64)?;
             let (hud2d_buf, hud2d_raw, hud2d_gpu) = create_upload_buf(&dev, (MAX_HUD2D_VERTS * size_of::<Vertex2D>()) as u64)?;
-
-            let alloc: ID3D12CommandAllocator = dev
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
-                .map_err(|e| format!("alloc: {e}"))?;
-            let list: ID3D12GraphicsCommandList = dev
-                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, Some(&pso_world))
-                .map_err(|e| format!("list: {e}"))?;
-            list.Close().map_err(|e| format!("list.Close: {e}"))?;
-            let fence: ID3D12Fence = dev
-                .CreateFence(0, D3D12_FENCE_FLAG_NONE)
-                .map_err(|e| format!("fence: {e}"))?;
-            let fence_ev = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
 
             Ok(Self {
                 dev,
                 queue,
                 bb,
+                scene_rt,
+                bloom_a,
+                bloom_b,
                 _depth: depth,
+                _textures: textures,
                 _rtv_heap: rtv_heap,
                 _dsv_heap: dsv_heap,
-                rtv,
+                srv_heap,
+                rtv_bb,
+                rtv_scene,
+                rtv_bloom_a,
+                rtv_bloom_b,
                 dsv,
+                srv_gpu_start,
+                srv_inc,
                 rs_world,
+                rs_post,
                 rs_hud,
-                pso_world,
+                pso_sky,
+                pso_track,
+                pso_city,
+                pso_billboard,
+                pso_craft,
+                pso_refl,
+                pso_mist,
                 pso_fx,
+                pso_bloom_ext,
+                pso_bloom_h,
+                pso_bloom_v,
+                pso_composite,
                 pso_hud,
                 alloc,
                 list,
                 fence,
                 fence_ev,
-                fence_val: 0,
+                fence_val,
                 _cb_buf: cb_buf,
                 cb_ptr: cb_raw as *mut FrameCB,
                 cb_gpu,
-                static_buf: None,
-                _dyn3d_buf: dyn3d_buf,
-                dyn3d_ptr: dyn3d_raw as *mut Vertex3D,
-                dyn3d_gpu,
+                sky_bucket,
+                static_world: None,
+                _craft_buf: craft_buf,
+                craft_ptr: craft_raw as *mut Vertex3D,
+                craft_gpu,
+                _dyn_refl_buf: dyn_refl_buf,
+                dyn_refl_ptr: dyn_refl_raw as *mut Vertex3D,
+                dyn_refl_gpu,
                 _fx3d_buf: fx3d_buf,
                 fx3d_ptr: fx3d_raw as *mut Vertex3D,
                 fx3d_gpu,
@@ -724,15 +1000,21 @@ impl Renderer {
         }
     }
 
-    pub fn upload_static_world(&mut self, verts: &[Vertex3D]) -> Result<(), String> {
-        let bytes = (verts.len() * size_of::<Vertex3D>()) as u64;
-        let (buf, ptr, gpu) = create_upload_buf(&self.dev, bytes)?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(verts.as_ptr(), ptr as *mut Vertex3D, verts.len());
-            let _ = buf.Unmap(0, None);
-        }
-        self.static_buf = Some((buf, gpu, verts.len() as u32));
+    pub fn upload_static_world(&mut self, world: &StaticWorld) -> Result<(), String> {
+        self.static_world = Some(UploadedStaticWorld {
+            track: GpuBucket::from_verts(&self.dev, &world.track_verts)?,
+            rails: GpuBucket::from_verts(&self.dev, &world.rail_verts)?,
+            city: GpuBucket::from_verts(&self.dev, &world.city_verts)?,
+            billboards: GpuBucket::from_verts(&self.dev, &world.billboard_verts)?,
+            refl: GpuBucket::from_verts(&self.dev, &world.refl_verts)?,
+            mist: GpuBucket::from_verts(&self.dev, &world.mist_verts)?,
+        });
         Ok(())
+    }
+
+    #[inline]
+    fn srv(&self, slot: u64) -> u64 {
+        self.srv_gpu_start + slot * self.srv_inc
     }
 
     pub fn present_frame(
@@ -742,7 +1024,8 @@ impl Renderer {
         time: f32,
         fog_rgb: [f32; 3],
         boost_glow: f32,
-        dyn3d: &[Vertex3D],
+        craft3d: &[Vertex3D],
+        dyn_refl3d: &[Vertex3D],
         fx3d: &[Vertex3D],
         hud2d: &[Vertex2D],
     ) -> Result<(), String> {
@@ -753,17 +1036,21 @@ impl Renderer {
                 token = self.frame + 1;
             }
 
-            // Update constant buffer
+            // Update hardware GPU FrameCB
             *self.cb_ptr = FrameCB {
                 view_proj: view_proj.0,
                 cam_pos_time: [cam_pos[0], cam_pos[1], cam_pos[2], time],
-                fog_params: [fog_rgb[0], fog_rgb[1], fog_rgb[2], 0.00145],
-                sun_dir_glow: [0.42, 0.72, 0.55, boost_glow],
+                fog_params: [fog_rgb[0], fog_rgb[1], fog_rgb[2], 0.00125],
+                sun_dir_glow: [0.46, 0.52, 0.72, boost_glow],
             };
 
-            let dyn_n = dyn3d.len().min(MAX_DYN3D_VERTS);
-            if dyn_n > 0 {
-                std::ptr::copy_nonoverlapping(dyn3d.as_ptr(), self.dyn3d_ptr, dyn_n);
+            let craft_n = craft3d.len().min(MAX_CRAFT_VERTS);
+            if craft_n > 0 {
+                std::ptr::copy_nonoverlapping(craft3d.as_ptr(), self.craft_ptr, craft_n);
+            }
+            let drefl_n = dyn_refl3d.len().min(MAX_REFL_VERTS);
+            if drefl_n > 0 {
+                std::ptr::copy_nonoverlapping(dyn_refl3d.as_ptr(), self.dyn_refl_ptr, drefl_n);
             }
             let fx_n = fx3d.len().min(MAX_FX3D_VERTS);
             if fx_n > 0 {
@@ -775,90 +1062,184 @@ impl Renderer {
             }
 
             self.alloc.Reset().map_err(|e| format!("alloc.Reset: {e}"))?;
-            self.list.Reset(&self.alloc, Some(&self.pso_world)).map_err(|e| format!("list.Reset: {e}"))?;
+            self.list.Reset(&self.alloc, Some(&self.pso_sky)).map_err(|e| format!("list.Reset: {e}"))?;
 
-            let barrier = |before, after| D3D12_RESOURCE_BARRIER {
+            let l = self.list.as_raw();
+            let barrier = |res: &ID3D12Resource, before, after| D3D12_RESOURCE_BARRIER {
                 Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
                 Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
                 Anonymous: D3D12_RESOURCE_BARRIER_0 {
                     Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                        pResource: transmute_copy(&self.bb),
+                        pResource: transmute_copy(res),
                         Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                         StateBefore: before,
                         StateAfter: after,
                     }),
                 },
             };
+
             if self.frame > 0 {
-                self.list.ResourceBarrier(&[barrier(
-                    D3D12_RESOURCE_STATE_PRESENT,
-                    D3D12_RESOURCE_STATE_RENDER_TARGET,
-                )]);
+                self.list.ResourceBarrier(&[
+                    barrier(&self.bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    barrier(&self.scene_rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                ]);
             }
 
-            let l = self.list.as_raw();
-            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv, 0, &self.dsv);
-            let clear = [fog_rgb[0] * 0.75, fog_rgb[1] * 0.75, fog_rgb[2] * 0.85, 1.0];
-            vslot::<ClearRtvFn>(l, X_CLEAR_RENDER_TARGET_VIEW)(l, self.rtv, &clear, 0, std::ptr::null());
-            vslot::<ClearDsvFn>(l, X_CLEAR_DEPTH_STENCIL_VIEW)(l, self.dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0, 0, 0, std::ptr::null());
+            let heaps = [self.srv_heap.as_raw()];
+            vslot::<SetDescriptorHeapsFn>(l, X_SET_DESCRIPTOR_HEAPS)(l, 1, heaps.as_ptr());
 
-            self.list.RSSetViewports(&[D3D12_VIEWPORT {
-                TopLeftX: 0.0,
-                TopLeftY: 0.0,
-                Width: SCREEN_W as f32,
-                Height: SCREEN_H as f32,
-                MinDepth: 0.0,
-                MaxDepth: 1.0,
-            }]);
-            self.list.RSSetScissorRects(&[RECT {
-                left: 0,
-                top: 0,
-                right: SCREEN_W as i32,
-                bottom: SCREEN_H as i32,
-            }]);
-            self.list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-            // PASS 1: Opaque 3D World (static circuit + megacity, then dynamic 8 ships)
-            vslot::<SetRootSignatureFn>(l, X_SET_GRAPHICS_ROOT_SIGNATURE)(l, self.rs_world.as_raw());
-            vslot::<SetRootCbvFn>(l, X_SET_GRAPHICS_ROOT_CBV)(l, 0, self.cb_gpu);
-            self.list.SetPipelineState(&self.pso_world);
-
-            if let Some((_, gpu, count)) = &self.static_buf {
-                if *count >= 3 {
+            let set_vp = |w: u32, h: u32| {
+                self.list.RSSetViewports(&[D3D12_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: w as f32,
+                    Height: h as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }]);
+                self.list.RSSetScissorRects(&[RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 }]);
+            };
+            let draw_vb3 = |gpu: u64, count: u32| {
+                if count >= 3 {
                     let view = D3D12_VERTEX_BUFFER_VIEW {
-                        BufferLocation: *gpu,
-                        SizeInBytes: (*count as usize * size_of::<Vertex3D>()) as u32,
+                        BufferLocation: gpu,
+                        SizeInBytes: (count as usize * size_of::<Vertex3D>()) as u32,
                         StrideInBytes: size_of::<Vertex3D>() as u32,
                     };
                     vslot::<IaSetVertexBuffersFn>(l, X_IA_SET_VERTEX_BUFFERS)(l, 0, 1, &view);
-                    self.list.DrawInstanced(*count, 1, 0, 0);
+                    self.list.DrawInstanced(count, 1, 0, 0);
                 }
-            }
-            if dyn_n >= 3 {
-                let view = D3D12_VERTEX_BUFFER_VIEW {
-                    BufferLocation: self.dyn3d_gpu,
-                    SizeInBytes: (dyn_n * size_of::<Vertex3D>()) as u32,
-                    StrideInBytes: size_of::<Vertex3D>() as u32,
-                };
-                vslot::<IaSetVertexBuffersFn>(l, X_IA_SET_VERTEX_BUFFERS)(l, 0, 1, &view);
-                self.list.DrawInstanced(dyn_n as u32, 1, 0, 0);
+            };
+
+            // =====================================================================
+            // SCENE HDR RENDER PASS (1920x1080 RGBA16F + D24_S8 Hardware Stencil)
+            // =====================================================================
+            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv_scene, 0, &self.dsv);
+            let clear = [fog_rgb[0] * 0.65, fog_rgb[1] * 0.65, fog_rgb[2] * 0.85, 1.0];
+            vslot::<ClearRtvFn>(l, X_CLEAR_RENDER_TARGET_VIEW)(l, self.rtv_scene, &clear, 0, std::ptr::null());
+            vslot::<ClearDsvFn>(l, X_CLEAR_DEPTH_STENCIL_VIEW)(
+                l,
+                self.dsv,
+                D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                1.0,
+                0,
+                0,
+                std::ptr::null(),
+            );
+            set_vp(SCREEN_W, SCREEN_H);
+            self.list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            vslot::<SetRootSignatureFn>(l, X_SET_GRAPHICS_ROOT_SIGNATURE)(l, self.rs_world.as_raw());
+            vslot::<SetRootCbvFn>(l, X_SET_GRAPHICS_ROOT_CBV)(l, 0, self.cb_gpu);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 2, self.srv(SRV_TRACK_PUDDLE));
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 3, self.srv(SRV_SKY_TWILIGHT));
+
+            // 1. Twilight Storm-Cloud Sky Dome
+            self.list.SetPipelineState(&self.pso_sky);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_SKY_TWILIGHT));
+            draw_vb3(self.sky_bucket.gpu, self.sky_bucket.count);
+
+            if let Some(sw) = &self.static_world {
+                // 2. Cyberpunk Megacity Blender Skyscraper Spires (textured illuminated windows!)
+                self.list.SetPipelineState(&self.pso_city);
+                vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_CITY_FACADE));
+                draw_vb3(sw.city.gpu, sw.city.count);
+
+                // 3. Wet Metallic Track Surface (albedo + puddle reflection + writes Stencil = 1!)
+                vslot::<OmSetStencilRefFn>(l, X_OM_SET_STENCIL_REF)(l, 1);
+                self.list.SetPipelineState(&self.pso_track);
+                vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_TRACK_ALBEDO));
+                draw_vb3(sw.track.gpu, sw.track.count);
+
+                // 4. TRUE PLANAR WET-TRACK MIRROR REFLECTIONS (Stencil == 1 ONLY! Ships, plumes, rail LEDs, billboards!)
+                self.list.SetPipelineState(&self.pso_refl);
+                draw_vb3(sw.refl.gpu, sw.refl.count);
+                draw_vb3(self.dyn_refl_gpu, drefl_n as u32);
+
+                // 5. Trackside Metallic Rails, Neon LED Tubes, Boost Chevrons & Overhead Arches
+                self.list.SetPipelineState(&self.pso_craft);
+                draw_vb3(sw.rails.gpu, sw.rails.count);
+
+                // 6. Glowing Cyberpunk Billboards (NEO-KYOTO, VORTEX ENERGY, CHRONOS TECN, AETHER-1) & Animated Turn Chevrons
+                self.list.SetPipelineState(&self.pso_billboard);
+                vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_BILLBOARD));
+                draw_vb3(sw.billboards.gpu, sw.billboards.count);
             }
 
-            // PASS 2: Additive 3D FX (thruster ribbons, rain streaks, boost rings, sparks)
-            if fx_n >= 3 {
-                self.list.SetPipelineState(&self.pso_fx);
-                let view = D3D12_VERTEX_BUFFER_VIEW {
-                    BufferLocation: self.fx3d_gpu,
-                    SizeInBytes: (fx_n * size_of::<Vertex3D>()) as u32,
-                    StrideInBytes: size_of::<Vertex3D>() as u32,
-                };
-                vslot::<IaSetVertexBuffersFn>(l, X_IA_SET_VERTEX_BUFFERS)(l, 0, 1, &view);
-                self.list.DrawInstanced(fx_n as u32, 1, 0, 0);
+            // 7. All 8 Sculpted Blender 5.2 Hovercrafts (PBR metallic clearcoat + sky reflections + glowing nacelle rims!)
+            self.list.SetPipelineState(&self.pso_craft);
+            draw_vb3(self.craft_gpu, craft_n as u32);
+
+            // 7b. Layered Volumetric Swirling Megacity Mist Cloud Banks weaving between skyscrapers!
+            if let Some(sw) = &self.static_world {
+                self.list.SetPipelineState(&self.pso_mist);
+                draw_vb3(sw.mist.gpu, sw.mist.count);
             }
 
-            // PASS 3: 2D Sci-Fi Racing HUD (alpha blended, no depth)
+            // 8. Volumetric Additive FX (blazing dual plasma plumes, wake ribbons, rain streaks, sparks)
+            self.list.SetPipelineState(&self.pso_fx);
+            draw_vb3(self.fx3d_gpu, fx_n as u32);
+
+            // =====================================================================
+            // HDR BLOOM POST-PROCESSING (Quarter-Res Bright Extract + Separable Blur)
+            // =====================================================================
+            self.list.ResourceBarrier(&[
+                barrier(&self.scene_rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                barrier(&self.bloom_a, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            ]);
+
+            vslot::<SetRootSignatureFn>(l, X_SET_GRAPHICS_ROOT_SIGNATURE)(l, self.rs_post.as_raw());
+            set_vp(BLOOM_W, BLOOM_H);
+
+            // 9a. Bright-pass extract -> bloom_a
+            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv_bloom_a, 0, std::ptr::null());
+            self.list.SetPipelineState(&self.pso_bloom_ext);
+            let ext_c = [1.0f32 / SCREEN_W as f32, 1.0f32 / SCREEN_H as f32, 0.0f32, 0.0f32];
+            vslot::<SetRootConstsFn>(l, X_SET_GRAPHICS_ROOT_32BIT_CONSTS)(l, 0, 4, ext_c.as_ptr() as *const u32, 0);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_SCENE_HDR));
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 2, self.srv(SRV_SCENE_HDR));
+            self.list.DrawInstanced(3, 1, 0, 0);
+
+            // 9b. Horizontal Gaussian blur (bloom_a -> bloom_b)
+            self.list.ResourceBarrier(&[
+                barrier(&self.bloom_a, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                barrier(&self.bloom_b, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            ]);
+            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv_bloom_b, 0, std::ptr::null());
+            self.list.SetPipelineState(&self.pso_bloom_h);
+            let blur_c = [1.0f32 / BLOOM_W as f32, 1.0f32 / BLOOM_H as f32, 0.0f32, 0.0f32];
+            vslot::<SetRootConstsFn>(l, X_SET_GRAPHICS_ROOT_32BIT_CONSTS)(l, 0, 4, blur_c.as_ptr() as *const u32, 0);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_BLOOM_A));
+            self.list.DrawInstanced(3, 1, 0, 0);
+
+            // 9c. Vertical Gaussian blur (bloom_b -> bloom_a)
+            self.list.ResourceBarrier(&[
+                barrier(&self.bloom_b, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                barrier(&self.bloom_a, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            ]);
+            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv_bloom_a, 0, std::ptr::null());
+            self.list.SetPipelineState(&self.pso_bloom_v);
+            vslot::<SetRootConstsFn>(l, X_SET_GRAPHICS_ROOT_32BIT_CONSTS)(l, 0, 4, blur_c.as_ptr() as *const u32, 0);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_BLOOM_B));
+            self.list.DrawInstanced(3, 1, 0, 0);
+
+            // 9d. Final Composite (Scene HDR + Bloom Glow + Speed Chromatic Vignette + ACES Tonemap -> Backbuffer!)
+            self.list.ResourceBarrier(&[
+                barrier(&self.bloom_a, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            ]);
+            set_vp(SCREEN_W, SCREEN_H);
+            vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv_bb, 0, std::ptr::null());
+            self.list.SetPipelineState(&self.pso_composite);
+            let comp_c = [1.0f32 / SCREEN_W as f32, 1.0f32 / SCREEN_H as f32, 0.78f32 + boost_glow * 0.30, boost_glow];
+            vslot::<SetRootConstsFn>(l, X_SET_GRAPHICS_ROOT_32BIT_CONSTS)(l, 0, 4, comp_c.as_ptr() as *const u32, 0);
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 1, self.srv(SRV_SCENE_HDR));
+            vslot::<SetRootTableFn>(l, X_SET_GRAPHICS_ROOT_TABLE)(l, 2, self.srv(SRV_BLOOM_A));
+            self.list.DrawInstanced(3, 1, 0, 0);
+
+            // =====================================================================
+            // 10. Crisp 2D Glassmorphism Racing HUD (drawn post-tonemap onto Backbuffer!)
+            // =====================================================================
             if hud_n >= 3 {
-                vslot::<OmSetRenderTargetsFn>(l, X_OM_SET_RENDER_TARGETS)(l, 1, &self.rtv, 0, std::ptr::null());
                 vslot::<SetRootSignatureFn>(l, X_SET_GRAPHICS_ROOT_SIGNATURE)(l, self.rs_hud.as_raw());
                 self.list.SetPipelineState(&self.pso_hud);
                 let view = D3D12_VERTEX_BUFFER_VIEW {
@@ -871,6 +1252,7 @@ impl Renderer {
             }
 
             self.list.ResourceBarrier(&[barrier(
+                &self.bb,
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 D3D12_RESOURCE_STATE_PRESENT,
             )]);
@@ -899,6 +1281,107 @@ impl Renderer {
             Ok(())
         }
     }
+}
+
+unsafe fn make_rs(
+    dev: &ID3D12Device,
+    serialize: D3D12SerializeRootSignatureFn,
+    params: &[D3D12_ROOT_PARAMETER],
+    samplers: &[D3D12_STATIC_SAMPLER_DESC],
+    flags: D3D12_ROOT_SIGNATURE_FLAGS,
+) -> Result<ID3D12RootSignature, String> {
+    let desc = D3D12_ROOT_SIGNATURE_DESC {
+        NumParameters: params.len() as u32,
+        pParameters: if params.is_empty() { std::ptr::null() } else { params.as_ptr() },
+        NumStaticSamplers: samplers.len() as u32,
+        pStaticSamplers: if samplers.is_empty() { std::ptr::null() } else { samplers.as_ptr() },
+        Flags: flags,
+    };
+    let (mut blob, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
+    if serialize(&desc as *const _ as *const c_void, 1, &mut blob, &mut err) < 0 || blob.is_null() {
+        return Err("D3D12SerializeRootSignature failed".into());
+    }
+    let blob = ID3DBlob::from_raw(blob);
+    dev.CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize()))
+        .map_err(|e| format!("CreateRootSignature: {e}"))
+}
+
+unsafe fn upload_texture_2d(
+    dev: &ID3D12Device,
+    list: &ID3D12GraphicsCommandList,
+    rt: &RawTexture,
+) -> Result<(ID3D12Resource, ID3D12Resource), String> {
+    let tex_desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        Width: rt.width as u64,
+        Height: rt.height,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        ..Default::default()
+    };
+    let mut tex: Option<ID3D12Resource> = None;
+    dev.CreateCommittedResource(
+        &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+        D3D12_HEAP_FLAG_NONE,
+        &tex_desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        None,
+        &mut tex,
+    )
+    .map_err(|e| format!("CreateTex({}x{}): {e}", rt.width, rt.height))?;
+    let tex = tex.ok_or("tex null")?;
+
+    let row_bytes = (rt.width * 4) as usize;
+    let row_pitch = (row_bytes + 255) & !255;
+    let total_bytes = (row_pitch * rt.height as usize) as u64;
+    let (stg, ptr, _) = create_upload_buf(dev, total_bytes)?;
+    for y in 0..rt.height as usize {
+        std::ptr::copy_nonoverlapping(
+            rt.rgba.as_ptr().add(y * row_bytes),
+            ptr.add(y * row_pitch),
+            row_bytes,
+        );
+    }
+
+    let dst_loc = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: transmute_copy(&tex),
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+    };
+    let src_loc = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: transmute_copy(&stg),
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: 0,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                    Width: rt.width,
+                    Height: rt.height,
+                    Depth: 1,
+                    RowPitch: row_pitch as u32,
+                },
+            },
+        },
+    };
+    list.CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, None);
+
+    let bar = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                pResource: transmute_copy(&tex),
+                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                StateBefore: D3D12_RESOURCE_STATE_COPY_DEST,
+                StateAfter: D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            }),
+        },
+    };
+    list.ResourceBarrier(&[bar]);
+    Ok((tex, stg))
 }
 
 impl Drop for Renderer {

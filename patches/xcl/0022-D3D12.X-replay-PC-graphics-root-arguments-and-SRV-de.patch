@@ -1,0 +1,266 @@
+From 5d30dedc33bc0d5f0e1e833aaecc1564b4b0c17a Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 20:58:19 +0100
+Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV descriptor
+ tables
+
+---
+ crates/xcl/src/hle/d3d12x/bind.rs         | 115 +++++++++++++++++++---
+ crates/xcl/src/hle/d3d12x/console_heap.rs |  26 +++++
+ crates/xcl/src/hle/d3d12x/real.rs         |   6 +-
+ 3 files changed, 132 insertions(+), 15 deletions(-)
+
+diff --git a/crates/xcl/src/hle/d3d12x/bind.rs b/crates/xcl/src/hle/d3d12x/bind.rs
+index da5b15e..58f9a75 100644
+--- a/crates/xcl/src/hle/d3d12x/bind.rs
++++ b/crates/xcl/src/hle/d3d12x/bind.rs
+@@ -18,6 +18,16 @@ use windows::Win32::Graphics::Direct3D12::*;
+ 
+ use super::console_list::{self, Layout, Param};
+ 
++#[derive(Clone)]
++enum PcGfxOp {
++    Table(u32, u64),
++    Constant(u32, u32, u32),
++    Constants(u32, Vec<u32>, u32),
++    Cbv(u32, u64),
++    Srv(u32, u64),
++    Uav(u32, u64),
++}
++
+ #[derive(Default)]
+ struct State {
+     layout: Option<Arc<Layout>>,
+@@ -28,6 +38,8 @@ struct State {
+     /// the title's graphics root signature (a PC object), bound before a draw with an
+     /// untranslated pipeline – created with it – since SetGraphicsRootSignature binds nothing
+     rs_gfx: usize,
++    /// graphics root bindings replayed for untranslated PC pipelines
++    pc_gfx_ops: Vec<PcGfxOp>,
+     pso: usize,
+     allocator: usize,
+     /// unified memory of this recording (io, argument tables)
+@@ -82,6 +94,7 @@ pub(super) fn reset(list: *mut c_void, allocator: usize, initial_pso: usize) {
+         s.layout_gfx = None;
+         s.args_gfx.clear();
+         s.rs_gfx = 0;
++        s.pc_gfx_ops.clear();
+         (old, std::mem::take(&mut s.uma))
+     });
+     console_list::hold_until_reset(old, blocks);
+@@ -97,6 +110,7 @@ pub(super) fn clear_state(list: *mut c_void, pso: usize) {
+         s.layout_gfx = None;
+         s.args_gfx.clear();
+         s.rs_gfx = 0;
++        s.pc_gfx_ops.clear();
+     });
+ }
+ 
+@@ -104,8 +118,8 @@ pub(super) fn clear_state(list: *mut c_void, pso: usize) {
+ /// deferred mid-list split (`to` records into `allocator` with its own fresh UMA arena while
+ /// `from` retains its previously allocated blocks until `allocator` resets).
+ pub(super) fn inherit_for_split(from: *mut c_void, to: *mut c_void, allocator: usize) {
+-    let (layout, args, layout_gfx, args_gfx, rs_gfx, pso) = with(from, |s| {
+-        (s.layout.clone(), s.args.clone(), s.layout_gfx.clone(), s.args_gfx.clone(), s.rs_gfx, s.pso)
++    let (layout, args, layout_gfx, args_gfx, rs_gfx, pc_gfx_ops, pso) = with(from, |s| {
++        (s.layout.clone(), s.args.clone(), s.layout_gfx.clone(), s.args_gfx.clone(), s.rs_gfx, s.pc_gfx_ops.clone(), s.pso)
+     });
+     let (old, blocks) = with(to, |s| {
+         let old = std::mem::replace(&mut s.allocator, allocator);
+@@ -115,6 +129,7 @@ pub(super) fn inherit_for_split(from: *mut c_void, to: *mut c_void, allocator: u
+         s.layout_gfx = layout_gfx;
+         s.args_gfx = args_gfx;
+         s.rs_gfx = rs_gfx;
++        s.pc_gfx_ops = pc_gfx_ops;
+         s.pso = pso;
+         (old, std::mem::take(&mut s.uma))
+     });
+@@ -178,32 +193,111 @@ pub(super) unsafe extern "system" fn set_graphics_root_signature(this: *mut c_vo
+         s.args_gfx = vec![0u8; layout.as_ref().map_or(0, |l| l.size as usize)];
+         s.layout_gfx = layout;
+         s.rs_gfx = rs as usize;
++        s.pc_gfx_ops.clear();
+     });
+ }
+ 
+ /// #36 SetGraphicsRootDescriptorTable (PC #32)
+ pub(super) unsafe extern "system" fn set_graphics_root_table(this: *mut c_void, i: u32, handle: u64) {
+     put_in(this, true, i, 0, &(handle as u32).to_le_bytes());
++    with(this, |s| {
++        s.pc_gfx_ops.retain(|op| !matches!(op, PcGfxOp::Table(idx, _) if *idx == i));
++        s.pc_gfx_ops.push(PcGfxOp::Table(i, handle));
++    });
+ }
+ 
+ /// #38 SetGraphicsRoot32BitConstant (PC #34)
+ pub(super) unsafe extern "system" fn set_graphics_root_constant(this: *mut c_void, i: u32, value: u32, offset: u32) {
+     put_in(this, true, i, offset, &value.to_le_bytes());
++    with(this, |s| s.pc_gfx_ops.push(PcGfxOp::Constant(i, value, offset)));
+ }
+ 
+ /// #40 SetGraphicsRoot32BitConstants (PC #36)
+ pub(super) unsafe extern "system" fn set_graphics_root_constants(this: *mut c_void, i: u32, n: u32, data: *const u32, offset: u32) {
+     if !data.is_null() {
+-        let bytes: Vec<u8> = std::slice::from_raw_parts(data, n as usize).iter().flat_map(|w| w.to_le_bytes()).collect();
++        let slice = std::slice::from_raw_parts(data, n as usize);
++        let bytes: Vec<u8> = slice.iter().flat_map(|w| w.to_le_bytes()).collect();
+         put_in(this, true, i, offset, &bytes);
++        let words = slice.to_vec();
++        with(this, |s| s.pc_gfx_ops.push(PcGfxOp::Constants(i, words, offset)));
+     }
+ }
+ 
+-/// #42 / #44 / #46 SetGraphicsRoot{ConstantBuffer,ShaderResource,UnorderedAccess}View (PC #38 /
+-/// #40 / #42)
+-pub(super) unsafe extern "system" fn set_graphics_root_descriptor(this: *mut c_void, i: u32, va: u64) {
++/// #42 SetGraphicsRootConstantBufferView (PC #38)
++pub(super) unsafe extern "system" fn set_graphics_root_cbv(this: *mut c_void, i: u32, va: u64) {
++    note_address(va);
++    put_in(this, true, i, 0, &va.to_le_bytes());
++    with(this, |s| {
++        s.pc_gfx_ops.retain(|op| !matches!(op, PcGfxOp::Cbv(idx, _) if *idx == i));
++        s.pc_gfx_ops.push(PcGfxOp::Cbv(i, va));
++    });
++}
++
++/// #44 SetGraphicsRootShaderResourceView (PC #40)
++pub(super) unsafe extern "system" fn set_graphics_root_srv(this: *mut c_void, i: u32, va: u64) {
++    note_address(va);
++    put_in(this, true, i, 0, &va.to_le_bytes());
++    with(this, |s| {
++        s.pc_gfx_ops.retain(|op| !matches!(op, PcGfxOp::Srv(idx, _) if *idx == i));
++        s.pc_gfx_ops.push(PcGfxOp::Srv(i, va));
++    });
++}
++
++/// #46 SetGraphicsRootUnorderedAccessView (PC #42)
++pub(super) unsafe extern "system" fn set_graphics_root_uav(this: *mut c_void, i: u32, va: u64) {
+     note_address(va);
+     put_in(this, true, i, 0, &va.to_le_bytes());
++    with(this, |s| {
++        s.pc_gfx_ops.retain(|op| !matches!(op, PcGfxOp::Uav(idx, _) if *idx == i));
++        s.pc_gfx_ops.push(PcGfxOp::Uav(i, va));
++    });
++}
++
++unsafe fn bind_pc_graphics_args(this: *mut c_void, list: &ID3D12GraphicsCommandList) {
++    let (rs, ops) = with(this, |s| (s.rs_gfx, s.pc_gfx_ops.clone()));
++    let rs_ptr = rs as *mut c_void;
++    let Some(r) = ID3D12RootSignature::from_raw_borrowed(&rs_ptr) else {
++        return;
++    };
++    if ops.iter().any(|op| matches!(op, PcGfxOp::Table(_, _))) {
++        super::list_x::ensure_view_heap(this);
++    }
++    list.SetGraphicsRootSignature(r);
++    for op in ops {
++        match op {
++            PcGfxOp::Table(i, handle) => {
++                if let Some(gpu) = super::console_heap::pc_gpu_handle(handle) {
++                    list.SetGraphicsRootDescriptorTable(i, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: gpu });
++                }
++            }
++            PcGfxOp::Constant(i, value, offset) => {
++                list.SetGraphicsRoot32BitConstant(i, value, offset);
++            }
++            PcGfxOp::Constants(i, words, offset) => {
++                if !words.is_empty() {
++                    list.SetGraphicsRoot32BitConstants(i, words.len() as u32, words.as_ptr() as *const c_void, offset);
++                }
++            }
++            PcGfxOp::Cbv(i, va) => {
++                let pc_va = super::list_x::pc_va_of(va);
++                if pc_va != 0 {
++                    list.SetGraphicsRootConstantBufferView(i, pc_va);
++                }
++            }
++            PcGfxOp::Srv(i, va) => {
++                let pc_va = super::list_x::pc_va_of(va);
++                if pc_va != 0 {
++                    list.SetGraphicsRootShaderResourceView(i, pc_va);
++                }
++            }
++            PcGfxOp::Uav(i, va) => {
++                let pc_va = super::list_x::pc_va_of(va);
++                if pc_va != 0 {
++                    list.SetGraphicsRootUnorderedAccessView(i, pc_va);
++                }
++            }
++        }
++    }
+ }
+ 
+ /// `XCL_TRACE_ADDRESSES=1`: root descriptor addresses of console code – in unified memory
+@@ -514,12 +608,9 @@ unsafe fn graphics_bound(this: *mut c_void) -> Option<ID3D12GraphicsCommandList>
+             }
+         }
+         // a PC pipeline (also a stand-in or fallback: made with the title's root signature):
+-        // the title's root signature, which nothing else binds on the PC list – a draw without
+-        // one is invalid (the debug layer reports it on every GPU; WARP faults on it)
+-        let rs = with(this, |s| s.rs_gfx) as *mut c_void;
+-        if let Some(r) = ID3D12RootSignature::from_raw_borrowed(&rs) {
+-            list.SetGraphicsRootSignature(r);
+-        }
++        // bind the title's root signature and replay any recorded PC root arguments (CBVs,
++        // constants, descriptor tables) before drawing.
++        bind_pc_graphics_args(this, &list);
+         return Some(list);
+     }
+     if super::present::trace_frame() {
+diff --git a/crates/xcl/src/hle/d3d12x/console_heap.rs b/crates/xcl/src/hle/d3d12x/console_heap.rs
+index 14d4f36..2a97e89 100644
+--- a/crates/xcl/src/hle/d3d12x/console_heap.rs
++++ b/crates/xcl/src/hle/d3d12x/console_heap.rs
+@@ -393,6 +393,32 @@ pub fn start(obj: usize) -> Option<u64> {
+     HEAPS.lock().unwrap().iter().find(|h| h.obj == obj).map(|h| h.shadow as u64)
+ }
+ 
++/// Shader-visible PC GPU descriptor handle for the SRV (or sampler) at a console descriptor handle.
++pub fn pc_gpu_handle(handle: u64) -> Option<u64> {
++    if handle == 0 {
++        return None;
++    }
++    let full = if handle < (1u64 << 32) {
++        crate::gpu::uma::get().map(|u| u.base() as u64 + handle)?
++    } else {
++        handle
++    };
++    let s = slot(full)?;
++    if s.sampler {
++        let heaps = HEAPS.lock().unwrap();
++        let h = heaps.iter().find(|h| full >= h.shadow as u64 && full < (h.shadow + (h.n * h.slot_bytes()) as usize) as u64)?;
++        return (h.pc_gpu != 0).then(|| h.pc_gpu + (s.k * h.inc) as u64);
++    }
++    if s.shared_srv != 0 {
++        let g = GLOBAL.lock().unwrap();
++        let g = g.as_ref()?;
++        return Some(g.gpu + s.index as u64 * g.inc as u64);
++    }
++    let heaps = HEAPS.lock().unwrap();
++    let h = heaps.iter().find(|h| full >= h.shadow as u64 && full < (h.shadow + (h.n * h.slot_bytes()) as usize) as u64)?;
++    (h.pc_gpu != 0).then(|| h.pc_gpu + (2 * s.k * h.inc) as u64)
++}
++
+ /// A console slot: where its descriptor goes and its PC descriptors.
+ #[derive(Clone, Copy, Debug)]
+ pub struct Slot {
+diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
+index bc8e709..b8d58c4 100644
+--- a/crates/xcl/src/hle/d3d12x/real.rs
++++ b/crates/xcl/src/hle/d3d12x/real.rs
+@@ -987,9 +987,9 @@ fn console_slots(kind: Kind) -> Vec<(usize, usize)> {
+                 (36, b::set_graphics_root_table as usize),
+                 (38, b::set_graphics_root_constant as usize),
+                 (40, b::set_graphics_root_constants as usize),
+-                (42, b::set_graphics_root_descriptor as usize),
+-                (44, b::set_graphics_root_descriptor as usize),
+-                (46, b::set_graphics_root_descriptor as usize),
++                (42, b::set_graphics_root_cbv as usize),
++                (44, b::set_graphics_root_srv as usize),
++                (46, b::set_graphics_root_uav as usize),
+                 (26, l::resource_barrier_x as usize),
+                 (25, b::set_pipeline_state as usize),
+                 (33, b::set_compute_root_signature as usize),
+-- 
+2.48.1.windows.1
+
