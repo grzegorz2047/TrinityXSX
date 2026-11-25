@@ -10,6 +10,7 @@ on:
     paths:
       - pins.env
       - patches/**
+      - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
@@ -21,6 +22,7 @@ on:
     paths:
       - pins.env
       - patches/**
+      - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
@@ -52,6 +54,22 @@ jobs:
 
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
+
+      - name: Verify sce_sys ProsperoStore metadata
+        run: |
+          python3 - <<'PY'
+          import json, re, struct
+          from pathlib import Path
+          param = json.loads(Path("sce_sys/param.json").read_text(encoding="utf-8-sig"))
+          assert param.get("titleId") == "PPSA83601", f"unexpected titleId: {param.get('titleId')}"
+          cv = param.get("contentVersion", "")
+          assert re.fullmatch(r"\d{2}\.\d{3}\.\d{3}", cv), f"invalid contentVersion: {cv!r}"
+          png = Path("sce_sys/icon0.png").read_bytes()
+          assert png.startswith(b"\x89PNG\r\n\x1a\n"), "sce_sys/icon0.png is not a PNG"
+          w, h = struct.unpack(">II", png[16:24])
+          assert (w, h) == (512, 512), f"expected 512x512 icon0.png, got {w}x{h}"
+          print(f"sce_sys OK: titleId={param['titleId']} contentVersion={cv} icon0={w}x{h}")
+          PY
 
       - name: Syntax-check tools/sync_upstream.py & standalone build scripts
         run: |

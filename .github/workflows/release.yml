@@ -29,6 +29,26 @@ jobs:
       - uses: actions/checkout@v7
       - run: python3 -m unittest standalone.test_standalone -v
       - run: bash -n tools/build-standalone-ffpkg.sh
+      - name: Verify sce_sys/param.json contentVersion matches release tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          python3 - "$TAG" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          tag = sys.argv[1]
+          m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", tag)
+          assert m, f"Release tag {tag!r} does not match vX.Y.Z"
+          maj, minor, patch = (int(x) for x in m.groups())
+          expected = f"{max(maj, 1):02d}.{minor:03d}.{patch:03d}"
+          param = json.loads(Path("sce_sys/param.json").read_text(encoding="utf-8-sig"))
+          actual = param.get("contentVersion")
+          assert param.get("titleId") == "PPSA83601", f"unexpected titleId: {param.get('titleId')}"
+          assert actual == expected, (
+              f"sce_sys/param.json contentVersion={actual!r} does not match release tag {tag!r} (expected {expected!r}). "
+              "Bump sce_sys/param.json before tagging!"
+          )
+          print(f"Release version guard OK: tag={tag} contentVersion={actual}")
+          PY
       - name: Verify patches/prospero-win apply cleanly
         run: |
           set -euo pipefail

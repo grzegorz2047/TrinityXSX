@@ -17,6 +17,7 @@ int sceSystemServiceLoadExec(const char *path, char *const arguments[]);
 #define SEED_ROOT "/app0/data-seed"
 #define PROFILE_INDEX "/profiles/profiles.lst"
 #define LIBRARY_EXE "/prefix/drive_c/XCL/xcl-library.exe"
+#define RESTART_FLAG "/restart.flag"
 
 int trinityxsx_prepare_storage(const char *source, const char *parent, const char *root, const char **step);
 int trinityxsx_sync_runtime(const char *source, const char *root, const char **step);
@@ -65,6 +66,13 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < argc; ++i) {
         if (argv[i] && strcmp(argv[i], "launcher=1") == 0) {
+#ifdef TRINITYXSX_WITH_SEED
+            if (unlink(STORAGE_ROOT RESTART_FLAG) == 0) {
+                /* TrinityXSX requested a clean restart (e.g. to apply Frame Generation). */
+                boot_log("restart-requested", 0);
+                break;
+            }
+#endif
             /* Wine asked to return after an exit or startup failure. */
             target = targets[1];
             target_arguments = NULL;

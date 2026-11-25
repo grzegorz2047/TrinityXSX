@@ -243,6 +243,14 @@ class StandaloneTests(unittest.TestCase):
         r2 = subprocess.run([str(binary), "sync", str(seed), str(dest)], capture_output=True, text=True, check=True)
         self.assertEqual(r2.stdout.strip(), "0")
 
+    def test_sce_sys_prosperostore_metadata_is_valid(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        param = json.loads((repo_root / "sce_sys/param.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(param["titleId"], "PPSA83601")
+        self.assertRegex(param["contentVersion"], r"^\d{2}\.\d{3}\.\d{3}$")
+        png = (repo_root / "sce_sys/icon0.png").read_bytes()
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

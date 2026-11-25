@@ -1,0 +1,126 @@
+From 8cc4172af65948895daab46295d134df8bcff326 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:05:55 +0100
+Subject: [PATCH] Add Restart Game action to Touchpad quick menu
+
+---
+ native/wine64_main.c     | 12 ++++++++++++
+ src/pw_game_menu.c       |  8 +++++++-
+ src/pw_game_menu.h       |  1 +
+ src/pw_launcher_render.c | 16 ++++++++--------
+ 4 files changed, 28 insertions(+), 9 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index fe4ced2..d356187 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1578,6 +1578,18 @@ int main(int argc, char **argv)
+                     }
+                     PS5LOG_LOG("PW_WINE64 menu action=dump-diag");
+                     menu_drawn_open = 0; /* redraw menu with notice banner */
++                } else if (view.action == PW_GAME_MENU_ACTION_RESTART_GAME) {
++                    char flag_path[256];
++                    snprintf(flag_path, sizeof(flag_path), "%s/restart_game.flag", PW_WINE64_ROOT_DATA);
++                    int ffd = open(flag_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++                    if (ffd >= 0) {
++                        (void)write(ffd, "1\n", 2);
++                        close(ffd);
++                    }
++                    PS5LOG_LOG("PW_WINE64 menu action=restart-game");
++                    if (rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
++                    restart_title(launch.app, launch.cycle + 1u, "menu-restart-game");
++                    break;
+                 } else if (view.action == PW_GAME_MENU_ACTION_KEYBOARD && osk_status == PW_OK) {
+                     pw_osk_open(&osk);
+                 } else if (view.action == PW_GAME_MENU_ACTION_LIBRARY) {
+diff --git a/src/pw_game_menu.c b/src/pw_game_menu.c
+index 332751e..4e1f8b6 100644
+--- a/src/pw_game_menu.c
++++ b/src/pw_game_menu.c
+@@ -2,11 +2,12 @@
+ #include "pw_game_menu.h"
+ #include <string.h>
+ 
+-enum { ACTION_NONE, ACTION_CLOSE, ACTION_DUMP_DIAG, ACTION_LIBRARY, ACTION_KEYBOARD, ACTION_EXIT };
++enum { ACTION_NONE, ACTION_CLOSE, ACTION_RESTART_GAME, ACTION_DUMP_DIAG, ACTION_LIBRARY, ACTION_KEYBOARD, ACTION_EXIT };
+ typedef struct MenuLine { const char *text; int action; } MenuLine;
+ 
+ static const MenuLine with_keyboard[] = {
+     { "RESUME", ACTION_CLOSE },
++    { "RESTART GAME", ACTION_RESTART_GAME },
+     { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+     { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+     { "ON-SCREEN KEYBOARD", ACTION_KEYBOARD },
+@@ -14,6 +15,7 @@ static const MenuLine with_keyboard[] = {
+ };
+ static const MenuLine without_keyboard[] = {
+     { "RESUME", ACTION_CLOSE },
++    { "RESTART GAME", ACTION_RESTART_GAME },
+     { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+     { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+     { "EXIT TO PS5 HOME", ACTION_EXIT },
+@@ -85,6 +87,10 @@ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_
+             int count = 0;
+             const MenuLine *lines = lines_of(menu, &count);
+             switch (lines[menu->cursor].action) {
++            case ACTION_RESTART_GAME:
++                view->action = PW_GAME_MENU_ACTION_RESTART_GAME;
++                menu->open = 0;
++                break;
+             case ACTION_DUMP_DIAG:
+                 view->action = PW_GAME_MENU_ACTION_DUMP_DIAG;
+                 break;
+diff --git a/src/pw_game_menu.h b/src/pw_game_menu.h
+index 08d1fda..5f8df4a 100644
+--- a/src/pw_game_menu.h
++++ b/src/pw_game_menu.h
+@@ -21,6 +21,7 @@ enum {
+     PW_GAME_MENU_ACTION_NONE = 0,
+     PW_GAME_MENU_ACTION_KEYBOARD,
+     PW_GAME_MENU_ACTION_DUMP_DIAG,
++    PW_GAME_MENU_ACTION_RESTART_GAME,
+     PW_GAME_MENU_ACTION_LIBRARY,
+     PW_GAME_MENU_ACTION_EXIT
+ };
+diff --git a/src/pw_launcher_render.c b/src/pw_launcher_render.c
+index 0ddb3bd..b595a7a 100644
+--- a/src/pw_launcher_render.c
++++ b/src/pw_launcher_render.c
+@@ -348,26 +348,26 @@ int pw_launcher_render_menu(const struct pw_title_menu *menu,const char *telemet
+ 
+     fill(&c,0,0,W,H,bg);
+ 
+-    const int32_t pw=1040,ph=740;
++    const int32_t pw=1040,ph=816;
+     const int32_t px=(W-pw)/2,py=(H-ph)/2;
+     rounded(&c,px,py,pw,ph,18,panel,panel);
+     fill(&c,px,py,pw,6,mint);
+ 
+     const char *heading=menu->title[0]?menu->title:"TRINITYXSX MENU";
+-    text(&c,px+52,py+40,heading,5,snow,pw-104);
++    text(&c,px+52,py+36,heading,5,snow,pw-104);
+ 
+     /* Live FPS / VRAM telemetry pill written by XCL (or LIBRARY / IDLE). */
+     const char *stats=(telemetry && telemetry[0])?telemetry:"LIBRARY / IDLE  -  GAME PAUSED";
+-    rounded(&c,px+48,py+98,pw-96,46,8,pill,pill);
+-    text(&c,px+66,py+112,stats,3,mint,pw-132);
++    rounded(&c,px+48,py+92,pw-96,44,8,pill,pill);
++    text(&c,px+66,py+106,stats,3,mint,pw-132);
+ 
+     uint32_t count=menu->lines>PW_TITLE_MENU_LINES?PW_TITLE_MENU_LINES:menu->lines;
+     for(uint32_t i=0;i<count;i++) {
+-        int32_t ry=py+166+(int32_t)i*84;
++        int32_t ry=py+156+(int32_t)i*78;
+         int selected=(int32_t)i==menu->selected;
+-        rounded(&c,px+48,ry,pw-96,70,10,selected?card_sel:card,selected?card_sel:card);
+-        if(selected)fill(&c,px+48,ry,8,70,mint);
+-        text(&c,px+80,ry+22,menu->line[i],4,selected?snow:muted,pw-160);
++        rounded(&c,px+48,ry,pw-96,66,10,selected?card_sel:card,selected?card_sel:card);
++        if(selected)fill(&c,px+48,ry,8,66,mint);
++        text(&c,px+80,ry+20,menu->line[i],4,selected?snow:muted,pw-160);
+     }
+ 
+     if(notice && notice[0]) {
+-- 
+2.48.1.windows.1
+
