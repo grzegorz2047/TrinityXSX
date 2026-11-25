@@ -1,0 +1,2669 @@
+From 36cc6a4a84ca48c99b1c6f80a7e6675fc21c3106 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@localhost>
+Date: Wed, 25 Nov 2026 16:38:24 +0100
+Subject: [PATCH] TrinityXSX: add PNG cover art, per-game xcl.toml editor, and
+ Web Companion QR
+
+Decode PNG logos from MicrosoftGame.config in pure Rust (miniz_oxide),
+render a right-side game preview panel with saves summary and version
+badge, add a DualSense per-game xcl.toml settings editor (R1/Options),
+and add a PIN-protected LAN Web Companion with QR code (L1) for one-tap
+trinityxsx-logs.zip download and browser config editing.
+---
+ crates/xcl/src/lib.rs          |   2 +
+ crates/xcl/src/library.rs      | 193 ++++++++--
+ crates/xcl/src/library_art.rs  | 631 +++++++++++++++++++++++++++++++
+ crates/xcl/src/library_menu.rs | 663 ++++++++++++++++++++++++++++++---
+ crates/xcl/src/library_web.rs  | 586 +++++++++++++++++++++++++++++
+ 5 files changed, 1989 insertions(+), 86 deletions(-)
+ create mode 100644 crates/xcl/src/library_art.rs
+ create mode 100644 crates/xcl/src/library_web.rs
+
+diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
+index c887a5d..84c45e7 100644
+--- a/crates/xcl/src/lib.rs
++++ b/crates/xcl/src/lib.rs
+@@ -20,6 +20,8 @@ pub mod insn;
+ pub mod inspect;
+ pub mod launcher;
+ pub mod library;
++pub mod library_art;
++pub mod library_web;
+ pub mod loader;
+ pub mod modules;
+ pub mod pe;
+diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
+index 5876a30..cc6c137 100644
+--- a/crates/xcl/src/library.rs
++++ b/crates/xcl/src/library.rs
+@@ -1,4 +1,4 @@
+-//! Game folder discovery, multi-folder configuration, and initial per-title setup for TrinityXSX.
++//! Game folder discovery, multi-folder configuration, per-title settings, and saves summary for TrinityXSX.
+ 
+ use std::collections::HashSet;
+ use std::fs::{self, File, OpenOptions};
+@@ -7,16 +7,21 @@ use std::path::{Component, Path, PathBuf};
+ 
+ use crate::{config::Config, launcher};
+ 
++pub const TRINITYXSX_VERSION: &str = "v0.2.0";
++
+ const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
+ const MAX_STORED_PATH_LEN: usize = 1024;
++const MAX_SAVES_WALK_FILES: usize = 4096;
+ 
+ #[derive(Debug, Clone)]
+ pub struct Game {
+     pub name: String,
+     pub identity: String,
+     pub version: String,
++    pub title_id: String,
+     pub executable: PathBuf,
+     pub folder: String,
++    pub logo: Option<PathBuf>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -44,13 +49,33 @@ struct Metadata {
+     name: String,
+     identity: String,
+     version: String,
++    title_id: String,
+     executable: String,
++    logo_candidates: Vec<String>,
+ }
+ 
+ fn attribute(xml: &str, tag: &str, key: &str) -> Option<String> {
+     launcher::xml_attrs(xml, tag, key).into_iter().next()
+ }
+ 
++fn element_text(xml: &str, tag: &str) -> Option<String> {
++    let open = format!("<{tag}>");
++    let close = format!("</{tag}>");
++    let start = xml.find(&open)? + open.len();
++    let end = xml[start..].find(&close)?;
++    let value = xml[start..start + end].trim();
++    (!value.is_empty()).then(|| value.to_owned())
++}
++
++fn is_safe_relative_asset(rel: &str) -> bool {
++    if rel.is_empty() || rel.contains([':', '\0']) {
++        return false;
++    }
++    let path = Path::new(rel);
++    path.components().all(|c| matches!(c, Component::Normal(_)))
++        && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
++}
++
+ fn metadata(raw: &[u8]) -> Result<Metadata, &'static str> {
+     let xml = launcher::decode_game_config(raw).ok_or("unsupported manifest encoding")?;
+     let identity = attribute(&xml, "Identity", "Name").ok_or("missing Identity Name")?;
+@@ -91,14 +116,43 @@ fn metadata(raw: &[u8]) -> Result<Metadata, &'static str> {
+         .map(|name| name.trim().to_owned())
+         .filter(|name| !name.is_empty() && !name.starts_with("ms-resource:"))
+         .unwrap_or_else(|| identity.clone());
++
++    let mut logo_candidates = Vec::new();
++    for key in ["Square150x150Logo", "StoreLogo", "Square480x480Logo", "SplashScreenImage", "Square44x44Logo"] {
++        if let Some(val) = attribute(&xml, "ShellVisuals", key) {
++            let trimmed = val.trim();
++            if is_safe_relative_asset(trimmed) {
++                logo_candidates.push(trimmed.to_owned());
++            }
++        }
++    }
++
+     Ok(Metadata {
+         name,
+         identity,
+         version: attribute(&xml, "Identity", "Version").unwrap_or_default(),
++        title_id: element_text(&xml, "TitleId").unwrap_or_default(),
+         executable: executable.clone(),
++        logo_candidates,
+     })
+ }
+ 
++fn find_logo_in_folder(folder: &Path, candidates: &[String]) -> Option<PathBuf> {
++    // Prefer custom cover.png if placed by the user, then manifest PNGs
++    for rel in std::iter::once("cover.png").chain(candidates.iter().map(String::as_str)).chain(["Logo.png", "StoreLogo.png"]) {
++        if !is_safe_relative_asset(rel) {
++            continue;
++        }
++        let joined = folder.join(rel);
++        if let Ok(canon) = joined.canonicalize() {
++            if canon.starts_with(folder) && canon.is_file() {
++                return Some(canon);
++            }
++        }
++    }
++    None
++}
++
+ fn has_manifest(folder: &Path) -> bool {
+     fs::read_dir(folder)
+         .ok()
+@@ -131,12 +185,15 @@ fn from_folder(folder: &Path, source: &str) -> Result<Game, String> {
+     if !executable.starts_with(&folder) || !executable.is_file() {
+         return Err("executable is outside the game folder or missing".into());
+     }
++    let logo = find_logo_in_folder(&folder, &info.logo_candidates);
+     Ok(Game {
+         name: info.name,
+         identity: info.identity,
+         version: info.version,
++        title_id: info.title_id,
+         executable,
+         folder: source.to_owned(),
++        logo,
+     })
+ }
+ 
+@@ -155,10 +212,6 @@ pub fn paths_file() -> PathBuf {
+ }
+ 
+ /// Normalize a user or persisted folder path.
+-///
+-/// Accepts PS5 Unix paths (`/mnt/ext1/xboxseries`), Wine `Z:\...` paths (converted to `/...`),
+-/// and Windows drive paths (`C:\XCL\games`). Rejects filesystem roots (`/` or `C:\`) and
+-/// relative/malformed paths.
+ pub fn normalize_path(raw: &str) -> Option<String> {
+     let trimmed = raw.trim();
+     if trimmed.is_empty()
+@@ -169,7 +222,6 @@ pub fn normalize_path(raw: &str) -> Option<String> {
+     }
+     let trimmed = trimmed.strip_prefix("\\\\?\\").unwrap_or(trimmed);
+ 
+-    // Wine Z:\... maps directly to PS5 Unix /...
+     let unix_input = if trimmed.len() >= 2
+         && trimmed.as_bytes()[0].eq_ignore_ascii_case(&b'z')
+         && trimmed.as_bytes()[1] == b':'
+@@ -205,7 +257,6 @@ pub fn normalize_path(raw: &str) -> Option<String> {
+         return Some(format!("/{}", segments.join("/")));
+     }
+ 
+-    // Standard Windows drive path (e.g. C:\XCL\games)
+     let bytes = trimmed.as_bytes();
+     if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+         let drive = (bytes[0] as char).to_ascii_uppercase();
+@@ -298,7 +349,6 @@ pub fn default_paths(primary_root: Option<&Path>) -> Vec<String> {
+     paths
+ }
+ 
+-/// Read configured game paths from `file`. Returns `None` if the file does not exist or cannot be opened.
+ pub fn read_paths(file: &Path) -> Option<Vec<String>> {
+     let text = fs::read_to_string(file).ok()?;
+     let mut loaded = Vec::new();
+@@ -317,7 +367,6 @@ pub fn read_paths(file: &Path) -> Option<Vec<String>> {
+     Some(loaded)
+ }
+ 
+-/// Save configured game paths to `file` atomically via a temporary file.
+ pub fn write_paths(file: &Path, paths: &[String]) -> io::Result<()> {
+     if let Some(parent) = file.parent() {
+         if !parent.as_os_str().is_empty() {
+@@ -350,7 +399,6 @@ pub fn write_paths(file: &Path, paths: &[String]) -> io::Result<()> {
+     Ok(())
+ }
+ 
+-/// Load `game_paths.txt`, or seed it with defaults on first launch.
+ pub fn load_or_init_paths(file: &Path, primary_root: Option<&Path>) -> Vec<String> {
+     if let Some(paths) = read_paths(file) {
+         return paths;
+@@ -376,7 +424,6 @@ fn scan_directory_into(
+ ) -> usize {
+     let mut added_here = 0;
+ 
+-    // If the folder itself contains MicrosoftGame.config, treat it directly as a game.
+     if has_manifest(root) {
+         match from_folder(root, source_label) {
+             Ok(game) => {
+@@ -436,7 +483,6 @@ fn scan_directory_into(
+     added_here
+ }
+ 
+-/// Scan a single folder (kept for CLI compatibility and tests).
+ pub fn scan(root: &Path) -> io::Result<(Vec<Game>, usize)> {
+     let root = root.canonicalize()?;
+     let label = display_path(&root);
+@@ -448,7 +494,6 @@ pub fn scan(root: &Path) -> io::Result<(Vec<Game>, usize)> {
+     Ok((games, skipped))
+ }
+ 
+-/// Scan every configured game folder, tolerating disconnected USB/external paths.
+ pub fn scan_paths(paths: &[String]) -> Catalog {
+     let mut games = Vec::new();
+     let mut seen_execs = HashSet::new();
+@@ -477,7 +522,6 @@ pub fn scan_paths(paths: &[String]) -> Catalog {
+     Catalog { games, skipped, folders }
+ }
+ 
+-/// Starting folder for the interactive directory browser (matches TrinityX360: selected folder or `/mnt`).
+ pub fn browser_initial_path(selected: Option<&str>) -> String {
+     if let Some(path) = selected {
+         if to_fs_path(path).is_dir() {
+@@ -500,7 +544,6 @@ pub fn browser_initial_path(selected: Option<&str>) -> String {
+     "C:\\".into()
+ }
+ 
+-/// Navigate one level up in the directory browser. Returns `None` at filesystem root (`/` or `C:\`).
+ pub fn browser_parent(current: &str) -> Option<String> {
+     if current == "/" {
+         return None;
+@@ -530,7 +573,6 @@ pub fn browser_parent(current: &str) -> Option<String> {
+     None
+ }
+ 
+-/// List immediate subdirectories for the folder browser UI.
+ pub fn list_subfolders(current: &str) -> Result<Vec<BrowserEntry>, String> {
+     let dir = to_fs_path(current);
+     let read = fs::read_dir(&dir).map_err(|_| "This folder is not accessible.".to_owned())?;
+@@ -560,24 +602,26 @@ pub fn list_subfolders(current: &str) -> Result<Vec<BrowserEntry>, String> {
+     Ok(entries)
+ }
+ 
+-fn default_config(identity: &str) -> Config {
++/// Recommended PS5 defaults (plus known tested title presets).
++pub fn default_config(identity: &str) -> Config {
+     let mut config = Config {
+         device_type: "lockhart".into(),
+         console_type_raw: 5,
++        gamertag: "PS5Player".into(),
++        user_id: 2533274790395905,
+         title_memory_mb: 6144,
+         coherent_mb: 1024,
+         raytracing: "off".into(),
+         keyboard_mouse: false,
+         direct_dxil: "all".into(),
+         network: false,
++        xbox_live_tokens: false,
+         window_width: 1920,
+         window_height: 1080,
+         window_pos: "0,0".into(),
+         ..Config::default()
+     };
+     if identity.eq_ignore_ascii_case("Microsoft.MinecraftBeta") {
+-        config.gamertag = "PS5Player".into();
+-        config.user_id = 2533274790395905;
+         config.title_memory = "standard".into();
+         config.pls_mb = 2048;
+         config.uma_mb = 2048;
+@@ -585,8 +629,94 @@ fn default_config(identity: &str) -> Config {
+     config
+ }
+ 
++pub fn has_tested_preset(identity: &str) -> bool {
++    identity.eq_ignore_ascii_case("Microsoft.MinecraftBeta")
++}
++
++pub fn config_path_for_title(title: &str) -> PathBuf {
++    launcher::data_root().join(title).join("xcl.toml")
++}
++
++pub fn saves_dir_for_title(title: &str) -> PathBuf {
++    launcher::data_root().join(title).join("pls")
++}
++
++/// Load a title's `xcl.toml` if present, otherwise return its recommended preset/default.
++/// Returns `(config, exists_on_disk)`.
++pub fn load_game_config(game: &Game) -> (Config, bool) {
++    let path = config_path_for_title(&game.identity);
++    if let Ok(text) = fs::read_to_string(&path) {
++        if let Ok(cfg) = toml::from_str::<Config>(&text) {
++            return (cfg, true);
++        }
++    }
++    (default_config(&game.identity), false)
++}
++
++/// Save a title's `xcl.toml` atomically.
++pub fn save_game_config(game: &Game, config: &Config) -> io::Result<()> {
++    let path = config_path_for_title(&game.identity);
++    if let Some(parent) = path.parent() {
++        fs::create_dir_all(parent)?;
++    }
++    let body = toml::to_string_pretty(config).map_err(io::Error::other)?;
++    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
++    {
++        let mut f = File::create(&tmp)?;
++        f.write_all(body.as_bytes())?;
++        f.sync_all()?;
++    }
++    if let Err(err) = fs::rename(&tmp, &path) {
++        if path.exists() {
++            fs::remove_file(&path)?;
++            if let Err(retry) = fs::rename(&tmp, &path) {
++                let _ = fs::remove_file(&tmp);
++                return Err(retry);
++            }
++        } else {
++            let _ = fs::remove_file(&tmp);
++            return Err(err);
++        }
++    }
++    Ok(())
++}
++
++/// Reset a title's `xcl.toml` back to its recommended PS5 preset.
++pub fn reset_game_config(game: &Game) -> io::Result<Config> {
++    let preset = default_config(&game.identity);
++    save_game_config(game, &preset)?;
++    Ok(preset)
++}
++
++/// Count files and bytes under the title's `pls/` saves folder (bounded so UI stays snappy).
++pub fn saves_summary(game: &Game) -> (usize, u64) {
++    let root = saves_dir_for_title(&game.identity);
++    if !root.is_dir() {
++        return (0, 0);
++    }
++    let mut stack = vec![root];
++    let mut files = 0usize;
++    let mut bytes = 0u64;
++    while let Some(dir) = stack.pop() {
++        let Ok(rd) = fs::read_dir(&dir) else { continue };
++        for entry in rd.flatten() {
++            let path = entry.path();
++            if path.is_dir() {
++                stack.push(path);
++            } else if let Ok(meta) = entry.metadata() {
++                files += 1;
++                bytes = bytes.saturating_add(meta.len());
++                if files >= MAX_SAVES_WALK_FILES {
++                    return (files, bytes);
++                }
++            }
++        }
++    }
++    (files, bytes)
++}
++
+ fn write_initial_config(path: &Path, config: &Config) -> io::Result<()> {
+-    let body = toml::to_string(config).map_err(io::Error::other)?;
++    let body = toml::to_string_pretty(config).map_err(io::Error::other)?;
+     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+         Ok(file) => file,
+         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+@@ -625,18 +755,19 @@ mod tests {
+     fn write_fake_game(dir: &Path, identity: &str, display_name: &str) {
+         fs::create_dir_all(dir).unwrap();
+         let manifest = format!(
+-            r#"<Game><Identity Name="{identity}" Version="1.0.0.0"/>
+-               <ShellVisuals DefaultDisplayName="{display_name}"/>
++            r#"<Game><Identity Name="{identity}" Version="1.0.0.0"/><TitleId>1234ABCD</TitleId>
++               <ShellVisuals DefaultDisplayName="{display_name}" Square150x150Logo="Logo.png"/>
+                <Executable Name="game.exe" Id="Game" TargetDeviceFamily="Scarlett"/></Game>"#
+         );
+         fs::write(dir.join("MicrosoftGame.config"), manifest).unwrap();
+         fs::write(dir.join("game.exe"), b"MZ").unwrap();
++        fs::write(dir.join("Logo.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+     }
+ 
+     #[test]
+     fn ignores_other_platforms_and_developer_entries() {
+-        let raw = br#"<Game><Identity Name="Example.Game" Version="1.0.0.0"/>
+-            <ShellVisuals DefaultDisplayName="Example &amp; Friends"/>
++        let raw = br#"<Game><Identity Name="Example.Game" Version="1.0.0.0"/><TitleId>639AA8DD</TitleId>
++            <ShellVisuals DefaultDisplayName="Example &amp; Friends" Square150x150Logo="Logo.png"/>
+             <Executable Name="desktop.exe" Id="Game" TargetDeviceFamily="Desktop"/>
+             <Executable Name="tools.exe" TargetDeviceFamily="Scarlett" IsDevOnly="true"/>
+             <Executable Name="game.exe" Id="Game" TargetDeviceFamily="Scarlett"/>
+@@ -645,6 +776,8 @@ mod tests {
+         assert_eq!(selected.executable, "game.exe");
+         assert_eq!(selected.name, "Example & Friends");
+         assert_eq!(selected.version, "1.0.0.0");
++        assert_eq!(selected.title_id, "639AA8DD");
++        assert_eq!(selected.logo_candidates, vec!["Logo.png"]);
+     }
+ 
+     #[test]
+@@ -699,7 +832,6 @@ mod tests {
+         write_paths(&file, &paths).unwrap();
+         assert_eq!(read_paths(&file).unwrap(), paths);
+ 
+-        // Overwrite with duplicates and comments
+         fs::write(&file, "# comment\nZ:\\mnt\\ext1\\xboxseries\\\n/mnt/ext1/xboxseries\nc:/xcl/games\nC:\\XCL\\games\n").unwrap();
+         assert_eq!(read_paths(&file).unwrap(), vec!["/mnt/ext1/xboxseries", "C:\\xcl\\games"]);
+ 
+@@ -707,7 +839,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn scans_multiple_folders_deduplicates_and_tolerates_missing() {
++    fn scans_multiple_folders_extracts_logo_and_tolerates_missing() {
+         let dir = temp_dir("multi");
+         let root_a = dir.join("a");
+         let root_b = dir.join("b");
+@@ -717,7 +849,7 @@ mod tests {
+ 
+         let paths = vec![
+             normalize_path(&root_a.to_string_lossy()).unwrap(),
+-            normalize_path(&root_a.join("Alpha").to_string_lossy()).unwrap(), // direct game folder duplicate
++            normalize_path(&root_a.join("Alpha").to_string_lossy()).unwrap(),
+             normalize_path(&missing.to_string_lossy()).unwrap(),
+             normalize_path(&root_b.to_string_lossy()).unwrap(),
+         ];
+@@ -725,14 +857,11 @@ mod tests {
+         let catalog = scan_paths(&paths);
+         assert_eq!(catalog.games.len(), 2);
+         assert_eq!(catalog.games[0].name, "Alpha Game");
++        assert_eq!(catalog.games[0].title_id, "1234ABCD");
++        assert!(catalog.games[0].logo.is_some());
+         assert_eq!(catalog.games[1].name, "Beta Game");
+-        assert_eq!(catalog.folders.len(), 4);
+-        assert!(catalog.folders[0].available);
+-        assert_eq!(catalog.folders[0].game_count, 1);
+         assert!(!catalog.folders[2].available);
+-        assert_eq!(catalog.folders[2].game_count, 0);
+ 
+-        // Folder browser detects game folders
+         let subs = list_subfolders(&normalize_path(&root_a.to_string_lossy()).unwrap()).unwrap();
+         assert_eq!(subs.len(), 1);
+         assert_eq!(subs[0].name, "Alpha");
+diff --git a/crates/xcl/src/library_art.rs b/crates/xcl/src/library_art.rs
+new file mode 100644
+index 0000000..c7bf7b7
+--- /dev/null
++++ b/crates/xcl/src/library_art.rs
+@@ -0,0 +1,631 @@
++//! Pure-Rust PNG cover decoder (using `miniz_oxide`) and QR Code encoder for TrinityXSX.
++//! Zero external image/QR crates, zero Wine GDI+ dependencies.
++
++use std::fs;
++use std::path::Path;
++
++/// Decoded image stored as bottom-up 32-bit BGRA pixels (ready for Win32 `StretchDIBits`).
++#[derive(Debug, Clone)]
++pub struct DibImage {
++    pub width: u32,
++    pub height: u32,
++    pub bgra_bottom_up: Vec<u8>,
++}
++
++const MAX_PNG_FILE_BYTES: u64 = 16 * 1024 * 1024;
++const MAX_IMAGE_DIM: u32 = 4096;
++
++fn be_u32(bytes: &[u8]) -> u32 {
++    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
++}
++
++fn paeth(a: u8, b: u8, c: u8) -> u8 {
++    let a = a as i32;
++    let b = b as i32;
++    let c = c as i32;
++    let p = a + b - c;
++    let pa = (p - a).abs();
++    let pb = (p - b).abs();
++    let pc = (p - c).abs();
++    if pa <= pb && pa <= pc {
++        a as u8
++    } else if pb <= pc {
++        b as u8
++    } else {
++        c as u8
++    }
++}
++
++/// Decode a standard 8-bit non-interlaced PNG into a bottom-up BGRA DIB pre-blended onto `bg_rgb`.
++pub fn decode_png(bytes: &[u8], bg_rgb: (u8, u8, u8)) -> Result<DibImage, &'static str> {
++    const SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
++    if bytes.len() < 33 || &bytes[..8] != SIG {
++        return Err("not a PNG");
++    }
++
++    let mut pos = 8usize;
++    let mut width = 0u32;
++    let mut height = 0u32;
++    let mut bit_depth = 0u8;
++    let mut color_type = 0u8;
++    let mut interlace = 0u8;
++    let mut palette: Vec<[u8; 3]> = Vec::new();
++    let mut trns: Vec<u8> = Vec::new();
++    let mut idat = Vec::new();
++    let mut saw_ihdr = false;
++
++    while pos + 12 <= bytes.len() {
++        let len = be_u32(&bytes[pos..pos + 4]) as usize;
++        let kind = &bytes[pos + 4..pos + 8];
++        let data_start = pos + 8;
++        let data_end = data_start.checked_add(len).ok_or("chunk overflow")?;
++        if data_end + 4 > bytes.len() {
++            return Err("truncated PNG chunk");
++        }
++        let data = &bytes[data_start..data_end];
++        match kind {
++            b"IHDR" => {
++                if len != 13 {
++                    return Err("invalid IHDR");
++                }
++                width = be_u32(&data[0..4]);
++                height = be_u32(&data[4..8]);
++                bit_depth = data[8];
++                color_type = data[9];
++                let compression = data[10];
++                let filter_method = data[11];
++                interlace = data[12];
++                if width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
++                    return Err("unsupported PNG dimensions");
++                }
++                if compression != 0 || filter_method != 0 || interlace != 0 {
++                    return Err("unsupported PNG compression/interlacing");
++                }
++                if bit_depth != 8 {
++                    return Err("only 8-bit PNG supported");
++                }
++                saw_ihdr = true;
++            }
++            b"PLTE" => {
++                if len % 3 != 0 {
++                    return Err("invalid PLTE");
++                }
++                palette = data.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
++            }
++            b"tRNS" => {
++                trns = data.to_vec();
++            }
++            b"IDAT" => {
++                idat.extend_from_slice(data);
++            }
++            b"IEND" => break,
++            _ => {}
++        }
++        pos = data_end + 4;
++    }
++
++    if !saw_ihdr || idat.is_empty() {
++        return Err("missing IHDR or IDAT");
++    }
++
++    let bpp: usize = match color_type {
++        0 => 1, // Grayscale
++        2 => 3, // RGB
++        3 => 1, // Indexed
++        4 => 2, // Grayscale + Alpha
++        6 => 4, // RGBA
++        _ => return Err("unsupported PNG color type"),
++    };
++
++    let row_bytes = (width as usize).checked_mul(bpp).ok_or("row overflow")?;
++    let expected = (row_bytes + 1).checked_mul(height as usize).ok_or("image overflow")?;
++    let inflated = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&idat, expected.max(1024 * 1024) + 1024)
++        .map_err(|_| "PNG zlib inflate failed")?;
++    if inflated.len() < expected {
++        return Err("truncated inflated PNG data");
++    }
++
++    let mut prev = vec![0u8; row_bytes];
++    let mut curr = vec![0u8; row_bytes];
++    let mut bgra = vec![0u8; (width as usize) * (height as usize) * 4];
++    let (bg_r, bg_g, bg_b) = bg_rgb;
++
++    for y in 0..height as usize {
++        let src_row = &inflated[y * (row_bytes + 1)..(y + 1) * (row_bytes + 1)];
++        let filter = src_row[0];
++        let raw = &src_row[1..];
++        for i in 0..row_bytes {
++            let a = if i >= bpp { curr[i - bpp] } else { 0 };
++            let b = prev[i];
++            let c = if i >= bpp { prev[i - bpp] } else { 0 };
++            curr[i] = match filter {
++                0 => raw[i],
++                1 => raw[i].wrapping_add(a),
++                2 => raw[i].wrapping_add(b),
++                3 => raw[i].wrapping_add(((a as u16 + b as u16) >> 1) as u8),
++                4 => raw[i].wrapping_add(paeth(a, b, c)),
++                _ => return Err("invalid PNG filter"),
++            };
++        }
++
++        // Bottom-up row index for Windows DIB
++        let dst_y = (height as usize - 1) - y;
++        let dst_row = &mut bgra[dst_y * (width as usize) * 4..(dst_y + 1) * (width as usize) * 4];
++        for x in 0..width as usize {
++            let (r, g, b, a) = match color_type {
++                0 => {
++                    let v = curr[x];
++                    (v, v, v, 255u8)
++                }
++                2 => (curr[x * 3], curr[x * 3 + 1], curr[x * 3 + 2], 255u8),
++                3 => {
++                    let idx = curr[x] as usize;
++                    let [r, g, b] = palette.get(idx).copied().unwrap_or([0, 0, 0]);
++                    let a = trns.get(idx).copied().unwrap_or(255);
++                    (r, g, b, a)
++                }
++                4 => {
++                    let v = curr[x * 2];
++                    (v, v, v, curr[x * 2 + 1])
++                }
++                6 => (curr[x * 4], curr[x * 4 + 1], curr[x * 4 + 2], curr[x * 4 + 3]),
++                _ => (0, 0, 0, 255),
++            };
++            let (or, og, ob) = if a == 255 {
++                (r, g, b)
++            } else if a == 0 {
++                (bg_r, bg_g, bg_b)
++            } else {
++                let alpha = a as u32;
++                let inv = 255 - alpha;
++                (
++                    ((r as u32 * alpha + bg_r as u32 * inv) / 255) as u8,
++                    ((g as u32 * alpha + bg_g as u32 * inv) / 255) as u8,
++                    ((b as u32 * alpha + bg_b as u32 * inv) / 255) as u8,
++                )
++            };
++            dst_row[x * 4] = ob;
++            dst_row[x * 4 + 1] = og;
++            dst_row[x * 4 + 2] = or;
++            dst_row[x * 4 + 3] = 255;
++        }
++        std::mem::swap(&mut prev, &mut curr);
++    }
++
++    Ok(DibImage { width, height, bgra_bottom_up: bgra })
++}
++
++pub fn load_png_file(path: &Path, bg_rgb: (u8, u8, u8)) -> Result<DibImage, String> {
++    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
++    if meta.len() > MAX_PNG_FILE_BYTES {
++        return Err("image file exceeds 16 MiB".into());
++    }
++    let bytes = fs::read(path).map_err(|e| e.to_string())?;
++    decode_png(&bytes, bg_rgb).map_err(|e| e.to_owned())
++}
++
++// ---------------------------------------------------------------------------
++// Minimal ISO/IEC 18004 QR Code encoder (Byte mode, ECC Level L, Versions 1..6)
++// ---------------------------------------------------------------------------
++
++#[derive(Debug, Clone)]
++pub struct QrCode {
++    pub size: usize,
++    /// Row-major booleans: `true` = dark module, `false` = light module.
++    pub modules: Vec<bool>,
++}
++
++impl QrCode {
++    pub fn at(&self, x: usize, y: usize) -> bool {
++        self.modules[y * self.size + x]
++    }
++}
++
++struct VersionSpec {
++    version: usize,
++    total_data_bytes: usize,
++    ecc_bytes_per_block: usize,
++    num_blocks: usize,
++    align_pos: &'static [usize],
++}
++
++// Level L capacities (ISO/IEC 18004 Table 9): Versions 1..6 (max 134 payload bytes).
++const SPECS: &[VersionSpec] = &[
++    VersionSpec { version: 1, total_data_bytes: 19,  ecc_bytes_per_block: 7,  num_blocks: 1, align_pos: &[] },
++    VersionSpec { version: 2, total_data_bytes: 34,  ecc_bytes_per_block: 10, num_blocks: 1, align_pos: &[6, 18] },
++    VersionSpec { version: 3, total_data_bytes: 55,  ecc_bytes_per_block: 15, num_blocks: 1, align_pos: &[6, 22] },
++    VersionSpec { version: 4, total_data_bytes: 80,  ecc_bytes_per_block: 20, num_blocks: 1, align_pos: &[6, 26] },
++    VersionSpec { version: 5, total_data_bytes: 108, ecc_bytes_per_block: 26, num_blocks: 1, align_pos: &[6, 30] },
++    VersionSpec { version: 6, total_data_bytes: 136, ecc_bytes_per_block: 18, num_blocks: 2, align_pos: &[6, 34] },
++];
++
++fn gf_mul(mut a: u8, mut b: u8) -> u8 {
++    let mut r = 0u8;
++    for _ in 0..8 {
++        if (b & 1) != 0 {
++            r ^= a;
++        }
++        let hi = (a & 0x80) != 0;
++        a <<= 1;
++        if hi {
++            a ^= 0x1d; // x^8 + x^4 + x^3 + x^2 + 1
++        }
++        b >>= 1;
++    }
++    r
++}
++
++fn rs_generator(degree: usize) -> Vec<u8> {
++    let mut poly = vec![0u8; degree];
++    poly[degree - 1] = 1;
++    let mut root = 1u8;
++    for _ in 0..degree {
++        for j in 0..degree {
++            poly[j] = gf_mul(poly[j], root);
++            if j + 1 < degree {
++                poly[j] ^= poly[j + 1];
++            }
++        }
++        root = gf_mul(root, 2);
++    }
++    poly
++}
++
++fn rs_remainder(data: &[u8], degree: usize) -> Vec<u8> {
++    let gen = rs_generator(degree);
++    let mut rem = vec![0u8; degree];
++    for &b in data {
++        let factor = b ^ rem[0];
++        rem.rotate_left(1);
++        rem[degree - 1] = 0;
++        for (r, &g) in rem.iter_mut().zip(gen.iter()) {
++            *r ^= gf_mul(g, factor);
++        }
++    }
++    rem
++}
++
++fn push_bits(out: &mut Vec<bool>, value: u32, count: usize) {
++    for i in (0..count).rev() {
++        out.push(((value >> i) & 1) != 0);
++    }
++}
++
++fn draw_finder(modules: &mut [bool], is_func: &mut [bool], size: usize, cx: isize, cy: isize) {
++    for dy in -4..=4 {
++        for dx in -4..=4 {
++            let x = cx + dx;
++            let y = cy + dy;
++            if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size {
++                let dist = dx.abs().max(dy.abs());
++                let dark = dist != 2 && dist != 4;
++                let idx = (y as usize) * size + (x as usize);
++                modules[idx] = dark;
++                is_func[idx] = true;
++            }
++        }
++    }
++}
++
++fn draw_alignment(modules: &mut [bool], is_func: &mut [bool], size: usize, cx: usize, cy: usize) {
++    for dy in -2isize..=2 {
++        for dx in -2isize..=2 {
++            let x = (cx as isize + dx) as usize;
++            let y = (cy as isize + dy) as usize;
++            let dist = dx.abs().max(dy.abs());
++            let idx = y * size + x;
++            modules[idx] = dist != 1;
++            is_func[idx] = true;
++        }
++    }
++}
++
++fn format_bits_level_l(mask: u32) -> u32 {
++    // Error correction level L = 0b01
++    let data = (0b01 << 3) | (mask & 7);
++    let mut rem = data;
++    for _ in 0..10 {
++        rem = (rem << 1) ^ (((rem >> 9) & 1) * 0x537);
++    }
++    ((data << 10) | rem) ^ 0x5412
++}
++
++fn write_format(modules: &mut [bool], is_func: &mut [bool], size: usize, mask: u32) {
++    let bits = format_bits_level_l(mask);
++    // Around top-left finder
++    for i in 0..6 {
++        let bit = ((bits >> i) & 1) != 0;
++        modules[i * size + 8] = bit;
++        is_func[i * size + 8] = true;
++    }
++    modules[7 * size + 8] = ((bits >> 6) & 1) != 0;
++    is_func[7 * size + 8] = true;
++    modules[8 * size + 8] = ((bits >> 7) & 1) != 0;
++    is_func[8 * size + 8] = true;
++    modules[8 * size + 7] = ((bits >> 8) & 1) != 0;
++    is_func[8 * size + 7] = true;
++    for i in 9..15 {
++        let bit = ((bits >> i) & 1) != 0;
++        modules[8 * size + (14 - i)] = bit;
++        is_func[8 * size + (14 - i)] = true;
++    }
++    // Right of top-right + bottom of bottom-left
++    for i in 0..8 {
++        let bit = ((bits >> i) & 1) != 0;
++        modules[8 * size + (size - 1 - i)] = bit;
++        is_func[8 * size + (size - 1 - i)] = true;
++    }
++    for i in 8..15 {
++        let bit = ((bits >> i) & 1) != 0;
++        modules[(size - 15 + i) * size + 8] = bit;
++        is_func[(size - 15 + i) * size + 8] = true;
++    }
++    // Always-dark module
++    modules[(size - 8) * size + 8] = true;
++    is_func[(size - 8) * size + 8] = true;
++}
++
++fn mask_condition(mask: u32, x: usize, y: usize) -> bool {
++    match mask {
++        0 => (x + y) % 2 == 0,
++        1 => y % 2 == 0,
++        2 => x % 3 == 0,
++        3 => (x + y) % 3 == 0,
++        4 => ((y / 2) + (x / 3)) % 2 == 0,
++        5 => ((x * y) % 2) + ((x * y) % 3) == 0,
++        6 => (((x * y) % 2) + ((x * y) % 3)) % 2 == 0,
++        _ => (((x + y) % 2) + ((x * y) % 3)) % 2 == 0,
++    }
++}
++
++fn penalty_score(modules: &[bool], size: usize) -> usize {
++    let mut score = 0usize;
++    // Rule 1: horizontal and vertical runs >= 5
++    for y in 0..size {
++        let mut run = 1;
++        for x in 1..size {
++            if modules[y * size + x] == modules[y * size + x - 1] {
++                run += 1;
++            } else {
++                if run >= 5 {
++                    score += 3 + (run - 5);
++                }
++                run = 1;
++            }
++        }
++        if run >= 5 {
++            score += 3 + (run - 5);
++        }
++    }
++    for x in 0..size {
++        let mut run = 1;
++        for y in 1..size {
++            if modules[y * size + x] == modules[(y - 1) * size + x] {
++                run += 1;
++            } else {
++                if run >= 5 {
++                    score += 3 + (run - 5);
++                }
++                run = 1;
++            }
++        }
++        if run >= 5 {
++            score += 3 + (run - 5);
++        }
++    }
++    // Rule 2: 2x2 uniform blocks
++    for y in 0..size - 1 {
++        for x in 0..size - 1 {
++            let c = modules[y * size + x];
++            if modules[y * size + x + 1] == c
++                && modules[(y + 1) * size + x] == c
++                && modules[(y + 1) * size + x + 1] == c
++            {
++                score += 3;
++            }
++        }
++    }
++    score
++}
++
++/// Encode UTF-8 text (up to 134 bytes) as a standard QR Code (ECC Level L).
++pub fn encode_qr(text: &str) -> Option<QrCode> {
++    let payload = text.as_bytes();
++    // Byte mode header: 4-bit mode (0100) + 8-bit length (for versions 1..9)
++    let needed_bits = 4 + 8 + payload.len() * 8;
++    let spec = SPECS.iter().find(|s| s.total_data_bytes * 8 >= needed_bits)?;
++
++    let mut bits = Vec::with_capacity(spec.total_data_bytes * 8);
++    push_bits(&mut bits, 0b0100, 4);
++    push_bits(&mut bits, payload.len() as u32, 8);
++    for &b in payload {
++        push_bits(&mut bits, b as u32, 8);
++    }
++    let capacity_bits = spec.total_data_bytes * 8;
++    let terminator = (capacity_bits - bits.len()).min(4);
++    push_bits(&mut bits, 0, terminator);
++    while bits.len() % 8 != 0 {
++        bits.push(false);
++    }
++    let mut data = Vec::with_capacity(spec.total_data_bytes);
++    for chunk in bits.chunks_exact(8) {
++        let mut byte = 0u8;
++        for &b in chunk {
++            byte = (byte << 1) | (b as u8);
++        }
++        data.push(byte);
++    }
++    let mut pad_toggle = false;
++    while data.len() < spec.total_data_bytes {
++        data.push(if pad_toggle { 0x11 } else { 0xEC });
++        pad_toggle = !pad_toggle;
++    }
++
++    // Split into blocks and compute Reed-Solomon ECC
++    let block_data_len = spec.total_data_bytes / spec.num_blocks;
++    let mut data_blocks = Vec::with_capacity(spec.num_blocks);
++    let mut ecc_blocks = Vec::with_capacity(spec.num_blocks);
++    for i in 0..spec.num_blocks {
++        let slice = &data[i * block_data_len..(i + 1) * block_data_len];
++        data_blocks.push(slice.to_vec());
++        ecc_blocks.push(rs_remainder(slice, spec.ecc_bytes_per_block));
++    }
++
++    // Interleave data codewords, then ECC codewords
++    let mut codewords = Vec::with_capacity(spec.total_data_bytes + spec.num_blocks * spec.ecc_bytes_per_block);
++    for col in 0..block_data_len {
++        for blk in &data_blocks {
++            codewords.push(blk[col]);
++        }
++    }
++    for col in 0..spec.ecc_bytes_per_block {
++        for blk in &ecc_blocks {
++            codewords.push(blk[col]);
++        }
++    }
++
++    let size = spec.version * 4 + 17;
++    let mut base_modules = vec![false; size * size];
++    let mut is_func = vec![false; size * size];
++
++    // Timing patterns
++    for i in 0..size {
++        let dark = i % 2 == 0;
++        base_modules[6 * size + i] = dark;
++        is_func[6 * size + i] = true;
++        base_modules[i * size + 6] = dark;
++        is_func[i * size + 6] = true;
++    }
++
++    // Finder patterns
++    draw_finder(&mut base_modules, &mut is_func, size, 3, 3);
++    draw_finder(&mut base_modules, &mut is_func, size, (size - 4) as isize, 3);
++    draw_finder(&mut base_modules, &mut is_func, size, 3, (size - 4) as isize);
++
++    // Alignment patterns
++    for &ay in spec.align_pos {
++        for &ax in spec.align_pos {
++            let overlaps_finder = (ax == 6 && ay == 6)
++                || (ax == 6 && ay + 4 >= size - 4)
++                || (ay == 6 && ax + 4 >= size - 4);
++            if !overlaps_finder {
++                draw_alignment(&mut base_modules, &mut is_func, size, ax, ay);
++            }
++        }
++    }
++
++    // Reserve format area (dummy mask 0 for now)
++    write_format(&mut base_modules, &mut is_func, size, 0);
++
++    // Place data bits in zigzag columns right-to-left
++    let mut bit_idx = 0usize;
++    let total_bits = codewords.len() * 8;
++    let mut col = size as isize - 1;
++    let mut upward = true;
++    while col >= 1 {
++        if col == 6 {
++            col -= 1;
++        }
++        for step in 0..size {
++            let y = if upward { size - 1 - step } else { step };
++            for dx in 0..2isize {
++                let x = (col - dx) as usize;
++                let idx = y * size + x;
++                if !is_func[idx] {
++                    let bit = if bit_idx < total_bits {
++                        ((codewords[bit_idx >> 3] >> (7 - (bit_idx & 7))) & 1) != 0
++                    } else {
++                        false
++                    };
++                    base_modules[idx] = bit;
++                    bit_idx += 1;
++                }
++            }
++        }
++        col -= 2;
++        upward = !upward;
++    }
++
++    // Choose lowest-penalty mask (0..8)
++    let mut best_modules = Vec::new();
++    let mut best_score = usize::MAX;
++    for mask in 0..8u32 {
++        let mut candidate = base_modules.clone();
++        for y in 0..size {
++            for x in 0..size {
++                let idx = y * size + x;
++                if !is_func[idx] && mask_condition(mask, x, y) {
++                    candidate[idx] = !candidate[idx];
++                }
++            }
++        }
++        write_format(&mut candidate, &mut is_func.clone(), size, mask);
++        let score = penalty_score(&candidate, size);
++        if score < best_score {
++            best_score = score;
++            best_modules = candidate;
++        }
++    }
++
++    Some(QrCode { size, modules: best_modules })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn crc32(data: &[u8]) -> u32 {
++        let mut crc = 0xFFFF_FFFFu32;
++        for &b in data {
++            crc ^= b as u32;
++            for _ in 0..8 {
++                crc = if (crc & 1) != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
++            }
++        }
++        !crc
++    }
++
++    fn make_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
++        let mut out = Vec::new();
++        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
++        out.extend_from_slice(kind);
++        out.extend_from_slice(data);
++        let mut crc_in = Vec::with_capacity(4 + data.len());
++        crc_in.extend_from_slice(kind);
++        crc_in.extend_from_slice(data);
++        out.extend_from_slice(&crc32(&crc_in).to_be_bytes());
++        out
++    }
++
++    #[test]
++    fn decodes_rgba_png_and_blends_alpha() {
++        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
++        // 2x1 RGBA
++        let ihdr = [0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0, 0, 0];
++        png.extend_from_slice(&make_chunk(b"IHDR", &ihdr));
++        // Filter=0, pixel 0 = solid red (255,0,0,255), pixel 1 = transparent (0,255,0,0)
++        let raw = [0u8, 255, 0, 0, 255, 0, 255, 0, 0];
++        let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
++        png.extend_from_slice(&make_chunk(b"IDAT", &z));
++        png.extend_from_slice(&make_chunk(b"IEND", &[]));
++
++        let img = decode_png(&png, (10, 20, 30)).unwrap();
++        assert_eq!((img.width, img.height), (2, 1));
++        // BGRA pixel 0 = (0, 0, 255, 255)
++        assert_eq!(&img.bgra_bottom_up[0..4], &[0, 0, 255, 255]);
++        // BGRA pixel 1 = background (30, 20, 10, 255)
++        assert_eq!(&img.bgra_bottom_up[4..8], &[30, 20, 10, 255]);
++    }
++
++    #[test]
++    fn encodes_qr_code_with_valid_finder_patterns() {
++        let qr = encode_qr("http://192.168.1.50:8360/?pin=123456").unwrap();
++        assert_eq!(qr.size, 29); // Version 3 (36 bytes > 34 bytes for V2)
++        // Top-left finder center (3,3) is dark, ring at (1,1) is light, border (0,0) is dark
++        assert!(qr.at(0, 0));
++        assert!(!qr.at(1, 1));
++        assert!(qr.at(3, 3));
++        // Always-dark module at (8, size - 8)
++        assert!(qr.at(8, qr.size - 8));
++    }
++}
+diff --git a/crates/xcl/src/library_menu.rs b/crates/xcl/src/library_menu.rs
+index 74500a0..806d4b1 100644
+--- a/crates/xcl/src/library_menu.rs
++++ b/crates/xcl/src/library_menu.rs
+@@ -1,5 +1,5 @@
+-//! TrinityXSX's controller-friendly library and folder-manager window.
+-//! It closes before in-process launch.
++//! TrinityXSX's controller-friendly library, cover preview, per-game xcl.toml editor,
++//! folder manager, and Web Companion QR window. Everything closes cleanly before in-process launch.
+ 
+ use std::path::PathBuf;
+ use std::ptr::{null, null_mut};
+@@ -9,21 +9,33 @@ use windows_sys::Win32::Graphics::Gdi::*;
+ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+ use windows_sys::Win32::UI::WindowsAndMessaging::*;
+ 
++use xcl::config::Config;
+ use xcl::library::{self, BrowserEntry, Catalog};
++use xcl::library_art::{self, DibImage, QrCode};
++use xcl::library_web::WebCompanion;
+ 
+ const GAME_ROWS: usize = 6;
+ const PATH_ROWS: usize = 6;
+ const BROWSER_ROWS: usize = 7;
++const SETTINGS_ROWS: usize = 8;
++const SETTINGS_COUNT: usize = 10;
+ 
++const UP: u16 = 0x0001;
++const DOWN: u16 = 0x0002;
++const LEFT: u16 = 0x0004;
++const RIGHT: u16 = 0x0008;
++const START: u16 = 0x0010;    // OPTIONS
++const L1: u16 = 0x0100;       // XINPUT_GAMEPAD_LEFT_SHOULDER
++const R1: u16 = 0x0200;       // XINPUT_GAMEPAD_RIGHT_SHOULDER
+ const CROSS: u16 = 0x1000;    // XINPUT_GAMEPAD_A  (DualSense Cross)
+ const CIRCLE: u16 = 0x2000;   // XINPUT_GAMEPAD_B  (DualSense Circle)
+ const SQUARE: u16 = 0x4000;   // XINPUT_GAMEPAD_X  (DualSense Square)
+ const TRIANGLE: u16 = 0x8000; // XINPUT_GAMEPAD_Y  (DualSense Triangle)
+-const UP: u16 = 0x0001;
+-const DOWN: u16 = 0x0002;
++
+ const STICK_THRESHOLD: i16 = 18000;
+ const REPEAT_DELAY_TICKS: u8 = 14;    // ~350 ms at 25 ms timer
+ const REPEAT_INTERVAL_TICKS: u8 = 4;  // ~100 ms
++const CARD_BG_RGB: (u8, u8, u8) = (24, 37, 44);
+ 
+ type ReadPad = unsafe extern "system" fn(u32, *mut PadState) -> u32;
+ 
+@@ -39,8 +51,10 @@ struct PadState {
+ #[derive(Clone, Copy, PartialEq, Eq)]
+ enum Screen {
+     Library,
++    GameSettings,
+     Paths,
+     Browser,
++    WebQr,
+ }
+ 
+ struct Menu {
+@@ -49,11 +63,24 @@ struct Menu {
+     catalog: Catalog,
+     screen: Screen,
+     selected: usize,
++    // Cached preview for currently selected game
++    preview_key: Option<PathBuf>,
++    preview_cover: Option<DibImage>,
++    preview_has_custom_cfg: bool,
++    preview_saves: (usize, u64),
++    // Per-game xcl.toml editor state
++    settings_cfg: Config,
++    settings_row: usize,
++    // Folder manager & browser state
+     path_row: usize,
+     browser_path: String,
+     browser_entries: Vec<BrowserEntry>,
+     browser_row: usize,
+     browser_error: String,
++    // Web Companion & QR code
++    web: Option<WebCompanion>,
++    qr: Option<QrCode>,
++    // Input & lifecycle
+     previous: Option<u16>,
+     hold_dir: u16,
+     hold_ticks: u8,
+@@ -73,6 +100,7 @@ fn wrap_down(index: usize, len: usize) -> usize {
+ impl Menu {
+     fn scan(&mut self) {
+         let before = self.catalog.games.get(self.selected).map(|game| game.executable.clone());
++        self.paths = library::read_paths(&self.paths_file).unwrap_or_else(|| self.paths.clone());
+         self.catalog = library::scan_paths(&self.paths);
+         self.selected = before
+             .and_then(|path| self.catalog.games.iter().position(|game| game.executable == path))
+@@ -80,6 +108,8 @@ impl Menu {
+         if !self.paths.is_empty() && self.path_row >= self.paths.len() {
+             self.path_row = self.paths.len() - 1;
+         }
++        self.preview_key = None;
++        self.refresh_preview();
+         let active = self.catalog.folders.iter().filter(|f| f.available).count();
+         println!(
+             "TrinityXSX: {} game(s) across {}/{} folder(s)",
+@@ -89,6 +119,202 @@ impl Menu {
+         );
+     }
+ 
++    fn refresh_preview(&mut self) {
++        let Some(game) = self.catalog.games.get(self.selected) else {
++            self.preview_key = None;
++            self.preview_cover = None;
++            self.preview_has_custom_cfg = false;
++            self.preview_saves = (0, 0);
++            return;
++        };
++        if self.preview_key.as_ref() == Some(&game.executable) {
++            return;
++        }
++        self.preview_key = Some(game.executable.clone());
++        self.preview_cover = game
++            .logo
++            .as_ref()
++            .and_then(|path| library_art::load_png_file(path, CARD_BG_RGB).ok());
++        let (_, has_cfg) = library::load_game_config(game);
++        self.preview_has_custom_cfg = has_cfg;
++        self.preview_saves = library::saves_summary(game);
++    }
++
++    fn open_game_settings(&mut self) {
++        let Some(game) = self.catalog.games.get(self.selected) else { return };
++        let (cfg, _) = library::load_game_config(game);
++        self.settings_cfg = cfg;
++        self.settings_row = 0;
++        self.status.clear();
++        self.screen = Screen::GameSettings;
++    }
++
++    fn cycle_setting(&mut self, forward: bool) {
++        let step = |idx: usize, len: usize| -> usize {
++            if forward { (idx + 1) % len } else { (idx + len - 1) % len }
++        };
++        match self.settings_row {
++            0 => {
++                // Console model
++                if self.settings_cfg.device_type.eq_ignore_ascii_case("lockhart") {
++                    self.settings_cfg.device_type = "anaconda".into();
++                    self.settings_cfg.console_type_raw = 6;
++                } else {
++                    self.settings_cfg.device_type = "lockhart".into();
++                    self.settings_cfg.console_type_raw = 5;
++                }
++            }
++            1 => {
++                // Title memory MiB
++                const OPTS: [u64; 4] = [4096, 6144, 8192, 0];
++                let cur = OPTS.iter().position(|&v| v == self.settings_cfg.title_memory_mb).unwrap_or(1);
++                self.settings_cfg.title_memory_mb = OPTS[step(cur, OPTS.len())];
++            }
++            2 => {
++                // Coherent UMA MiB
++                const OPTS: [u64; 4] = [512, 1024, 1536, 2048];
++                let cur = OPTS.iter().position(|&v| v == self.settings_cfg.coherent_mb).unwrap_or(1);
++                self.settings_cfg.coherent_mb = OPTS[step(cur, OPTS.len())];
++            }
++            3 => {
++                // Direct DXIL
++                const OPTS: [&str; 3] = ["all", "1", ""];
++                let cur = OPTS
++                    .iter()
++                    .position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.direct_dxil.trim()))
++                    .unwrap_or(0);
++                self.settings_cfg.direct_dxil = OPTS[step(cur, OPTS.len())].into();
++            }
++            4 => {
++                // Raytracing
++                const OPTS: [&str; 4] = ["off", "tier1_0", "tier1_1", "auto"];
++                let cur = OPTS
++                    .iter()
++                    .position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.raytracing.trim()))
++                    .unwrap_or(0);
++                self.settings_cfg.raytracing = OPTS[step(cur, OPTS.len())].into();
++            }
++            5 => {
++                // Network
++                self.settings_cfg.network = !self.settings_cfg.network;
++            }
++            6 => {
++                // Xbox Live tokens
++                self.settings_cfg.xbox_live_tokens = !self.settings_cfg.xbox_live_tokens;
++            }
++            7 => {
++                // Log level
++                const OPTS: [&str; 3] = ["info", "debug", "warn"];
++                let cur = OPTS
++                    .iter()
++                    .position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.log_level.trim()))
++                    .unwrap_or(0);
++                self.settings_cfg.log_level = OPTS[step(cur, OPTS.len())].into();
++            }
++            8 => {
++                // Diagnostic tracing bundle
++                let on = !(self.settings_cfg.activity || self.settings_cfg.live_flush);
++                self.settings_cfg.activity = on;
++                self.settings_cfg.trace_net = on;
++                self.settings_cfg.live_flush = on;
++            }
++            9 => {
++                // Stub nvngx_dlss.dll
++                if self.settings_cfg.aliases.get("nvngx_dlss.dll").is_some_and(|v| v == "@stub") {
++                    self.settings_cfg.aliases.remove("nvngx_dlss.dll");
++                } else {
++                    self.settings_cfg.aliases.insert("nvngx_dlss.dll".into(), "@stub".into());
++                }
++            }
++            _ => {}
++        }
++
++        if let Some(game) = self.catalog.games.get(self.selected) {
++            match library::save_game_config(game, &self.settings_cfg) {
++                Ok(()) => {
++                    self.preview_has_custom_cfg = true;
++                    self.status = format!("Saved xcl.toml for {}", game.identity);
++                }
++                Err(e) => self.status = format!("Cannot save xcl.toml: {e}"),
++            }
++        }
++    }
++
++    fn setting_row_info(&self, row: usize) -> (&'static str, String, &'static str) {
++        match row {
++            0 => (
++                "Console model",
++                if self.settings_cfg.device_type.eq_ignore_ascii_case("lockhart") {
++                    "Xbox Series S (lockhart)".into()
++                } else {
++                    "Xbox Series X (anaconda)".into()
++                },
++                "Series S uses less RAM and safer LOD on PS5. Switch to Series X only if a game refuses Series S.",
++            ),
++            1 => (
++                "Title memory budget",
++                if self.settings_cfg.title_memory_mb == 0 {
++                    "Auto (console default)".into()
++                } else {
++                    format!("{} MiB", self.settings_cfg.title_memory_mb)
++                },
++                "6144 MiB is recommended on PS5. Lower to 4096 MiB if a game crashes with out-of-memory errors.",
++            ),
++            2 => (
++                "Coherent UMA window",
++                format!("{} MiB", self.settings_cfg.coherent_mb.max(512)),
++                "CPU/GPU mapped texture window. Raise to 1536 or 2048 MiB if xcl.log reports coherent window exhaustion.",
++            ),
++            3 => (
++                "Direct DXIL translator",
++                match self.settings_cfg.direct_dxil.trim() {
++                    "all" => "all (fastest on PS5)".into(),
++                    "1" => "1 (partial)".into(),
++                    _ => "off (use DXC)".into(),
++                },
++                "\"all\" skips heavy multi-threaded DXC shader compilation on PS5. Switch to \"off\" if shaders look broken.",
++            ),
++            4 => (
++                "Raytracing (DXR)",
++                if self.settings_cfg.raytracing.is_empty() { "off".into() } else { self.settings_cfg.raytracing.clone() },
++                "Keep \"off\" while testing a new game; enable tier1_0/tier1_1 only after it runs stably.",
++            ),
++            5 => (
++                "Network access",
++                if self.settings_cfg.network { "Online (true)".into() } else { "Offline (false)".into() },
++                "Offline blocks external sockets so games boot cleanly without hanging on Xbox Live.",
++            ),
++            6 => (
++                "Xbox Live placeholder tokens",
++                if self.settings_cfg.xbox_live_tokens { "Enabled (true)".into() } else { "Disabled (false)".into() },
++                "Keep Disabled for offline play — placeholder tokens can cause infinite sign-in loops.",
++            ),
++            7 => (
++                "Log verbosity",
++                self.settings_cfg.log_level.clone(),
++                "Use \"info\" for normal play. Switch to \"debug\" when capturing logs for a GitHub bug report.",
++            ),
++            8 => (
++                "Diagnostic tracing",
++                if self.settings_cfg.activity || self.settings_cfg.live_flush {
++                    "On (activity + net + live flush)".into()
++                } else {
++                    "Off (normal play)".into()
++                },
++                "Flushes xcl.log immediately and records memory/activity every 2s. Helpful when diagnosing hangs.",
++            ),
++            _ => (
++                "Stub nvngx_dlss.dll",
++                if self.settings_cfg.aliases.get("nvngx_dlss.dll").is_some_and(|v| v == "@stub") {
++                    "On (@stub)".into()
++                } else {
++                    "Off".into()
++                },
++                "Replaces NVIDIA DLSS DLL imports with a harmless stub on PS5's AMD RDNA2 GPU.",
++            ),
++        }
++    }
++
+     fn open_browser(&mut self, start_at: Option<&str>) {
+         self.browser_path = library::browser_initial_path(start_at);
+         self.refresh_browser();
+@@ -110,8 +336,10 @@ impl Menu {
+     fn input(&mut self, buttons: u16) -> bool {
+         match self.screen {
+             Screen::Library => self.input_library(buttons),
++            Screen::GameSettings => self.input_game_settings(buttons),
+             Screen::Paths => self.input_paths(buttons),
+             Screen::Browser => self.input_browser(buttons),
++            Screen::WebQr => self.input_web_qr(buttons),
+         }
+     }
+ 
+@@ -127,6 +355,14 @@ impl Menu {
+             self.screen = Screen::Paths;
+             return false;
+         }
++        if buttons & L1 != 0 {
++            self.screen = Screen::WebQr;
++            return false;
++        }
++        if (buttons & (R1 | START)) != 0 && !self.catalog.games.is_empty() {
++            self.open_game_settings();
++            return false;
++        }
+         if buttons & TRIANGLE != 0 {
+             self.scan();
+             self.status = if self.catalog.skipped == 0 {
+@@ -137,9 +373,11 @@ impl Menu {
+         }
+         if buttons & UP != 0 {
+             self.selected = wrap_up(self.selected, self.catalog.games.len());
++            self.refresh_preview();
+         }
+         if buttons & DOWN != 0 {
+             self.selected = wrap_down(self.selected, self.catalog.games.len());
++            self.refresh_preview();
+         }
+         if buttons & CROSS != 0 {
+             if let Some(game) = self.catalog.games.get(self.selected) {
+@@ -157,6 +395,47 @@ impl Menu {
+         false
+     }
+ 
++    fn input_game_settings(&mut self, buttons: u16) -> bool {
++        if buttons & CIRCLE != 0 {
++            self.screen = Screen::Library;
++            self.preview_key = None;
++            self.refresh_preview();
++            return false;
++        }
++        if buttons & UP != 0 {
++            self.settings_row = wrap_up(self.settings_row, SETTINGS_COUNT);
++        }
++        if buttons & DOWN != 0 {
++            self.settings_row = wrap_down(self.settings_row, SETTINGS_COUNT);
++        }
++        if buttons & (CROSS | RIGHT) != 0 {
++            self.cycle_setting(true);
++        }
++        if buttons & LEFT != 0 {
++            self.cycle_setting(false);
++        }
++        if buttons & TRIANGLE != 0 {
++            if let Some(game) = self.catalog.games.get(self.selected) {
++                match library::reset_game_config(game) {
++                    Ok(preset) => {
++                        self.settings_cfg = preset;
++                        self.preview_has_custom_cfg = true;
++                        self.status = "Restored recommended PS5 preset".into();
++                    }
++                    Err(e) => self.status = format!("Cannot reset xcl.toml: {e}"),
++                }
++            }
++        }
++        false
++    }
++
++    fn input_web_qr(&mut self, buttons: u16) -> bool {
++        if buttons & (CIRCLE | L1 | SQUARE) != 0 {
++            self.screen = Screen::Library;
++        }
++        false
++    }
++
+     fn input_paths(&mut self, buttons: u16) -> bool {
+         if buttons & CIRCLE != 0 {
+             self.screen = Screen::Library;
+@@ -266,6 +545,11 @@ impl Menu {
+         } else if state.sticks[1] < -STICK_THRESHOLD {
+             buttons |= DOWN;
+         }
++        if state.sticks[0] > STICK_THRESHOLD {
++            buttons |= RIGHT;
++        } else if state.sticks[0] < -STICK_THRESHOLD {
++            buttons |= LEFT;
++        }
+ 
+         let mut pressed = self.previous.map_or(0, |previous| buttons & !previous);
+         self.previous = Some(buttons);
+@@ -299,7 +583,7 @@ unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
+     DeleteObject(brush);
+ }
+ 
+-unsafe fn text(dc: HDC, value: &str, mut rect: RECT, size: i32, weight: i32, color: u32) {
++unsafe fn text_aligned(dc: HDC, value: &str, mut rect: RECT, size: i32, weight: i32, color: u32, flags: u32) {
+     if value.is_empty() {
+         return;
+     }
+@@ -308,11 +592,90 @@ unsafe fn text(dc: HDC, value: &str, mut rect: RECT, size: i32, weight: i32, col
+     SetBkMode(dc, TRANSPARENT as i32);
+     SetTextColor(dc, color);
+     let text = super::wide(value);
+-    DrawTextW(dc, text.as_ptr(), (text.len() - 1) as i32, &mut rect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
++    DrawTextW(dc, text.as_ptr(), (text.len() - 1) as i32, &mut rect, flags | DT_NOPREFIX);
+     SelectObject(dc, old);
+     DeleteObject(font);
+ }
+ 
++unsafe fn text(dc: HDC, value: &str, rect: RECT, size: i32, weight: i32, color: u32) {
++    text_aligned(dc, value, rect, size, weight, color, DT_SINGLELINE | DT_END_ELLIPSIS);
++}
++
++unsafe fn draw_dib(dc: HDC, img: &DibImage, box_x: i32, box_y: i32, box_w: i32, box_h: i32) {
++    if img.width == 0 || img.height == 0 || box_w <= 0 || box_h <= 0 {
++        return;
++    }
++    // Preserve aspect ratio, centered inside (box_x, box_y, box_w, box_h)
++    let sx = box_w as f64 / img.width as f64;
++    let sy = box_h as f64 / img.height as f64;
++    let factor = sx.min(sy);
++    let dst_w = ((img.width as f64 * factor).round() as i32).max(1);
++    let dst_h = ((img.height as f64 * factor).round() as i32).max(1);
++    let dst_x = box_x + (box_w - dst_w) / 2;
++    let dst_y = box_y + (box_h - dst_h) / 2;
++
++    let mut bmi: BITMAPINFO = std::mem::zeroed();
++    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
++    bmi.bmiHeader.biWidth = img.width as i32;
++    bmi.bmiHeader.biHeight = img.height as i32; // positive = bottom-up DIB
++    bmi.bmiHeader.biPlanes = 1;
++    bmi.bmiHeader.biBitCount = 32;
++    bmi.bmiHeader.biCompression = BI_RGB;
++
++    SetStretchBltMode(dc, COLORONCOLOR as i32);
++    StretchDIBits(
++        dc,
++        dst_x,
++        dst_y,
++        dst_w,
++        dst_h,
++        0,
++        0,
++        img.width as i32,
++        img.height as i32,
++        img.bgra_bottom_up.as_ptr() as *const _,
++        &bmi,
++        DIB_RGB_COLORS,
++        SRCCOPY,
++    );
++}
++
++unsafe fn draw_qr(dc: HDC, qr: &QrCode, x: i32, y: i32, card_px: i32) {
++    let white = rgb(255, 255, 255);
++    let black = rgb(12, 16, 20);
++    fill(dc, RECT { left: x, top: y, right: x + card_px, bottom: y + card_px }, white);
++
++    let quiet = 3i32;
++    let total = qr.size as i32 + quiet * 2;
++    let module = (card_px / total).max(1);
++    let grid_px = module * qr.size as i32;
++    let ox = x + (card_px - grid_px) / 2;
++    let oy = y + (card_px - grid_px) / 2;
++
++    let brush = CreateSolidBrush(black);
++    for my in 0..qr.size {
++        let mut mx = 0usize;
++        while mx < qr.size {
++            if !qr.at(mx, my) {
++                mx += 1;
++                continue;
++            }
++            let start = mx;
++            while mx < qr.size && qr.at(mx, my) {
++                mx += 1;
++            }
++            let rect = RECT {
++                left: ox + (start as i32) * module,
++                top: oy + (my as i32) * module,
++                right: ox + (mx as i32) * module,
++                bottom: oy + ((my + 1) as i32) * module,
++            };
++            FillRect(dc, &rect, brush);
++        }
++    }
++    DeleteObject(brush);
++}
++
+ fn scroll_window(selected: usize, total: usize, visible: usize) -> usize {
+     if total <= visible {
+         0
+@@ -330,20 +693,32 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+     GetClientRect(window, &mut client);
+     fill(dc, client, rgb(14, 23, 29));
+     let scale = |vertical: i32| (vertical * client.bottom / 1080).max(1);
+-    let left = client.right / 12;
++    let left = client.right / 14;
+     let right = client.right - left;
+-    let region = |x, y, h| RECT { left: x, top: scale(y), right, bottom: scale(y + h) };
++    let region = |x, y, r, h| RECT { left: x, top: scale(y), right: r, bottom: scale(y + h) };
+     let snow = rgb(238, 247, 248);
+     let muted = rgb(178, 199, 203);
+     let mint = rgb(133, 230, 189);
+     let amber = rgb(247, 198, 114);
+     let card_bg = rgb(28, 42, 49);
++    let panel_bg = rgb(CARD_BG_RGB.0 as u32, CARD_BG_RGB.1 as u32, CARD_BG_RGB.2 as u32);
+     let card_sel = rgb(39, 78, 72);
+ 
++    // Top-right build version badge on every screen (helps identify release in bug screenshots)
++    text_aligned(
++        dc,
++        &format!("TrinityXSX {}  ·  PPSA83601", library::TRINITYXSX_VERSION),
++        region(right - scale(480), 68, right, 36),
++        scale(23),
++        600,
++        muted,
++        DT_SINGLELINE | DT_RIGHT,
++    );
++
+     match menu.screen {
+         Screen::Library => {
+             let active = menu.catalog.folders.iter().filter(|f| f.available).count();
+-            text(dc, "TrinityXSX", region(left, 60, 84), scale(64), 700, snow);
++            text(dc, "TrinityXSX", region(left, 56, right - scale(460), 80), scale(62), 700, snow);
+             let header_sub = if menu.catalog.games.len() > GAME_ROWS {
+                 format!(
+                     "Game library  ·  {} games  ·  {}/{} folders  ·  {} / {}",
+@@ -361,61 +736,179 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+                     menu.catalog.folders.len()
+                 )
+             };
+-            text(dc, &header_sub, region(left, 148, 48), scale(28), 400, mint);
++            text(dc, &header_sub, region(left, 142, right, 44), scale(27), 400, mint);
+ 
+             if menu.catalog.games.is_empty() {
+-                text(dc, "No Xbox Series games found", region(left, 300, 62), scale(40), 600, snow);
++                text(dc, "No Xbox Series games found", region(left, 290, right, 60), scale(40), 600, snow);
+                 text(
+                     dc,
+                     "Press Square to add game folders (e.g. /mnt/ext1/xboxseries or USB), or copy games into:",
+-                    region(left, 372, 44),
++                    region(left, 364, right, 42),
+                     scale(24),
+                     400,
+                     muted,
+                 );
+                 for (idx, folder) in menu.catalog.folders.iter().take(4).enumerate() {
+-                    let y = 434 + (idx as i32) * 44;
++                    let y = 426 + (idx as i32) * 44;
+                     let badge = if folder.available { "Available" } else { "Not found" };
+                     let color = if folder.available { mint } else { muted };
+-                    text(dc, &format!("{}   [{}]", folder.path, badge), region(left + scale(18), y, 38), scale(24), 400, color);
++                    text(dc, &format!("{}   [{}]", folder.path, badge), region(left + scale(18), y, right, 38), scale(24), 400, color);
+                 }
+-                text(dc, "Press X or Square to open Game folders", region(left, 634, 44), scale(24), 600, snow);
++                text(dc, "Press X or Square to open Game folders  ·  Press L1 for Phone/PC Web Companion", region(left, 630, right, 44), scale(24), 600, snow);
+             } else {
++                // Split layout: left game list (62%), right preview card with cover art (35%)
++                let list_right = left + ((right - left) * 62) / 100;
++                let preview_left = list_right + scale(34);
++
+                 let first = scroll_window(menu.selected, menu.catalog.games.len(), GAME_ROWS);
+                 for (i, game) in menu.catalog.games.iter().enumerate().skip(first).take(GAME_ROWS) {
+-                    let top = 216 + ((i - first) as i32) * 106;
++                    let top = 210 + ((i - first) as i32) * 104;
+                     let selected = i == menu.selected;
+-                    fill(dc, region(left, top, 94), if selected { card_sel } else { card_bg });
++                    fill(dc, region(left, top, list_right, 92), if selected { card_sel } else { card_bg });
+                     if selected {
+-                        let mut rail = region(left, top, 94);
+-                        rail.right = left + scale(6);
+-                        fill(dc, rail, mint);
++                        fill(dc, region(left, top, left + scale(6), 92), mint);
+                     }
+-                    let inset = left + scale(26);
+-                    text(dc, &game.name, region(inset, top + 8, 46), scale(34), 600, snow);
++                    let inset = left + scale(24);
++                    text(dc, &game.name, region(inset, top + 8, list_right - scale(16), 44), scale(33), 600, snow);
+                     text(
+                         dc,
+                         &format!("{}  ·  {}  ·  {}", game.identity, game.version, game.folder),
+-                        region(inset, top + 52, 36),
+-                        scale(22),
++                        region(inset, top + 52, list_right - scale(16), 34),
++                        scale(21),
+                         400,
+                         muted,
+                     );
+                 }
++
++                // Right-side preview card for selected game
++                if let Some(game) = menu.catalog.games.get(menu.selected) {
++                    let card_top = 210;
++                    let card_h = 612;
++                    fill(dc, region(preview_left, card_top, right, card_h), panel_bg);
++                    fill(dc, region(preview_left, card_top, right, 4), mint);
++
++                    let pad = scale(24);
++                    let art_x = preview_left + pad;
++                    let art_y = scale(card_top + 24);
++                    let art_w = (right - preview_left) - pad * 2;
++                    let art_h = scale(290);
++                    if let Some(cover) = &menu.preview_cover {
++                        draw_dib(dc, cover, art_x, art_y, art_w, art_h);
++                    } else {
++                        fill(dc, RECT { left: art_x, top: art_y, right: art_x + art_w, bottom: art_y + art_h }, card_bg);
++                        text_aligned(
++                            dc,
++                            "XSX",
++                            RECT { left: art_x, top: art_y + art_h / 2 - scale(36), right: art_x + art_w, bottom: art_y + art_h / 2 + scale(36) },
++                            scale(56),
++                            700,
++                            mint,
++                            DT_SINGLELINE | DT_CENTER,
++                        );
++                    }
++
++                    let info_left = preview_left + pad;
++                    let info_right = right - pad;
++                    text(dc, &game.name, region(info_left, card_top + 332, info_right, 40), scale(30), 700, snow);
++                    let id_line = if game.title_id.is_empty() {
++                        format!("{}  ·  v{}", game.identity, game.version)
++                    } else {
++                        format!("ID {}  ·  v{}", game.title_id, game.version)
++                    };
++                    text(dc, &id_line, region(info_left, card_top + 378, info_right, 32), scale(21), 400, muted);
++
++                    let cfg_label = if menu.preview_has_custom_cfg {
++                        "Config: Custom xcl.toml"
++                    } else if library::has_tested_preset(&game.identity) {
++                        "Config: Tested PS5 preset"
++                    } else {
++                        "Config: Auto PS5 defaults"
++                    };
++                    text(dc, cfg_label, region(info_left, card_top + 428, info_right, 32), scale(22), 600, mint);
++
++                    let (sfiles, sbytes) = menu.preview_saves;
++                    let saves_line = if sfiles == 0 {
++                        "Saves: None yet".into()
++                    } else {
++                        format!("Saves: {sfiles} files ({:.1} MiB)", (sbytes as f64) / (1024.0 * 1024.0))
++                    };
++                    text(dc, &saves_line, region(info_left, card_top + 468, info_right, 32), scale(21), 400, muted);
++                    text(dc, &format!("Folder: {}", game.folder), region(info_left, card_top + 506, info_right, 32), scale(20), 400, muted);
++                    text(dc, "Press R1 to edit xcl.toml settings", region(info_left, card_top + 558, info_right, 32), scale(21), 600, snow);
++                }
++            }
++
++            if let Some(web) = &menu.web {
++                text(
++                    dc,
++                    &format!("Phone/PC Web & Logs:  {}   ·   PIN {}   (press L1 for QR)", web.url, web.pin),
++                    region(left, 852, right, 34),
++                    scale(21),
++                    400,
++                    muted,
++                );
+             }
+-            text(dc, &menu.status, region(left, 892, 42), scale(24), 400, mint);
++            text(dc, &menu.status, region(left, 896, right, 38), scale(23), 400, mint);
+             text(
+                 dc,
+-                "D-pad  Select     X  Play     Square  Folders     Triangle  Refresh     Circle  Exit",
+-                region(left, 958, 44),
+-                scale(26),
++                "X  Play     R1  Settings     Square  Folders     L1  Web / QR     Triangle  Refresh     Circle  Exit",
++                region(left, 958, right, 44),
++                scale(24),
++                600,
++                snow,
++            );
++        }
++
++        Screen::GameSettings => {
++            let game_name = menu.catalog.games.get(menu.selected).map(|g| g.name.as_str()).unwrap_or("Game");
++            let game_id = menu.catalog.games.get(menu.selected).map(|g| g.identity.as_str()).unwrap_or("");
++            text(dc, &format!("Game settings  ·  {game_name}"), region(left, 56, right - scale(460), 76), scale(48), 700, snow);
++            let cfg_display = library::display_path(&library::config_path_for_title(game_id));
++            text(
++                dc,
++                &format!("{}   ({} / {})", cfg_display, menu.settings_row + 1, SETTINGS_COUNT),
++                region(left, 138, right, 40),
++                scale(23),
++                400,
++                muted,
++            );
++
++            let first = scroll_window(menu.settings_row, SETTINGS_COUNT, SETTINGS_ROWS);
++            for idx in first..(first + SETTINGS_ROWS).min(SETTINGS_COUNT) {
++                let top = 198 + ((idx - first) as i32) * 76;
++                let selected = idx == menu.settings_row;
++                let (label, value, _) = menu.setting_row_info(idx);
++                fill(dc, region(left, top, right, 66), if selected { card_sel } else { card_bg });
++                if selected {
++                    fill(dc, region(left, top, left + scale(6), 66), mint);
++                }
++                text(dc, label, region(left + scale(24), top + 16, right - scale(440), 36), scale(26), 600, snow);
++                text_aligned(
++                    dc,
++                    &value,
++                    region(right - scale(460), top + 16, right - scale(24), 36),
++                    scale(26),
++                    600,
++                    if selected { mint } else { muted },
++                    DT_SINGLELINE | DT_RIGHT | DT_END_ELLIPSIS,
++                );
++            }
++
++            let (_, _, about) = menu.setting_row_info(menu.settings_row);
++            text(dc, about, region(left, 826, right, 44), scale(22), 400, snow);
++            text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
++            text(
++                dc,
++                "D-pad  Navigate     X / Left / Right  Change & Save     Triangle  Reset preset     Circle  Back",
++                region(left, 958, right, 44),
++                scale(24),
+                 600,
+                 snow,
+             );
+         }
+ 
+         Screen::Paths => {
+-            text(dc, "Game folders", region(left, 60, 80), scale(56), 700, snow);
++            text(dc, "Game folders", region(left, 56, right - scale(460), 80), scale(54), 700, snow);
+             let sub = if menu.paths.len() > PATH_ROWS {
+                 format!(
+                     "Add internal, /mnt/ext1 or USB folders. Disconnected folders stay saved.   ({} / {})",
+@@ -425,31 +918,29 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+             } else {
+                 "Add internal, /mnt/ext1 or USB folders. Disconnected folders stay saved.".into()
+             };
+-            text(dc, &sub, region(left, 144, 44), scale(25), 400, muted);
++            text(dc, &sub, region(left, 140, right, 44), scale(24), 400, muted);
+ 
+             if menu.paths.is_empty() {
+-                text(dc, "No game folders configured.", region(left, 320, 52), scale(34), 600, snow);
+-                text(dc, "Press Square to browse and add a folder.", region(left, 382, 44), scale(24), 400, muted);
++                text(dc, "No game folders configured.", region(left, 320, right, 52), scale(34), 600, snow);
++                text(dc, "Press Square to browse and add a folder.", region(left, 382, right, 44), scale(24), 400, muted);
+             } else {
+                 let first = scroll_window(menu.path_row, menu.paths.len(), PATH_ROWS);
+                 for (i, folder) in menu.catalog.folders.iter().enumerate().skip(first).take(PATH_ROWS) {
+-                    let top = 212 + ((i - first) as i32) * 102;
++                    let top = 210 + ((i - first) as i32) * 102;
+                     let selected = i == menu.path_row;
+-                    fill(dc, region(left, top, 90), if selected { card_sel } else { card_bg });
++                    fill(dc, region(left, top, right, 90), if selected { card_sel } else { card_bg });
+                     if selected {
+-                        let mut rail = region(left, top, 90);
+-                        rail.right = left + scale(6);
+-                        fill(dc, rail, mint);
++                        fill(dc, region(left, top, left + scale(6), 90), mint);
+                     }
+                     let inset = left + scale(26);
+-                    text(dc, &folder.path, region(inset, top + 8, 42), scale(30), 600, snow);
++                    text(dc, &folder.path, region(inset, top + 8, right - scale(20), 42), scale(30), 600, snow);
+                     let (state_text, state_color) = if folder.available {
+                         let label = if folder.game_count == 1 { "1 game".into() } else { format!("{} games", folder.game_count) };
+                         (format!("Available  ·  {label}"), mint)
+                     } else {
+                         ("Disconnected or unavailable".into(), muted)
+                     };
+-                    text(dc, &state_text, region(inset, top + 50, 34), scale(22), 400, state_color);
++                    text(dc, &state_text, region(inset, top + 50, right - scale(20), 34), scale(22), 400, state_color);
+                 }
+             }
+ 
+@@ -457,12 +948,12 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+                 "Removing a folder never deletes games on disk.   Config: {}",
+                 library::display_path(&menu.paths_file)
+             );
+-            text(dc, &info, region(left, 846, 36), scale(21), 400, muted);
+-            text(dc, &menu.status, region(left, 892, 42), scale(24), 400, mint);
++            text(dc, &info, region(left, 846, right, 36), scale(21), 400, muted);
++            text(dc, &menu.status, region(left, 892, right, 42), scale(24), 400, mint);
+             text(
+                 dc,
+                 "X  Browse     Square  Add folder     Triangle  Remove     Circle  Back",
+-                region(left, 958, 44),
++                region(left, 958, right, 44),
+                 scale(26),
+                 600,
+                 snow,
+@@ -470,7 +961,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+         }
+ 
+         Screen::Browser => {
+-            text(dc, "Choose folder", region(left, 60, 76), scale(54), 700, snow);
++            text(dc, "Choose folder", region(left, 56, right - scale(460), 76), scale(54), 700, snow);
+             let current_header = if menu.browser_entries.len() > BROWSER_ROWS {
+                 format!(
+                     "{}   ({} / {})",
+@@ -481,13 +972,13 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+             } else {
+                 menu.browser_path.clone()
+             };
+-            text(dc, &current_header, region(left, 140, 46), scale(28), 600, mint);
++            text(dc, &current_header, region(left, 140, right, 46), scale(28), 600, mint);
+ 
+             if menu.browser_entries.is_empty() && menu.browser_error.is_empty() {
+                 text(
+                     dc,
+                     "No subfolders here. Press Triangle to add the current folder.",
+-                    region(left, 260, 48),
++                    region(left, 260, right, 48),
+                     scale(28),
+                     400,
+                     muted,
+@@ -497,11 +988,9 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+                 for (i, entry) in menu.browser_entries.iter().enumerate().skip(first).take(BROWSER_ROWS) {
+                     let top = 206 + ((i - first) as i32) * 86;
+                     let selected = i == menu.browser_row;
+-                    fill(dc, region(left, top, 76), if selected { card_sel } else { card_bg });
++                    fill(dc, region(left, top, right, 76), if selected { card_sel } else { card_bg });
+                     if selected {
+-                        let mut rail = region(left, top, 76);
+-                        rail.right = left + scale(6);
+-                        fill(dc, rail, mint);
++                        fill(dc, region(left, top, left + scale(6), 76), mint);
+                     }
+                     let inset = left + scale(26);
+                     let label = if entry.is_game {
+@@ -509,17 +998,17 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+                     } else {
+                         entry.name.clone()
+                     };
+-                    text(dc, &label, region(inset, top + 18, 42), scale(28), 600, if entry.is_game { mint } else { snow });
++                    text(dc, &label, region(inset, top + 18, right - scale(20), 42), scale(28), 600, if entry.is_game { mint } else { snow });
+                 }
+             }
+ 
+             if !menu.browser_error.is_empty() {
+-                text(dc, &menu.browser_error, region(left, 842, 40), scale(24), 600, amber);
++                text(dc, &menu.browser_error, region(left, 842, right, 40), scale(24), 600, amber);
+             }
+             text(
+                 dc,
+                 "Triangle adds the current folder. Circle goes up one level.",
+-                region(left, 892, 40),
++                region(left, 892, right, 40),
+                 scale(23),
+                 400,
+                 muted,
+@@ -527,12 +1016,49 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+             text(
+                 dc,
+                 "X  Open     Triangle  Use folder     Circle  Up     Square  Cancel",
+-                region(left, 958, 44),
++                region(left, 958, right, 44),
+                 scale(26),
+                 600,
+                 snow,
+             );
+         }
++
++        Screen::WebQr => {
++            text(dc, "Phone & PC Web Companion", region(left, 56, right - scale(460), 76), scale(52), 700, snow);
++            text(
++                dc,
++                "Connect from the same Wi-Fi network to download logs ZIP or edit xcl.toml and folders.",
++                region(left, 140, right, 44),
++                scale(25),
++                400,
++                muted,
++            );
++
++            if let Some(web) = &menu.web {
++                let card_px = scale(420);
++                let qr_x = left;
++                let qr_y = scale(230);
++                if let Some(qr) = &menu.qr {
++                    draw_qr(dc, qr, qr_x, qr_y, card_px);
++                }
++
++                let text_x = qr_x + card_px + scale(56);
++                text(dc, "1. Scan QR code with your phone camera", region(text_x, 250, right, 44), scale(30), 600, snow);
++                text(dc, "Or open this address in any browser:", region(text_x, 314, right, 36), scale(24), 400, muted);
++                text(dc, &web.url, region(text_x, 360, right, 48), scale(36), 700, mint);
++                text(dc, &format!("PIN:  {}", web.pin), region(text_x, 424, right, 48), scale(36), 700, snow);
++
++                text(dc, "What you can do from the browser:", region(text_x, 514, right, 36), scale(25), 600, snow);
++                text(dc, "• Download trinityxsx-logs.zip for GitHub bug reports (no FTP needed)", region(text_x, 560, right, 34), scale(22), 400, muted);
++                text(dc, "• Edit per-game xcl.toml with syntax validation", region(text_x, 600, right, 34), scale(22), 400, muted);
++                text(dc, "• Edit game_paths.txt (changes refresh automatically)", region(text_x, 640, right, 34), scale(22), 400, muted);
++                text(dc, "Server stops automatically when you launch a game.", region(left, 710, right, 36), scale(22), 400, muted);
++            } else {
++                text(dc, "Web server could not bind a local port on this system.", region(left, 320, right, 48), scale(30), 600, amber);
++            }
++
++            text(dc, "Circle / L1  Back to library", region(left, 958, right, 44), scale(26), 600, snow);
++        }
+     }
+ 
+     EndPaint(window, &ps);
+@@ -550,14 +1076,25 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lp
+             paint(window, menu);
+             return 0;
+         }
+-        WM_TIMER => menu.pad_buttons(),
++        WM_TIMER => {
++            if menu.web.as_ref().is_some_and(|w| w.take_dirty()) {
++                menu.scan();
++                menu.status = "Updated from Web Companion".into();
++                InvalidateRect(window, null(), 0);
++            }
++            menu.pad_buttons()
++        }
+         WM_KEYDOWN => match wparam {
+             0x26 => UP,
+             0x28 => DOWN,
++            0x25 => LEFT,
++            0x27 => RIGHT,
+             0x0d => CROSS,
+             0x1b | 0x08 => CIRCLE,
+             0x46 | 0x20 => SQUARE,
+             0x52 | 0x54 => TRIANGLE,
++            0x53 => R1, // 'S' -> Game settings
++            0x57 => L1, // 'W' -> Web / QR
+             _ => 0,
+         },
+         _ => return DefWindowProcW(window, msg, wparam, lparam),
+@@ -580,17 +1117,31 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+     };
+     let paths_file = library::paths_file();
+     let paths = library::load_or_init_paths(&paths_file, primary_root.as_deref());
++    let web = WebCompanion::start(paths_file.clone());
++    let qr = web.as_ref().and_then(|w| library_art::encode_qr(&w.qr_url));
++    if let Some(w) = &web {
++        println!("TrinityXSX: Web Companion at {} (PIN {})", w.url, w.pin);
++    }
++
+     let mut menu = Menu {
+         paths_file,
+         paths,
+         catalog: Catalog::default(),
+         screen: Screen::Library,
+         selected: 0,
++        preview_key: None,
++        preview_cover: None,
++        preview_has_custom_cfg: false,
++        preview_saves: (0, 0),
++        settings_cfg: Config::default(),
++        settings_row: 0,
+         path_row: 0,
+         browser_path: String::new(),
+         browser_entries: Vec::new(),
+         browser_row: 0,
+         browser_error: String::new(),
++        web,
++        qr,
+         previous: None,
+         hold_dir: 0,
+         hold_ticks: 0,
+@@ -641,6 +1192,10 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+             DispatchMessageW(&message);
+         }
+     }
++    // Shut down Web Companion cleanly BEFORE in-process game launch!
++    if let Some(mut web) = menu.web.take() {
++        web.shutdown();
++    }
+     Ok(menu.chosen)
+ }
+ 
+diff --git a/crates/xcl/src/library_web.rs b/crates/xcl/src/library_web.rs
+new file mode 100644
+index 0000000..e54e092
+--- /dev/null
++++ b/crates/xcl/src/library_web.rs
+@@ -0,0 +1,586 @@
++//! Built-in LAN Web Companion for TrinityXSX (clean shutdown before game launch).
++//!
++//! Lets users on the same Wi-Fi scan a QR code on their phone/PC to:
++//! - Download a ready-to-attach `trinityxsx-logs.zip` (no FTP or Python required)
++//! - Edit `game_paths.txt` from a phone/PC keyboard
++//! - View & edit per-game `xcl.toml` settings with TOML validation
++
++use std::fs;
++use std::io::{Read, Write};
++use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
++use std::thread::{self, JoinHandle};
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++use crate::config::Config;
++use crate::library;
++
++const PREFERRED_PORT: u16 = 8360;
++const MAX_LOG_FILE_BYTES: usize = 8 * 1024 * 1024;
++const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
++
++pub struct WebCompanion {
++    pub url: String,
++    pub qr_url: String,
++    pub pin: String,
++    stop: Arc<AtomicBool>,
++    pub dirty: Arc<AtomicBool>,
++    thread: Option<JoinHandle<()>>,
++}
++
++impl WebCompanion {
++    pub fn start(paths_file: PathBuf) -> Option<Self> {
++        let listener = TcpListener::bind(("0.0.0.0", PREFERRED_PORT))
++            .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
++            .ok()?;
++        let port = listener.local_addr().ok()?.port();
++        let _ = listener.set_nonblocking(true);
++
++        let ip = detect_lan_ip().unwrap_or_else(|| "127.0.0.1".into());
++        let pin = generate_pin();
++        let url = format!("http://{ip}:{port}");
++        let qr_url = format!("{url}/?pin={pin}");
++
++        let stop = Arc::new(AtomicBool::new(false));
++        let dirty = Arc::new(AtomicBool::new(false));
++        let stop_bg = Arc::clone(&stop);
++        let dirty_bg = Arc::clone(&dirty);
++        let pin_bg = pin.clone();
++
++        let thread = thread::spawn(move || {
++            while !stop_bg.load(Ordering::Acquire) {
++                match listener.accept() {
++                    Ok((stream, _)) => {
++                        let _ = stream.set_nonblocking(false);
++                        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
++                        let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
++                        handle_connection(stream, &pin_bg, &paths_file, &dirty_bg);
++                    }
++                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
++                        thread::sleep(Duration::from_millis(50));
++                    }
++                    Err(_) => {
++                        thread::sleep(Duration::from_millis(100));
++                    }
++                }
++            }
++        });
++
++        Some(Self { url, qr_url, pin, stop, dirty, thread: Some(thread) })
++    }
++
++    pub fn take_dirty(&self) -> bool {
++        self.dirty.swap(false, Ordering::AcqRel)
++    }
++
++    pub fn shutdown(&mut self) {
++        self.stop.store(true, Ordering::Release);
++        if let Some(handle) = self.thread.take() {
++            let _ = handle.join();
++        }
++    }
++}
++
++impl Drop for WebCompanion {
++    fn drop(&mut self) {
++        self.shutdown();
++    }
++}
++
++fn detect_lan_ip() -> Option<String> {
++    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
++    for target in ["192.0.2.1:80", "10.255.255.255:80", "8.8.8.8:80"] {
++        if sock.connect(target).is_ok() {
++            if let Ok(addr) = sock.local_addr() {
++                if let IpAddr::V4(v4) = addr.ip() {
++                    if !v4.is_loopback() && !v4.is_unspecified() {
++                        return Some(v4.to_string());
++                    }
++                }
++            }
++        }
++    }
++    None
++}
++
++fn generate_pin() -> String {
++    let nanos = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map(|d| d.as_nanos() as u64)
++        .unwrap_or(0x5A3C_1234);
++    let mut x = nanos ^ ((std::process::id() as u64) << 17) ^ 0x9E37_79B9_7F4A_7C15;
++    x ^= x >> 30;
++    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
++    x ^= x >> 27;
++    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
++    x ^= x >> 31;
++    format!("{:06}", x % 1_000_000)
++}
++
++fn handle_connection(mut stream: TcpStream, pin: &str, paths_file: &Path, dirty: &AtomicBool) {
++    let Some((method, target, body)) = read_http_request(&mut stream) else {
++        return;
++    };
++    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
++    let params = parse_query(query);
++    let supplied_pin = params.iter().find(|(k, _)| k == "pin").map(|(_, v)| v.as_str()).unwrap_or("");
++
++    if supplied_pin != pin {
++        let html = render_login_page(path);
++        send_response(&mut stream, "200 OK", "text/html; charset=utf-8", html.as_bytes(), None);
++        return;
++    }
++
++    match (method.as_str(), path) {
++        ("GET", "/") => {
++            let notice = params.iter().find(|(k, _)| k == "msg").map(|(_, v)| v.as_str()).unwrap_or("");
++            let html = render_dashboard(pin, paths_file, notice);
++            send_response(&mut stream, "200 OK", "text/html; charset=utf-8", html.as_bytes(), None);
++        }
++        ("GET", "/logs.zip") => {
++            let zip = build_logs_zip(paths_file);
++            send_response(
++                &mut stream,
++                "200 OK",
++                "application/zip",
++                &zip,
++                Some("attachment; filename=\"trinityxsx-logs.zip\""),
++            );
++        }
++        ("POST", "/paths") => {
++            let form = parse_query(&body);
++            let raw = form.iter().find(|(k, _)| k == "paths").map(|(_, v)| v.as_str()).unwrap_or("");
++            let mut next = Vec::new();
++            for line in raw.lines() {
++                let _ = library::push_unique_path(&mut next, line);
++            }
++            let msg = match library::write_paths(paths_file, &next) {
++                Ok(()) => {
++                    dirty.store(true, Ordering::Release);
++                    format!("Saved {} game folder(s).", next.len())
++                }
++                Err(e) => format!("Error saving game_paths.txt: {e}"),
++            };
++            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++        }
++        ("POST", "/config") => {
++            let form = parse_query(&body);
++            let title = form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).unwrap_or("");
++            let raw_toml = form.iter().find(|(k, _)| k == "toml").map(|(_, v)| v.as_str()).unwrap_or("");
++            let msg = if !is_safe_title_id(title) {
++                "Invalid title folder name.".into()
++            } else {
++                match toml::from_str::<Config>(raw_toml) {
++                    Ok(_) => {
++                        let cfg_path = library::config_path_for_title(title);
++                        if let Some(parent) = cfg_path.parent() {
++                            let _ = fs::create_dir_all(parent);
++                        }
++                        match fs::write(&cfg_path, raw_toml.replace("\r\n", "\n")) {
++                            Ok(()) => {
++                                dirty.store(true, Ordering::Release);
++                                format!("Saved xcl.toml for {title}.")
++                            }
++                            Err(e) => format!("Write failed: {e}"),
++                        }
++                    }
++                    Err(e) => format!("Invalid TOML (not saved): {e}"),
++                }
++            };
++            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++        }
++        _ => {
++            send_response(&mut stream, "404 Not Found", "text/plain; charset=utf-8", b"Not Found", None);
++        }
++    }
++}
++
++fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
++    let mut buf = Vec::with_capacity(4096);
++    let mut chunk = [0u8; 2048];
++    let header_end;
++    loop {
++        let n = stream.read(&mut chunk).ok()?;
++        if n == 0 {
++            return None;
++        }
++        buf.extend_from_slice(&chunk[..n]);
++        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
++            header_end = pos + 4;
++            break;
++        }
++        if buf.len() > 16384 {
++            return None;
++        }
++    }
++    let header_text = String::from_utf8_lossy(&buf[..header_end]).into_owned();
++    let mut lines = header_text.lines();
++    let req_line = lines.next()?;
++    let mut parts = req_line.split_whitespace();
++    let method = parts.next()?.to_owned();
++    let target = parts.next()?.to_owned();
++    let mut content_length = 0usize;
++    for line in lines {
++        if let Some((k, v)) = line.split_once(':') {
++            if k.eq_ignore_ascii_case("Content-Length") {
++                content_length = v.trim().parse().unwrap_or(0).min(MAX_HTTP_BODY_BYTES);
++            }
++        }
++    }
++    while buf.len() < header_end + content_length {
++        let n = stream.read(&mut chunk).ok()?;
++        if n == 0 {
++            break;
++        }
++        buf.extend_from_slice(&chunk[..n]);
++        if buf.len() > header_end + MAX_HTTP_BODY_BYTES {
++            break;
++        }
++    }
++    let body_end = (header_end + content_length).min(buf.len());
++    let body = String::from_utf8_lossy(&buf[header_end..body_end]).into_owned();
++    Some((method, target, body))
++}
++
++fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
++    haystack.windows(needle.len()).position(|w| w == needle)
++}
++
++fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8], disposition: Option<&str>) {
++    let mut header = format!(
++        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
++        body.len()
++    );
++    if let Some(disp) = disposition {
++        header.push_str(&format!("Content-Disposition: {disp}\r\n"));
++    }
++    header.push_str("\r\n");
++    let _ = stream.write_all(header.as_bytes());
++    let _ = stream.write_all(body);
++    let _ = stream.flush();
++}
++
++fn send_redirect(stream: &mut TcpStream, location: &str) {
++    let resp = format!("HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
++    let _ = stream.write_all(resp.as_bytes());
++    let _ = stream.flush();
++}
++
++fn is_safe_title_id(title: &str) -> bool {
++    !title.is_empty()
++        && title.len() <= 80
++        && title.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
++        && !title.contains("..")
++}
++
++fn html_escape(s: &str) -> String {
++    let mut out = String::with_capacity(s.len());
++    for ch in s.chars() {
++        match ch {
++            '&' => out.push_str("&amp;"),
++            '<' => out.push_str("&lt;"),
++            '>' => out.push_str("&gt;"),
++            '"' => out.push_str("&quot;"),
++            '\'' => out.push_str("&#39;"),
++            _ => out.push(ch),
++        }
++    }
++    out
++}
++
++fn url_encode(s: &str) -> String {
++    let mut out = String::with_capacity(s.len());
++    for b in s.bytes() {
++        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
++            out.push(b as char);
++        } else if b == b' ' {
++            out.push('+');
++        } else {
++            out.push_str(&format!("%{:02X}", b));
++        }
++    }
++    out
++}
++
++pub fn url_decode(s: &str) -> String {
++    let bytes = s.as_bytes();
++    let mut out = Vec::with_capacity(bytes.len());
++    let mut i = 0;
++    while i < bytes.len() {
++        match bytes[i] {
++            b'+' => {
++                out.push(b' ');
++                i += 1;
++            }
++            b'%' if i + 2 < bytes.len() => {
++                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
++                    out.push((h << 4) | l);
++                    i += 3;
++                } else {
++                    out.push(b'%');
++                    i += 1;
++                }
++            }
++            b => {
++                out.push(b);
++                i += 1;
++            }
++        }
++    }
++    String::from_utf8_lossy(&out).into_owned()
++}
++
++fn hex_val(b: u8) -> Option<u8> {
++    match b {
++        b'0'..=b'9' => Some(b - b'0'),
++        b'a'..=b'f' => Some(b - b'a' + 10),
++        b'A'..=b'F' => Some(b - b'A' + 10),
++        _ => None,
++    }
++}
++
++fn parse_query(input: &str) -> Vec<(String, String)> {
++    let mut out = Vec::new();
++    for pair in input.split('&') {
++        if pair.is_empty() {
++            continue;
++        }
++        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
++        out.push((url_decode(k), url_decode(v)));
++    }
++    out
++}
++
++const CSS: &str = "body{font-family:system-ui,-apple-system,sans-serif;background:#0e171d;color:#eef7f8;max-width:860px;margin:0 auto;padding:20px;line-height:1.45}h1{margin:0 0 6px;color:#85e6bd}h2{margin:24px 0 8px;font-size:1.15rem;color:#85e6bd}.card{background:#1c2a31;border-radius:10px;padding:16px;margin:14px 0}.btn{display:inline-block;background:#85e6bd;color:#0e171d;font-weight:700;padding:10px 18px;border-radius:8px;text-decoration:none;border:0;cursor:pointer;font-size:1rem}textarea,input[type=text]{width:100%;box-sizing:border-box;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px;padding:10px;font-family:monospace;font-size:0.9rem}.muted{color:#b2c7cb;font-size:0.9rem}.notice{background:#274e48;border-left:4px solid #85e6bd;padding:10px 14px;border-radius:6px;margin:12px 0}";
++
++fn render_login_page(path: &str) -> String {
++    format!(
++        "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>TrinityXSX</title><style>{CSS}</style></head><body><h1>TrinityXSX</h1><p class=muted>Enter the 6-digit PIN shown on your TV.</p><div class=card><form method=GET action='{}'><input type=text name=pin placeholder='6-digit PIN' autofocus required><br><br><button class=btn type=submit>Connect</button></form></div></body></html>",
++        html_escape(if path == "/logs.zip" { "/logs.zip" } else { "/" })
++    )
++}
++
++fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
++    let paths = library::read_paths(paths_file).unwrap_or_default();
++    let catalog = library::scan_paths(&paths);
++    let mut html = format!(
++        "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>TrinityXSX Web Companion</title><style>{CSS}</style></head><body><h1>TrinityXSX {}</h1><p class=muted>PS5 Web Companion &amp; Log Collector</p>",
++        html_escape(library::TRINITYXSX_VERSION)
++    );
++    if !notice.is_empty() {
++        html.push_str(&format!("<div class=notice>{}</div>", html_escape(notice)));
++    }
++    html.push_str(&format!(
++        "<div class=card><h2>Diagnostic Logs (GitHub Bug Report)</h2><p class=muted>Downloads only logs and <code>xcl.toml</code> configs (never game files or saves).</p><a class=btn href='/logs.zip?pin={pin}'>Download trinityxsx-logs.zip</a></div>"
++    ));
++
++    // Game folders editor
++    let joined_paths = paths.join("\n");
++    html.push_str(&format!(
++        "<div class=card><h2>Game Folders (<code>game_paths.txt</code>)</h2><p class=muted>One folder per line (e.g. <code>/mnt/ext1/xboxseries</code> or <code>C:\\XCL\\games</code>).</p><form method=POST action='/paths?pin={pin}'><textarea name=paths rows=7>{}</textarea><br><br><button class=btn type=submit>Save folders</button></form></div>",
++        html_escape(&joined_paths)
++    ));
++
++    // Per-game xcl.toml editors
++    html.push_str("<h2>Per-Game Configuration (<code>xcl.toml</code>)</h2>");
++    if catalog.games.is_empty() {
++        html.push_str("<div class=card><p class=muted>No Xbox Series games detected yet.</p></div>");
++    } else {
++        for game in &catalog.games {
++            let (cfg, has_file) = library::load_game_config(game);
++            let toml_text = toml::to_string_pretty(&cfg).unwrap_or_default();
++            let (save_files, save_bytes) = library::saves_summary(game);
++            let state = if has_file { "Custom xcl.toml" } else { "Default / Preset (not saved yet)" };
++            html.push_str(&format!(
++                "<div class=card><strong>{}</strong> <span class=muted>({} · {} · {} · Saves: {} files, {:.1} MiB)</span><form method=POST action='/config?pin={pin}'><input type=hidden name=title value='{}'><br><textarea name=toml rows=12>{}</textarea><br><br><button class=btn type=submit>Save xcl.toml</button></form></div>",
++                html_escape(&game.name),
++                html_escape(&game.identity),
++                html_escape(&game.version),
++                state,
++                save_files,
++                (save_bytes as f64) / (1024.0 * 1024.0),
++                html_escape(&game.identity),
++                html_escape(&toml_text),
++            ));
++        }
++    }
++    html.push_str("</body></html>");
++    html
++}
++
++// ---------------------------------------------------------------------------
++// Minimal pure-Rust ZIP builder (DEFLATE via miniz_oxide + IEEE CRC-32)
++// ---------------------------------------------------------------------------
++
++fn crc32(data: &[u8]) -> u32 {
++    let mut crc = 0xFFFF_FFFFu32;
++    for &b in data {
++        crc ^= b as u32;
++        for _ in 0..8 {
++            crc = if (crc & 1) != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
++        }
++    }
++    !crc
++}
++
++pub fn build_zip(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
++    let mut out = Vec::new();
++    let mut central = Vec::new();
++
++    for (name, data) in entries {
++        let name_bytes = name.as_bytes();
++        let offset = out.len() as u32;
++        let crc = crc32(data);
++        let compressed = miniz_oxide::deflate::compress_to_vec(data, 6);
++        let (method, payload): (u16, &[u8]) = if compressed.len() < data.len() {
++            (8, &compressed)
++        } else {
++            (0, data)
++        };
++        let comp_len = payload.len() as u32;
++        let uncomp_len = data.len() as u32;
++
++        // Local file header
++        out.extend_from_slice(&0x0403_4B50u32.to_le_bytes());
++        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
++        out.extend_from_slice(&0u16.to_le_bytes());  // flags
++        out.extend_from_slice(&method.to_le_bytes());
++        out.extend_from_slice(&0u16.to_le_bytes());  // mod time
++        out.extend_from_slice(&0u16.to_le_bytes());  // mod date
++        out.extend_from_slice(&crc.to_le_bytes());
++        out.extend_from_slice(&comp_len.to_le_bytes());
++        out.extend_from_slice(&uncomp_len.to_le_bytes());
++        out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
++        out.extend_from_slice(&0u16.to_le_bytes());  // extra len
++        out.extend_from_slice(name_bytes);
++        out.extend_from_slice(payload);
++
++        // Central directory header
++        central.extend_from_slice(&0x0201_4B50u32.to_le_bytes());
++        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
++        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
++        central.extend_from_slice(&0u16.to_le_bytes());
++        central.extend_from_slice(&method.to_le_bytes());
++        central.extend_from_slice(&0u16.to_le_bytes());
++        central.extend_from_slice(&0u16.to_le_bytes());
++        central.extend_from_slice(&crc.to_le_bytes());
++        central.extend_from_slice(&comp_len.to_le_bytes());
++        central.extend_from_slice(&uncomp_len.to_le_bytes());
++        central.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
++        central.extend_from_slice(&0u16.to_le_bytes()); // extra
++        central.extend_from_slice(&0u16.to_le_bytes()); // comment
++        central.extend_from_slice(&0u16.to_le_bytes()); // disk
++        central.extend_from_slice(&0u16.to_le_bytes()); // internal attr
++        central.extend_from_slice(&0u32.to_le_bytes()); // external attr
++        central.extend_from_slice(&offset.to_le_bytes());
++        central.extend_from_slice(name_bytes);
++    }
++
++    let cd_offset = out.len() as u32;
++    let cd_size = central.len() as u32;
++    out.extend_from_slice(&central);
++
++    // End of central directory
++    out.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
++    out.extend_from_slice(&0u16.to_le_bytes());
++    out.extend_from_slice(&0u16.to_le_bytes());
++    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
++    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
++    out.extend_from_slice(&cd_size.to_le_bytes());
++    out.extend_from_slice(&cd_offset.to_le_bytes());
++    out.extend_from_slice(&0u16.to_le_bytes());
++    out
++}
++
++fn read_capped(path: &Path) -> Option<Vec<u8>> {
++    let data = fs::read(path).ok()?;
++    if data.len() <= MAX_LOG_FILE_BYTES {
++        return Some(data);
++    }
++    let mut trimmed = Vec::with_capacity(MAX_LOG_FILE_BYTES + 64);
++    trimmed.extend_from_slice(&data[..1024 * 1024]);
++    trimmed.extend_from_slice(b"\n... [TRUNCATED BY TRINITYXSX WEB COMPANION] ...\n");
++    trimmed.extend_from_slice(&data[data.len() - (MAX_LOG_FILE_BYTES - 1024 * 1024)..]);
++    Some(trimmed)
++}
++
++pub fn build_logs_zip(paths_file: &Path) -> Vec<u8> {
++    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
++    let mut add = |arc: String, path: &Path| {
++        if let Some(bytes) = read_capped(path) {
++            files.push((arc, bytes));
++        }
++    };
++
++    add("game_paths.txt".into(), paths_file);
++    let ps5_root = Path::new("Z:\\data\\homebrew\\PPSA83601");
++    if ps5_root.is_dir() {
++        add("startup.log".into(), &ps5_root.join("startup.log"));
++        add("wineserver-startup.log".into(), &ps5_root.join("wineserver-startup.log"));
++        add("TRINITYXSX-BUILD.json".into(), &ps5_root.join("TRINITYXSX-BUILD.json"));
++        add("logs/next.txt".into(), &ps5_root.join("logs/next.txt"));
++        if let Ok(rd) = fs::read_dir(ps5_root.join("logs")) {
++            let mut logs: Vec<PathBuf> = rd
++                .flatten()
++                .map(|e| e.path())
++                .filter(|p| {
++                    p.is_file()
++                        && p.file_name()
++                            .and_then(|n| n.to_str())
++                            .is_some_and(|n| n.starts_with("session-") && n.ends_with(".log"))
++                })
++                .collect();
++            logs.sort();
++            for p in logs {
++                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
++                    add(format!("logs/{name}"), &p);
++                }
++            }
++        }
++    }
++    add("vkd3d-trinityxsx-library.log".into(), Path::new("C:\\XCL\\vkd3d-trinityxsx-library.log"));
++
++    let xcl_root = crate::launcher::data_root();
++    if let Ok(rd) = fs::read_dir(&xcl_root) {
++        let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
++        dirs.sort();
++        for dir in dirs {
++            let Some(title) = dir.file_name().and_then(|n| n.to_str()) else { continue };
++            if title.eq_ignore_ascii_case("dxil") {
++                continue;
++            }
++            add(format!("titles/{title}/xcl.toml"), &dir.join("xcl.toml"));
++            add(format!("titles/{title}/logs/xcl.log"), &dir.join("logs/xcl.log"));
++            add(format!("titles/{title}/logs/report.json"), &dir.join("logs/report.json"));
++        }
++    }
++
++    if files.is_empty() {
++        files.push(("README.txt".into(), b"No TrinityXSX diagnostic logs found yet.\n".to_vec()));
++    }
++    build_zip(&files)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn builds_valid_zip_header_and_crc() {
++        let zip = build_zip(&[("hello.txt".into(), b"TrinityXSX logs test 1234567890".to_vec())]);
++        assert_eq!(&zip[0..4], b"PK\x03\x04");
++        assert!(zip.windows(4).any(|w| w == b"PK\x01\x02"));
++        assert!(zip.windows(4).any(|w| w == b"PK\x05\x06"));
++    }
++
++    #[test]
++    fn url_roundtrip_and_title_safety() {
++        let s = "Saved 2 folder(s): /mnt/ext1/xboxseries";
++        assert_eq!(url_decode(&url_encode(s)), s);
++        assert!(is_safe_title_id("Microsoft.MinecraftBeta"));
++        assert!(!is_safe_title_id("../escape"));
++        assert!(!is_safe_title_id("a/b"));
++    }
++}
+-- 
+2.48.1.windows.1
+

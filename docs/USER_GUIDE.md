@@ -79,6 +79,8 @@ You can add any folder on your PS5 right from the controller:
 | **D-pad / Left Stick** | Select game | Select folder | Select subfolder |
 | **Cross (X)** | Play selected game | Browse selected folder | Open subfolder |
 | **Square (□)** | Manage game folders | Add new folder | Cancel |
+| **R1 / OPTIONS** | Edit game `xcl.toml` settings | — | — |
+| **L1** | Open Phone/PC Web Companion & QR | — | — |
 | **Triangle (Δ)** | Rescan all folders | Remove folder from list | Use current folder |
 | **Circle (O)** | Exit to PS5 Home | Back to library | Go up one level |
 
