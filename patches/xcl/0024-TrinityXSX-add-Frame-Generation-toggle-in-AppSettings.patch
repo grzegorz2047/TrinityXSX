@@ -1,0 +1,390 @@
+From 5ebfebb7336872f42fb274b4696dc5b4af1ce6ca Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 23:24:46 +0100
+Subject: [PATCH] TrinityXSX: add Frame Generation (MihawkGen) toggle in
+ AppSettings
+
+- Read and update [display] framegen = off|2|3|4 in trinityxsx-library.profile
+- Expose Off / 2x / 3x / 4x toggle in the OPTIONS (Profile & Language) menu
+- Indicate [restart] when saved factor differs from active PW_FRAMEGEN
+---
+ crates/xcl/src/library.rs      | 162 +++++++++++++++++++++++++++++++++
+ crates/xcl/src/library_i18n.rs |   6 ++
+ crates/xcl/src/library_menu.rs |  97 +++++++++++++++++---
+ 3 files changed, 251 insertions(+), 14 deletions(-)
+
+diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
+index 08255e1..3babaa7 100644
+--- a/crates/xcl/src/library.rs
++++ b/crates/xcl/src/library.rs
+@@ -979,6 +979,143 @@ pub fn ui_settings_file() -> PathBuf {
+     launcher::data_root().join("ui_settings.toml")
+ }
+ 
++/// Path to the prospero-win runtime profile (`trinityxsx-library.profile`) that controls
++/// display options such as MihawkGen `framegen = off | 2 | 3 | 4`.
++pub fn runtime_profile_file() -> PathBuf {
++    let ps5_root = Path::new(PS5_STORAGE_ROOT);
++    if ps5_root.is_dir() {
++        return ps5_root.join("profiles").join("trinityxsx-library.profile");
++    }
++    launcher::data_root().join("trinityxsx-library.profile")
++}
++
++/// Read `[display] framegen` from a prospero-win `.profile` file (`0` = off, `2..=4` = factor).
++pub fn read_framegen_setting(profile_path: &Path) -> u8 {
++    let Ok(text) = fs::read_to_string(profile_path) else {
++        return 0;
++    };
++    let mut in_display = false;
++    for raw in text.lines() {
++        let line = raw.trim();
++        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
++            continue;
++        }
++        if line.starts_with('[') && line.ends_with(']') {
++            in_display = line[1..line.len() - 1].trim().eq_ignore_ascii_case("display");
++            continue;
++        }
++        if in_display {
++            if let Some((k, v)) = line.split_once('=') {
++                if k.trim().eq_ignore_ascii_case("framegen") {
++                    return match v.trim().to_ascii_lowercase().as_str() {
++                        "2" => 2,
++                        "3" => 3,
++                        "4" => 4,
++                        _ => 0,
++                    };
++                }
++            }
++        }
++    }
++    0
++}
++
++/// Update `[display] framegen = off | 2 | 3 | 4` inside a prospero-win `.profile` file,
++/// preserving all other sections, keys, and comments.
++pub fn save_framegen_setting(profile_path: &Path, factor: u8) -> io::Result<()> {
++    let value = match factor {
++        2 => "2",
++        3 => "3",
++        4 => "4",
++        _ => "off",
++    };
++    let new_line = format!("framegen = {value}");
++    let existing = fs::read_to_string(profile_path).unwrap_or_default();
++    let eol = if existing.contains("\r\n") { "\r\n" } else { "\n" };
++
++    let mut out: Vec<String> = Vec::new();
++    let mut in_display = false;
++    let mut saw_display = false;
++    let mut replaced = false;
++    let mut display_insert_at: Option<usize> = None;
++
++    for raw in existing.lines() {
++        let trimmed = raw.trim();
++        if trimmed.starts_with('[') && trimmed.ends_with(']') {
++            if in_display && !replaced {
++                let pos = display_insert_at.unwrap_or(out.len());
++                out.insert(pos, new_line.clone());
++                replaced = true;
++            }
++            in_display = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("display");
++            if in_display {
++                saw_display = true;
++                display_insert_at = Some(out.len() + 1);
++            }
++            out.push(raw.to_owned());
++            continue;
++        }
++        if in_display {
++            if let Some((k, _)) = trimmed.split_once('=') {
++                if k.trim().eq_ignore_ascii_case("framegen") {
++                    if !replaced {
++                        out.push(new_line.clone());
++                        replaced = true;
++                    }
++                    continue;
++                }
++            }
++            out.push(raw.to_owned());
++            if !trimmed.is_empty() && !trimmed.starts_with(';') && !trimmed.starts_with('#') {
++                display_insert_at = Some(out.len());
++            }
++            continue;
++        }
++        out.push(raw.to_owned());
++    }
++
++    if !replaced {
++        if saw_display {
++            let pos = display_insert_at.unwrap_or(out.len());
++            out.insert(pos, new_line);
++        } else {
++            if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
++                out.push(String::new());
++            }
++            out.push("[display]".into());
++            out.push(new_line);
++        }
++    }
++
++    let mut body = out.join(eol);
++    body.push_str(eol);
++
++    if let Some(parent) = profile_path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    let tmp = PathBuf::from(format!("{}.tmp", profile_path.display()));
++    {
++        let mut f = File::create(&tmp)?;
++        f.write_all(body.as_bytes())?;
++        f.sync_all()?;
++    }
++    if let Err(err) = fs::rename(&tmp, profile_path) {
++        if profile_path.exists() {
++            fs::remove_file(profile_path)?;
++            if let Err(retry) = fs::rename(&tmp, profile_path) {
++                let _ = fs::remove_file(&tmp);
++                return Err(retry);
++            }
++        } else {
++            let _ = fs::remove_file(&tmp);
++            return Err(err);
++        }
++    }
++    Ok(())
++}
++
+ pub fn load_ui_settings(file: &Path) -> UiSettings {
+     let Ok(text) = fs::read_to_string(file) else {
+         return UiSettings::default();
+@@ -1189,4 +1326,29 @@ mod tests {
+ 
+         let _ = fs::remove_dir_all(&dir);
+     }
++
++    #[test]
++    fn reads_and_updates_framegen_in_runtime_profile() {
++        let dir = temp_dir("framegen");
++        let profile = dir.join("trinityxsx-library.profile");
++        let initial = "; comment\n[application]\nid = trinityxsx-library\n\n[display]\ndesktop = 1920x1080\n\n[input]\nmode = xinput\n";
++        fs::write(&profile, initial).unwrap();
++        assert_eq!(read_framegen_setting(&profile), 0);
++
++        save_framegen_setting(&profile, 2).unwrap();
++        assert_eq!(read_framegen_setting(&profile), 2);
++        let text = fs::read_to_string(&profile).unwrap();
++        assert!(text.contains("desktop = 1920x1080\nframegen = 2\n"));
++        assert!(text.contains("[input]\nmode = xinput\n"));
++
++        save_framegen_setting(&profile, 4).unwrap();
++        assert_eq!(read_framegen_setting(&profile), 4);
++        assert_eq!(fs::read_to_string(&profile).unwrap().matches("framegen =").count(), 1);
++
++        save_framegen_setting(&profile, 0).unwrap();
++        assert_eq!(read_framegen_setting(&profile), 0);
++        assert!(fs::read_to_string(&profile).unwrap().contains("framegen = off\n"));
++
++        let _ = fs::remove_dir_all(&dir);
++    }
+ }
+diff --git a/crates/xcl/src/library_i18n.rs b/crates/xcl/src/library_i18n.rs
+index 80ee64b..5a479fb 100644
+--- a/crates/xcl/src/library_i18n.rs
++++ b/crates/xcl/src/library_i18n.rs
+@@ -134,6 +134,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
+         }
+         (Lang::Pl, "Interface language") => "Język interfejsu",
+         (Lang::Pl, "Active offline profile") => "Aktywny profil offline",
++        (Lang::Pl, "Frame Generation (MihawkGen)") => "Generowanie klatek (MihawkGen)",
++        (Lang::Pl, "Off") => "Wyłączone",
++        (Lang::Pl, "MihawkGen neural interpolation (Vulkan / DXVK / D3D12). Restart TrinityXSX to apply.") => {
++            "Interpolacja klatek MihawkGen (Vulkan / DXVK / D3D12). Zrestartuj TrinityXSX po zmianie."
++        }
++        (Lang::Pl, "Restart TrinityXSX to apply") => "Zrestartuj TrinityXSX, aby zastosować",
+         (Lang::Pl, "Custom gamertags can also be added from the Phone/PC Web Companion (L1).") => {
+             "Własne nazwy profili (gamertagi) możesz też dodać w panelu WWW na telefonie (L1)."
+         }
+diff --git a/crates/xcl/src/library_menu.rs b/crates/xcl/src/library_menu.rs
+index fe435b6..4126666 100644
+--- a/crates/xcl/src/library_menu.rs
++++ b/crates/xcl/src/library_menu.rs
+@@ -63,7 +63,10 @@ enum Screen {
+ struct Menu {
+     paths_file: PathBuf,
+     ui_file: PathBuf,
++    profile_file: PathBuf,
+     ui: UiSettings,
++    framegen: u8,
++    active_framegen: u8,
+     app_row: usize,
+     paths: Vec<String>,
+     catalog: Catalog,
+@@ -111,6 +114,7 @@ impl Menu {
+         let before = self.catalog.games.get(self.selected).map(|game| game.executable.clone());
+         self.paths = library::read_paths(&self.paths_file).unwrap_or_else(|| self.paths.clone());
+         self.ui = library::load_ui_settings(&self.ui_file);
++        self.framegen = library::read_framegen_setting(&self.profile_file);
+         self.catalog = library::scan_paths(&self.paths);
+         self.folder_sig = library::folders_signature(&self.paths);
+         self.selected = before
+@@ -391,18 +395,28 @@ impl Menu {
+             return false;
+         }
+         if buttons & UP != 0 {
+-            self.app_row = wrap_up(self.app_row, 2);
++            self.app_row = wrap_up(self.app_row, 3);
+         }
+         if buttons & DOWN != 0 {
+-            self.app_row = wrap_down(self.app_row, 2);
++            self.app_row = wrap_down(self.app_row, 3);
+         }
+         if buttons & (CROSS | RIGHT | LEFT) != 0 {
+             let forward = (buttons & LEFT) == 0;
+             match self.app_row {
+                 0 => {
+                     self.ui.language = if forward { self.ui.language.next() } else { self.ui.language.prev() };
++                    match library::save_ui_settings(&self.ui_file, &self.ui) {
++                        Ok(()) => {
++                            self.status = format!(
++                                "{}  ·  {}",
++                                self.ui.language.display_name(),
++                                self.ui.current_profile().name
++                            );
++                        }
++                        Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
++                    }
+                 }
+-                _ => {
++                1 => {
+                     let len = self.ui.profiles.len();
+                     if len > 0 {
+                         self.ui.active_profile = if forward {
+@@ -411,17 +425,42 @@ impl Menu {
+                             (self.ui.active_profile + len - 1) % len
+                         };
+                     }
++                    match library::save_ui_settings(&self.ui_file, &self.ui) {
++                        Ok(()) => {
++                            self.status = format!(
++                                "{}  ·  {}",
++                                self.ui.language.display_name(),
++                                self.ui.current_profile().name
++                            );
++                        }
++                        Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
++                    }
+                 }
+-            }
+-            match library::save_ui_settings(&self.ui_file, &self.ui) {
+-                Ok(()) => {
+-                    self.status = format!(
+-                        "{}  ·  {}",
+-                        self.ui.language.display_name(),
+-                        self.ui.current_profile().name
+-                    );
++                _ => {
++                    const OPTS: [u8; 4] = [0, 2, 3, 4];
++                    let cur = OPTS.iter().position(|&v| v == self.framegen).unwrap_or(0);
++                    let next = if forward { (cur + 1) % OPTS.len() } else { (cur + OPTS.len() - 1) % OPTS.len() };
++                    self.framegen = OPTS[next];
++                    match library::save_framegen_setting(&self.profile_file, self.framegen) {
++                        Ok(()) => {
++                            let label = match self.framegen {
++                                2 => "2x (30 -> 60 FPS)",
++                                3 => "3x (20 -> 60 FPS)",
++                                4 => "4x (15 -> 60 FPS)",
++                                _ => tr(self.ui.language, "Off"),
++                            };
++                            self.status = if self.framegen != self.active_framegen {
++                                format!(
++                                    "Frame Generation: {label}  ·  {}",
++                                    tr(self.ui.language, "Restart TrinityXSX to apply")
++                                )
++                            } else {
++                                format!("Frame Generation: {label}")
++                            };
++                        }
++                        Err(e) => self.status = format!("Cannot save profile: {e}"),
++                    }
+                 }
+-                Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
+             }
+         }
+         false
+@@ -968,9 +1007,21 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+             );
+ 
+             let profile = menu.ui.current_profile();
++            let fg_base = match menu.framegen {
++                2 => "2x (30 -> 60 FPS)".to_owned(),
++                3 => "3x (20 -> 60 FPS)".to_owned(),
++                4 => "4x (15 -> 60 FPS)".to_owned(),
++                _ => t("Off").to_owned(),
++            };
++            let fg_val = if menu.framegen != menu.active_framegen {
++                format!("{fg_base}  [restart]")
++            } else {
++                fg_base
++            };
+             let rows = [
+                 (t("Interface language"), menu.ui.language.display_name().to_owned()),
+                 (t("Active offline profile"), format!("{}  (XUID {})", profile.name, profile.user_id)),
++                (t("Frame Generation (MihawkGen)"), fg_val),
+             ];
+             for (idx, (label, val)) in rows.iter().enumerate() {
+                 let top = 230 + (idx as i32) * 108;
+@@ -991,11 +1042,19 @@ unsafe fn paint(window: HWND, menu: &Menu) {
+                 );
+             }
+ 
++            text(
++                dc,
++                t("MihawkGen neural interpolation (Vulkan / DXVK / D3D12). Restart TrinityXSX to apply."),
++                region(left, 574, right, 42),
++                scale(23),
++                400,
++                snow,
++            );
+             text(
+                 dc,
+                 t("Custom gamertags can also be added from the Phone/PC Web Companion (L1)."),
+-                region(left, 480, right, 44),
+-                scale(24),
++                region(left, 622, right, 42),
++                scale(23),
+                 400,
+                 muted,
+             );
+@@ -1274,7 +1333,14 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+     };
+     let paths_file = library::paths_file();
+     let ui_file = library::ui_settings_file();
++    let profile_file = library::runtime_profile_file();
+     let ui = library::load_ui_settings(&ui_file);
++    let framegen = library::read_framegen_setting(&profile_file);
++    let active_framegen = std::env::var("PW_FRAMEGEN")
++        .ok()
++        .and_then(|v| v.trim().parse::<u8>().ok())
++        .filter(|&n| (2..=4).contains(&n))
++        .unwrap_or(0);
+     let paths = library::load_or_init_paths(&paths_file, primary_root.as_deref());
+     let web = WebCompanion::start(paths_file.clone());
+     let qr = web.as_ref().and_then(|w| library_art::encode_qr(&w.qr_url));
+@@ -1285,7 +1351,10 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+     let mut menu = Menu {
+         paths_file,
+         ui_file,
++        profile_file,
+         ui,
++        framegen,
++        active_framegen,
+         app_row: 0,
+         paths,
+         catalog: Catalog::default(),
+-- 
+2.48.1.windows.1
+
