@@ -17,7 +17,7 @@
 
 ## What TrinityXSX can do
 
-- **Standalone PS5 home-screen app (`PPSA83601.ffpkg`)** — MIT-licensed native launcher (`eboot.bin`) + bundled MIT one-shot elevation helper (`lapy.elf`) + self-seeding Wine prefix.
+- **Standalone PS5 home-screen app (`PPSA83601.zip` for ProsperoStore / `/data/homebrew/PPSA83601`, plus optional `PPSA83601.ffpkg`)** — MIT-licensed native launcher (`eboot.bin`) + bundled MIT one-shot elevation helper (`lapy.elf`) + self-seeding Wine prefix.
 - **Multi-folder game library & DualSense folder browser** — scans `C:\XCL\games`, `/data/xboxseries`, `/mnt/ext0..1/xboxseries`, `/mnt/usb0..1/xboxseries`, and any custom folder you add from the controller (`game_paths.txt`), with automatic background detection of newly copied games.
 - **Local cover art & game preview** — decodes PNG artwork straight from each game's `MicrosoftGame.config` (no internet needed), showing `TitleId`, version, config status, and save folder size.
 - **In-app per-game `xcl.toml` editor & compatibility presets (`R1`)** — apply built-in `TitleId` / tuning presets (Recommended, Low-RAM 4 GB, DXC Shaders, Series X, Debug Trace) or tune RAM/UMA budgets, Direct DXIL, raytracing, and offline mode straight from the DualSense.
@@ -31,7 +31,7 @@
 | Requirement | Details |
 | --- | --- |
 | **PS5 Firmware** | Any **jailbroken PS5 firmware** capable of running homebrew + `elfldr` + **ShadowMountPlus** + **kstuff** (commonly FW **4.xx – 10.xx** depending on active jailbreak/etaHEN support; developed and verified on a jailbroken PS5 with `etaHEN`, `kstuff`, `elfldr` on port `9021`, and `ShadowMountPlus`). Other firmware/loader combinations may work but are unverified — please report results in [Game Compatibility](docs/COMPATIBILITY.md). |
-| **Standalone `.ffpkg` runtime** | **Self-contained** — does **not** require `prospero-win` to be installed separately. Mount `/mnt/ext1/PPSA83601.ffpkg` with ShadowMountPlus. |
+| **Standalone install** | **Self-contained** — does **not** require `prospero-win` to be installed separately. Install `PPSA83601.zip` via **ProsperoStore** (or extract `PPSA83601/` to `/data/homebrew/PPSA83601`), or mount `/mnt/ext1/PPSA83601.ffpkg` with ShadowMountPlus. |
 | **Game storage** | Internal `/data/xboxseries`, extended `/mnt/ext1/xboxseries`, or USB `/mnt/usb0..1/xboxseries` (unpacked Scarlett game folder with `MicrosoftGame.config`). |
 | **PC tools (optional)** | Any FTP client (FileZilla / WinSCP) or Python 3.12+ for `tools/ftp_put_tree.py` and `tools/collect_ps5_logs.py`. |
 
@@ -56,7 +56,7 @@ Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_
 | Path | What |
 |---|---|
 | `pins.env` | Pinned upstream revisions, release tags, and verified SHA-256 checksums |
-| `patches/xcl/` | XCL patches (`0001`..`0021`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor & presets, Web Companion QR + save backup/restore, stall watchdog, profiles & i18n, Touchpad Quick Menu telemetry & `PresentX` pause |
+| `patches/xcl/` | XCL patches (`0001`..`0024`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor & presets, Web Companion QR + save backup/restore, stall watchdog, profiles & i18n, Touchpad Quick Menu telemetry & `PresentX`/`vkQueuePresentKHR` pause, PC DXBC 3D replay, Win64 Vulkan support, and MihawkGen Frame Generation toggle |
 | `patches/vkd3d-proton/` | vkd3d-proton patches: extended D3D12 vtables (`VKD3D_VTBL_IS`), predicated buffer copies, mesh shaders without barycentrics |
 | `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0007`) |
 | `standalone/` | MIT-licensed native PS5 launcher (`eboot.bin`), catalog/staging/UFS2 `.ffpkg` image builder, unit tests |

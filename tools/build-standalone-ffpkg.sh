@@ -11,6 +11,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 xcl_runtime=""
 library_exe=""
 output=""
+zip_output=""
 content_version="01.000.016"
 work="$root/.work/standalone-ffpkg"
 wine_cache="$root/.work/wine-cache"
@@ -22,6 +23,7 @@ while [ $# -gt 0 ]; do
     --xcl-runtime) xcl_runtime=$2; shift 2 ;;
     --library-exe) library_exe=$2; shift 2 ;;
     --output) output=$2; shift 2 ;;
+    --zip-output) zip_output=$2; shift 2 ;;
     --content-version) content_version=$2; shift 2 ;;
     --work) work=$2; shift 2 ;;
     --wine-cache) wine_cache=$2; shift 2 ;;
@@ -255,13 +257,20 @@ PYTHONPATH="$root" python3 -m standalone.stage "$data_seed" \
   --xcl-runtime "$runtime_stage" \
   --prefix-seed "$cached_prefix"
 
-# 12. Assemble and fsck_ufs-verify PPSA83601.ffpkg
+# 12. Assemble and fsck_ufs-verify PPSA83601.ffpkg (and optional ProsperoStore PPSA83601.zip)
 rm -f "$output"
 mkdir -p "$(dirname "$output")"
+zip_args=()
+if [ -n "$zip_output" ]; then
+  rm -f "$zip_output"
+  mkdir -p "$(dirname "$zip_output")"
+  zip_args=(--zip-output "$zip_output")
+fi
 echo "==> Building UFS2 image ($content_version) -> $output"
 PYTHONPATH="$root" python3 -m standalone.image \
   "$runner_dir" "$output" \
   --launcher "$launcher_bin" \
   --data-seed "$data_seed" \
   --content-version "$content_version" \
-  --ufs2tool "$ufs2_dll"
+  --ufs2tool "$ufs2_dll" \
+  "${zip_args[@]}"

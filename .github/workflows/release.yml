@@ -224,7 +224,8 @@ jobs:
             --library-exe xcl/target/release/xcl.exe \
             --content-version "$CONTENT_VERSION" \
             --wine-cache .work/wine-cache \
-            --output dist/ffpkg/PPSA83601.ffpkg
+            --output dist/ffpkg/PPSA83601.ffpkg \
+            --zip-output dist/ffpkg/PPSA83601.zip
           (cd dist/ffpkg && zip -6 "PPSA83601-${TAG}.ffpkg.zip" PPSA83601.ffpkg)
           rm -f dist/ffpkg/PPSA83601.ffpkg
           ls -lh dist/ffpkg/
@@ -232,7 +233,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: standalone-ffpkg
-          path: dist/ffpkg/PPSA83601-*.ffpkg.zip
+          path: |
+            dist/ffpkg/PPSA83601.zip
+            dist/ffpkg/PPSA83601-*.ffpkg.zip
           if-no-files-found: error
 
   publish:
@@ -279,7 +282,7 @@ jobs:
           (cd dist/prospero-win && zip -qr "../../release-assets/TrinityXSX-prospero-win-${TAG}.zip" .)
           (
             cd release-assets
-            sha256sum "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
+            sha256sum "PPSA83601.zip" "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
           )
           cat "release-assets/SHA256SUMS-${TAG}.txt"
 
@@ -290,21 +293,24 @@ jobs:
           XCL_LAST=$(ls patches/xcl/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
           PW_LAST=$(ls patches/prospero-win/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
           cat > release-notes.md <<EOF
-          ## TrinityXSX ${RELEASE_TAG}
+          ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          Experimental Xbox Series X|S (GDK / Scarlett) compatibility runtime and standalone PS5 home-screen library (\`PPSA83601\`).
+          - **ProsperoStore app-folder package (`PPSA83601.zip`):** Extract directly to `/data/homebrew/PPSA83601` (or install via ProsperoStore / ShadowMountPlus).
+          - **Frame Generation toggle (MihawkGen):** Switch `Off / 2x / 3x / 4x` in the `OPTIONS` menu for Vulkan, DXVK and D3D12 titles.
+          - **Win64 Vulkan titles & Touchpad HUD:** Launch standalone Win64 Vulkan games alongside Xbox Series GDK titles, with Touchpad Quick Menu pause and live FPS telemetry.
+          - **D3D12.X PC DXBC 3D replay:** Full root CBV/SRV descriptor table replay for PC-compiled DXBC shaders on PS5 RADV.
 
           ### Included CI-built assets
-          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — complete standalone PS5 home-screen app (\`fsck_ufs\` verified). Extract \`PPSA83601.ffpkg\` to \`/mnt/ext1/PPSA83601.ffpkg\` and mount with ShadowMountPlus.
-          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary. Copy to \`/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe\` for fast runtime-only updates.
-          - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle with all third-party licenses.
+          - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
+          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — standalone UFS2 image (`fsck_ufs` verified) for `/mnt/ext1/PPSA83601.ffpkg`.
+          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary for `/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe`.
+          - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle.
           - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for all release assets.
 
           ### Pinned upstream revisions
           - **XCL:** \`${XCL_REV}\` (+ patches \`0001\`..\`${XCL_LAST}\`)
           - **vkd3d-proton:** \`${VKD3D_REV}\` (dxil-spirv \`${DXIL_SPIRV_REV}\`)
-          - **DXVK:** \`v${DXVK_VERSION}\`
-          - **DXC:** \`${DXC_TAG}\`
+          - **DXVK:** \`v${DXVK_VERSION}\` · **DXC:** \`${DXC_TAG}\`
           - **prospero-win:** \`${PROSPERO_WIN_TAG}\` (\`${PROSPERO_WIN_REV}\` + patches \`0001\`..\`${PW_LAST}\`)
           - **PS5-Lapy-JB-Daemon:** \`${LAPY_REV}\`
 

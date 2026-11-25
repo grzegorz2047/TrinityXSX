@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import zipfile
 
 from .catalog import ManifestError, read_game, scan
+from .image import write_app_zip
 from .native.build_prefix_seed import CONSOLE_CPU, CPU_KEY, PC_CPU, rewrite_system_reg, sanitize_symlinks
 from .stage import RUNNER_EXECUTABLE, RUNTIME_FILES, profile_text, stage
 
@@ -127,6 +129,27 @@ class StandaloneTests(unittest.TestCase):
         self.assertIn(b"[Software\\\\Microsoft\\\\Other]\n" + PC_CPU, rewritten)
         self.assertIn(b"[Software\\\\Trailing]\n@=\"keep\"", rewritten)
         sanitize_symlinks(self.root / "games")
+
+    def test_write_app_zip_preserves_top_level_title_id_and_exec_bits(self):
+        app = self.root / "staged"
+        (app / "sce_sys").mkdir(parents=True)
+        (app / "runtime").mkdir()
+        (app / "eboot.bin").write_bytes(b"\x7fELF")
+        (app / RUNNER_EXECUTABLE).write_bytes(b"\x7fELF")
+        (app / "sce_sys/param.json").write_text('{"titleId":"PPSA83601"}', encoding="utf-8")
+        (app / "sce_sys/icon0.png").write_bytes(b"\x89PNG")
+        out_zip = self.root / "out/PPSA83601.zip"
+        digest = write_app_zip(app, out_zip)
+        self.assertEqual(len(digest), 64)
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = set(zf.namelist())
+            self.assertIn("PPSA83601/eboot.bin", names)
+            self.assertIn("PPSA83601/sce_sys/param.json", names)
+            self.assertIn("PPSA83601/sce_sys/icon0.png", names)
+            eboot_mode = (zf.getinfo("PPSA83601/eboot.bin").external_attr >> 16) & 0o777
+            param_mode = (zf.getinfo("PPSA83601/sce_sys/param.json").external_attr >> 16) & 0o777
+            self.assertEqual(eboot_mode, 0o755)
+            self.assertEqual(param_mode, 0o644)
 
 
 if __name__ == "__main__":
