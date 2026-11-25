@@ -1,0 +1,86 @@
+# TrinityXSX / XCL – example per-game configuration for PS5
+#
+# TrinityXSX creates an initial xcl.toml automatically the first time you launch a game.
+# You only need to edit it if a game crashes, runs out of memory, loops on Xbox Live login,
+# or needs specific graphics/shader workarounds.
+#
+# Location on PS5 (standalone PPSA83601):
+#   /data/homebrew/PPSA83601/prefix/drive_c/users/prospero/AppData/Local/XCL/<IdentityName>/xcl.toml
+#
+# Reference of all supported fields: xcl/crates/xcl/src/config.rs
+
+# Console model reported to the game:
+#   "lockhart" (console_type_raw = 5) = Xbox Series S (recommended on PS5: safer RAM & LOD budget)
+#   "anaconda" (console_type_raw = 6) = Xbox Series X (try only if a game requires Series X)
+device_type = "lockhart"
+console_type_raw = 5
+
+# Local offline profile (never connects to Xbox Live)
+gamertag = "PS5Player"
+user_id = 2533274790395905
+sandbox_id = "RETAIL"
+
+# Memory budgets (MiB). PS5 Wine has ~12 GiB direct memory shared with Wine + RADV.
+# Start with 6144; lower to 4096 if the console hits out-of-memory errors.
+title_memory_mb = 6144
+title_memory = "standard"
+
+# Persistent Local Storage (save quota reported to the game; does not preallocate disk space)
+pls_mb = 2048
+
+# Unified GPU-visible memory window (MiB) and coherent CPU/GPU mapping window (MiB).
+# Increase coherent_mb to 1024 or 1536 if xcl.log reports coherent window exhaustion.
+uma_mb = 2048
+coherent_mb = 1024
+
+# Logging ("info" for normal play, "debug" when collecting logs for a bug report)
+log_level = "info"
+log_to_stderr = true
+
+# Graphics backend (fixed to D3D12 -> vkd3d-proton -> RADV Vulkan on PS5)
+graphics = "d3d12"
+d3d12_adapter = "auto"
+d3d12_debug = false
+present = "auto"
+
+# Keep raytracing "off" for initial bring-up; try "tier1_1" only after the game runs stably
+raytracing = "off"
+
+# Must match the PS5 Wine desktop resolution (1920x1080)
+window_width = 1920
+window_height = 1080
+window_pos = "0,0"
+
+# Offline mode (recommended): prevents infinite Xbox Live sign-in loops and network hangs
+xbox_live_tokens = false
+network = false
+
+# PS5 uses DualSense through XInput; keep keyboard_mouse = false
+keyboard_mouse = false
+mouse_sensitivity = 1.0
+
+# Direct DXIL translation:
+#   "all" = fastest on PS5 (avoids heavy multi-threaded DXC shader recompilation)
+#   "off" = fall back to DXC if a game has shader compilation glitches with direct DXIL
+direct_dxil = "all"
+
+# Diagnostic options (keep false / "" during normal play; enable only when debugging)
+activity = false
+trace_input = false
+trace_net = false
+trace_vfs = ""
+live_flush = false
+sw_probes = []
+
+[mounts]
+"GAME:" = "{game}"
+"G:" = "{game}"
+"D:" = "{game}"
+"T:" = "{data}\\temp"
+"S:" = "{data}\\pls"
+
+[aliases]
+# Example: if a game tries to load an NVIDIA-only DLL on PS5's AMD RDNA2 GPU, stub it:
+# "nvngx_dlss.dll" = "@stub"
+
+[stub_returns]

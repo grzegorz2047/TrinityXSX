@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: User Guide (How to install & add games)
+    url: https://github.com/grzegorz2047/TrinityXSX/blob/main/docs/USER_GUIDE.md
+    about: Step-by-step instructions for installing PPSA83601.ffpkg, adding game folders, and tuning xcl.toml.
+  - name: Poradnik po polsku (Instalacja i dodawanie gier)
+    url: https://github.com/grzegorz2047/TrinityXSX/blob/main/docs/PORADNIK_PL.md
+    about: Instrukcja krok po kroku jak wgrać TrinityXSX, dodać własne gry i skonfigurować xcl.toml.
+  - name: Game Compatibility List
+    url: https://github.com/grzegorz2047/TrinityXSX/blob/main/docs/COMPATIBILITY.md
+    about: Check tested titles and known workarounds before opening a new report.

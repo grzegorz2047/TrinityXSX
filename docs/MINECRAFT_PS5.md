@@ -222,7 +222,7 @@ Copy-Item .\xcl\target\release\xcl.exe .\dist\prospero-win\prefix\drive_c\XCL\xc
 ```
 
 Use `-Ps5Host` and `-FtpPort` when the console address differs from the local default
-`192.168.1.170:2121`. The runtime deployment preserves the old file rather than
+`<PS5-IP>:2121`. The runtime deployment preserves the old file rather than
 truncating a binary that Wine may still have mapped. Restart the game afterward.
 
 The software probe offsets in `minecraft.xcl.toml` are specific to this executable:

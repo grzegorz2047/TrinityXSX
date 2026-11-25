@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    PS5 Live Debugger & Hot-Deploy CLI dla XCL / prospero-win (192.168.1.170:2121).
+    PS5 Live Debugger & Hot-Deploy CLI dla XCL / prospero-win (<PS5-IP>:2121).
 .EXAMPLE
     .\ps5_debug.ps1 -Action Logs -OutTag run8
     .\ps5_debug.ps1 -Action Tail
@@ -12,7 +12,7 @@
 param(
     [ValidateSet("Logs","Tail","Screenshots","Worlds","DeployConfig","DeployExe","DeployAll")]
     [string]$Action = "Tail",
-    [string]$Ps5Host = "192.168.1.170",
+    [string]$Ps5Host = $env:PS5_HOST,
     [int]$FtpPort = 2121,
     [string]$TrinityRoot = (Split-Path $PSScriptRoot -Parent),
     [string]$OutTag = "live",

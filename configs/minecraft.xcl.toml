@@ -1,7 +1,7 @@
 # XCL – konfiguracja PS5 dla Minecraft Preview (Microsoft.MinecraftBeta 1.18.3064.0)
 # Docelowa ścieżka w prefixie prospero-win:
 #   /data/prospero-win/prefix/drive_c/users/prospero/AppData/Local/XCL/Microsoft.MinecraftBeta/xcl.toml
-# Dopasowane 1:1 do pól struct Config w D:\TrinityXSX\xcl\crates\xcl\src\config.rs
+# Dopasowane 1:1 do pól struct Config w xcl/crates/xcl/src/config.rs
 
 # "lockhart" (Series S) zamiast "anaconda" (Series X): bezpieczniejszy profil pamięci i LOD na PS5
 device_type = "lockhart"
@@ -58,7 +58,7 @@ direct_dxil = "all"
 # Tryb offline (XCL_NETWORK=0) – bezpieczny start bez zewnętrznych gniazd / TLS na PS5
 network = false
 
-# Normal play; use minecraft-world-debug.xcl.toml for diagnostic captures.
+# Normal play; enable activity/trace_* temporarily when collecting diagnostic logs.
 activity = false
 trace_input = false
 trace_net = false

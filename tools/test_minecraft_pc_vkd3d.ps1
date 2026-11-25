@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
 Uruchamia Minecraft Preview (Scarlett) lokalnie na Windows ze stosem graficznym używanym na PS5:
-  D:\TrinityXSX\dist\prospero-win\prefix\drive_c\XCL\xcl.exe run --in-process
+  dist\prospero-win\prefix\drive_c\XCL\xcl.exe run --in-process
   + spatchowany vkd3d-proton 3.1 + DXVK 3.1.1 + XCL_DIRECT_DXIL=all + XCL_NETWORK=0
 
 .DESCRIPTION

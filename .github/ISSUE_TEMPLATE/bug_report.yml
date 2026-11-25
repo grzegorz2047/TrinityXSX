@@ -1,0 +1,42 @@
+name: Launcher or runtime bug
+description: Report a bug in the TrinityXSX PS5 launcher, folder browser, packaging scripts, or CI.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: input
+    id: release
+    attributes:
+      label: TrinityXSX release version
+      placeholder: v0.1.0 (01.000.015)
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: PS5 firmware & homebrew setup (or PC OS)
+      placeholder: e.g. PS5 FW 10.01, ShadowMountPlus, elfldr
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected vs actual result
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: |
+        Attach `/data/homebrew/PPSA83601/startup.log`, `/data/homebrew/PPSA83601/wineserver-startup.log` (if present), and the latest `/data/homebrew/PPSA83601/logs/session-N.log`.
+        Do not upload game files.
