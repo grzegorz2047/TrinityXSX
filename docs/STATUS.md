@@ -58,6 +58,21 @@ Fixed since:
   through a meta compute shader whose dispatch is predicated. XCL's
   `set_predication_buffer_state_and_kickoff` passes on vkd3d-proton.
 
+### Direct DXIL on vkd3d-proton
+
+XCL's own DXIL emitter instead of HLSL + DXC (`XCL_DIRECT_DXIL=all`, for shorter shader compiles
+on the PS5's CPU), whole suite on vkd3d-proton + DXVK: **980 passed, 3 failed, 45 ignored**.
+
+- `gpu_s_round_mode_controls_f16_rounding_across_modes`: lane 17, input 0x80000000 (-0.0),
+  `v_fma_mixlo_f16` RNE gives +0 instead of -0. Passes with direct DXIL on Windows D3D12 and with
+  the HLSL path on vkd3d-proton, so the sign of zero is lost between dxil-spirv and NVIDIA's
+  driver (vkd3d-proton turns VK_KHR_shader_float_controls2 off on NVIDIA as buggy). Not checked on
+  RADV yet.
+- `offline_compute_pipeline_is_reused_by_a_second_process`: fails with direct DXIL on Windows
+  D3D12 too – the test looks for the HLSL path's `.dxil` cache file, which the direct path names
+  differently. A limit of the test, not of the backend.
+- `gpu_depth_buffer_…`: as without direct DXIL.
+
 ## PS5 (prospero-win)
 
 1. Wine could not create the `default` prefix (`run_wineboot failed … c00000bb`, then

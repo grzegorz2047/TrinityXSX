@@ -27,6 +27,7 @@ Status: [docs/STATUS.md](docs/STATUS.md).
 | `tools/fetch-deps.sh` | download DXVK and DXC releases (checksums verified) |
 | `tools/vk-backend.sh` | run XCL's test suite on Windows on vkd3d-proton + DXVK (`on` / `off`) |
 | `tools/make-ps5-package.sh` | assemble `dist/prospero-win/` (XCL + its test title + DLLs + profile) |
+| `tools/ps5-deploy-game.sh` | put an unpacked Xbox Series game folder you own on the PS5: checks it (Scarlett build, console imports), uploads it, writes its prospero-win profile |
 | `tools/ftp_put_tree.py` | upload a folder to the PS5 in one FTP session |
 | `tools/ftp_rm_tree.py` | empty a folder on the PS5 (the test title's XCL overlay between runs) |
 | `tools/pdbsym.py` | module + offset → function, file:line from a PDB (crash reports) |
