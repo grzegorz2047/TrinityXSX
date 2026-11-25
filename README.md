@@ -64,8 +64,9 @@ then `tools/vk-backend.sh off`.
 ## CI
 
 `.github/workflows/ci.yml` is an aid, not a gate: it applies the patches to the pinned upstreams,
-builds and tests XCL on a Windows runner (no GPU: GPU tests report `SKIPPED`), cross-builds the
-patched vkd3d-proton with MinGW on Linux, and uploads the PS5 package as an artifact.
+builds and tests XCL on a Windows runner (no GPU: GPU tests report `SKIPPED`), builds the patched
+vkd3d-proton with MSYS2's UCRT64 MinGW, and uploads the PS5 package as an artifact. Each build is
+cached under a key of its inputs and skipped when they did not change.
 
 ## Licences
 
