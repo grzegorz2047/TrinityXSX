@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
@@ -74,11 +74,11 @@ jobs:
       - name: Keep line endings as they are (the patches apply byte for byte)
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Outputs of these inputs, if built before
         id: out
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: out
           key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
@@ -119,7 +119,7 @@ jobs:
           cp -r xcl/tests/data/testgame out/xcl/tests/data/
           cp xcl/LICENSE out/xcl/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xcl-release
           path: out/
@@ -133,11 +133,11 @@ jobs:
       - name: Keep line endings as they are (the patches apply byte for byte)
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Outputs of these inputs, if built before
         id: out
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: out
           key: vkd3d-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/vkd3d-proton/**', 'patches/dxil-spirv/**') }}
@@ -183,7 +183,7 @@ jobs:
           cp vkd3d-proton/LICENSE vkd3d-proton/COPYING $v/
           cp vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT $v/subprojects/dxil-spirv/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vkd3d-proton
           path: out/
@@ -195,9 +195,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             tools/dxvk
@@ -207,11 +207,11 @@ jobs:
       - name: DXVK and DXC (checksums verified)
         run: tools/fetch-deps.sh
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: xcl-release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: vkd3d-proton
 
@@ -224,13 +224,13 @@ jobs:
           (cd dist/release-bundle && sha256sum xcl-library.exe TrinityXSX-prospero-win.zip > SHA256SUMS.txt)
           cat dist/release-bundle/SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xcl-prospero-win
           path: dist/prospero-win
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: trinityxsx-release-bundle
           path: dist/release-bundle

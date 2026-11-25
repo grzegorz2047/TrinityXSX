@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: python3 -m unittest standalone.test_standalone -v
       - name: Verify patches/prospero-win apply cleanly
         run: |
@@ -49,11 +49,11 @@ jobs:
       CARGO_INCREMENTAL: 0
     steps:
       - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Restore cached XCL output
         id: out
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: out
           key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
@@ -90,7 +90,7 @@ jobs:
           cp -r xcl/tests/data/testgame out/xcl/tests/data/
           cp xcl/LICENSE out/xcl/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xcl-release
           path: out/
@@ -102,11 +102,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Restore cached vkd3d-proton output
         id: out
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: out
           key: vkd3d-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/vkd3d-proton/**', 'patches/dxil-spirv/**') }}
@@ -151,7 +151,7 @@ jobs:
           cp vkd3d-proton/LICENSE vkd3d-proton/COPYING $v/
           cp vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT $v/subprojects/dxil-spirv/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vkd3d-proton
           path: out/
@@ -165,9 +165,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             tools/dxvk
@@ -177,11 +177,11 @@ jobs:
       - name: Fetch DXVK and DXC
         run: tools/fetch-deps.sh
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: xcl-release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: vkd3d-proton
 
