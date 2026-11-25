@@ -105,7 +105,8 @@ Open on the PS5:
 - Feature level 12_0 is out of reach while RADV on the console lacks `shaderResourceResidency` and
   `residencyNonResidentStrict` (tiled resources tier 1); XCL runs at 11_0 there.
 - The title's window without DWM (`patches/xcl/0006`): kept just right of the virtual screen under
-  Wine (DWM cloaking is a stub there), so the cloaking check can pass; not yet run on the console.
+  Wine (DWM cloaking is a stub there). On the console the test title now passes **all 51 checks**
+  (0 failed), with 602 frames presented in 10.0 s.
 - vkd3d-proton disables mesh shaders without fragment-shader barycentrics (its UE5 workaround);
   XCL needs them for NGG programs and does not use SV_Barycentrics. `patches/vkd3d-proton/0002`
   opts `xcl.exe` in: on the console vkd3d logs "Detected game xcl.exe", XCL's "no mesh shaders"
