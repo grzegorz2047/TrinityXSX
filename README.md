@@ -1,4 +1,7 @@
 # TrinityXSX
+<p align="center">
+  <a href='https://ko-fi.com/A0A21SWG1P' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/brandasset/v2/support_me_on_kofi_blue.png' border='0' alt='Support project' /></a>
+</p>
 
 Work on running [XCL](https://github.com/xcl-dev/xcl) – the Xbox Series X|S (GDK) → Windows
 compatibility layer – on Vulkan and on the PS5. Experimental.
