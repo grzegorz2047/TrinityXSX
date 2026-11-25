@@ -56,7 +56,14 @@ Left as they are:
 3. Cause: the console has 16 KiB pages. The loader protected `.rdata` and `.data` at 4 KiB
    granularity; both share a host page, the last VirtualProtect (`.rdata`, read-only) won. Found
    from Wine's `+virtual` views and the faulting instruction (the fault address is the 16 KiB
-   host page). Fixed in `patches/xcl/0003`; not yet run on the console.
+   host page). Fixed in `patches/xcl/0003`.
+4. With that fix the test title runs to the end on the console: **49 passed, 1 failed**. Passing
+   there: the triangle rendered on the PS5 GPU and read back, PresentX and the frame clock,
+   console device and command-list methods, sparse VRAM heaps and uploads, UMA windows, textures
+   in title memory and streaming pools, the raytracing surface, DirectStorage, XAudio2 with XMA2
+   and Opus voices, MFPlat, the VFS and XGameRuntime (task queues, users, saves). The failure:
+   `user32: … not cloaked` – Wine has no DWM, so DWMWA_CLOAK does nothing and the title's own
+   window is not hidden (prospero-win shows the game's windows, so it may cover XCL's).
 
 Open on the PS5:
 
