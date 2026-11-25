@@ -79,7 +79,8 @@ Możesz wskazać dowolny folder na PS5 bezpośrednio w aplikacji:
 | **D-pad / Lewy analog** | Wybór gry | Wybór folderu | Wybór podfolderu |
 | **Krzyżyk (X)** | Uruchom grę | Przeglądaj zaznaczony folder | Wejdź do podfolderu |
 | **Kwadrat (□)** | Zarządzaj folderami | Dodaj nowy folder | Anuluj |
-| **R1 / OPTIONS** | Edytuj ustawienia gry (`xcl.toml`) | — | — |
+| **R1** | Edytuj ustawienia gry (`xcl.toml`) | — | — |
+| **OPTIONS** | Profil offline i język interfejsu (EN/PL/PT/ES) | — | — |
 | **L1** | Otwórz Web Companion i kod QR | — | — |
 | **Trójkąt (Δ)** | Odśwież listę gier | Usuń folder z listy | Użyj bieżącego folderu |
 | **Kółko (O)** | Wyjście do menu PS5 | Powrót do biblioteki | Poziom wyżej |
