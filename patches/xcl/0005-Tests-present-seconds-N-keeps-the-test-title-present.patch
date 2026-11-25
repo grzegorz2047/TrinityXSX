@@ -1,7 +1,7 @@
 From 034737b629d8b0b7c7f0738056ad829edee14fb6 Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 03:58:51 +0100
-Subject: [PATCH 5/5] Tests: --present-seconds N keeps the test title
+Subject: [PATCH 5/6] Tests: --present-seconds N keeps the test title
  presenting for N seconds
 
 The test title presents one frame (PresentX of a cleared back buffer)

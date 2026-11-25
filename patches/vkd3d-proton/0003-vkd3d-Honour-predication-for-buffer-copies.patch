@@ -1,0 +1,441 @@
+From 6850da1c460b3cfa3892a92e5561e6f99cc62f80 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 04:46:20 +0100
+Subject: [PATCH] vkd3d: Honour predication for buffer copies.
+
+D3D12 predicates CopyBufferRegion and CopyResource, but
+VK_EXT_conditional_rendering does not apply to transfer commands, so
+predicated buffer copies always ran. While a predicate is set, buffer
+copies now go through a meta compute shader (cs_copy_buffer, BDA, byte
+granular with masked edge words) whose dispatch is predicated like any
+other, through conditional rendering or the indirect fallback. Copies
+without a predicate still use vkCmdCopyBuffer2.
+
+ClearState also ends conditional rendering before it forgets the
+predicate.
+
+Found with XCL's console SetPredicationBufferX test, which failed on
+vkd3d-proton ("EQUAL_ZERO(0) must skip dst[0]") and passes with this on
+an RTX 3060. Texture copies, tiles and resolves are not covered yet.
+New test: test_conditional_rendering_copy_buffer (CopyBufferRegion with
+aligned and unaligned ranges, CopyResource); not run here, the vkd3d
+test suite is not built in this tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/vkd3d/command.c                   | 102 ++++++++++++++++++++++++-
+ libs/vkd3d/meson.build                 |   1 +
+ libs/vkd3d/meta.c                      |  12 +++
+ libs/vkd3d/shaders/cs_copy_buffer.comp |  64 ++++++++++++++++
+ libs/vkd3d/vkd3d_private.h             |  11 +++
+ libs/vkd3d/vkd3d_shaders.h             |   1 +
+ tests/d3d12_command.c                  |  86 +++++++++++++++++++++
+ tests/d3d12_tests.h                    |   1 +
+ 8 files changed, 276 insertions(+), 2 deletions(-)
+ create mode 100644 libs/vkd3d/shaders/cs_copy_buffer.comp
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index 61c9afe..de8f321 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -7283,6 +7283,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearState(d3d12_command_list_i
+     d3d12_command_list_check_render_pass_validation(list, "ClearState called within a render pass.\n", false);
+ 
+     d3d12_command_list_end_current_render_pass(list, false);
++    /* reset_api_state() forgets the predicate, so end its conditional rendering now. */
++    d3d12_command_list_update_conditional_rendering_state(list, true);
+     d3d12_command_list_reset_api_state(list, pipeline_state);
+ }
+ 
+@@ -9432,6 +9434,88 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+     d3d12_command_list_check_compute_barrier(list);
+ }
+ 
++/* D3D12 predicates copies, but VK_EXT_conditional_rendering does not apply to transfer commands.
++ * Copy with a compute shader instead: its dispatch is predicated like any other. The app's
++ * barriers around the copy only cover the COPY stage, hence the full barriers. */
++static void d3d12_command_list_copy_buffer_predicated(struct d3d12_command_list *list,
++        VkDeviceAddress dst_va, VkDeviceAddress src_va, VkDeviceSize byte_count)
++{
++    const struct vkd3d_predicate_ops *predicate_ops = &list->device->meta_ops.predicate;
++    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
++    union vkd3d_predicate_command_direct_args direct_args;
++    struct vkd3d_predicate_copy_buffer_args args;
++    struct vkd3d_scratch_allocation scratch;
++    unsigned int workgroup_count;
++    VkMemoryBarrier2 vk_barrier;
++    VkDependencyInfo dep_info;
++
++    if (!byte_count)
++        return;
++
++    memset(&vk_barrier, 0, sizeof(vk_barrier));
++    vk_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
++    vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++    vk_barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
++    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
++    vk_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
++
++    memset(&dep_info, 0, sizeof(dep_info));
++    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
++    dep_info.memoryBarrierCount = 1;
++    dep_info.pMemoryBarriers = &vk_barrier;
++
++    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
++
++    /* The dispatch has to be inside the conditional rendering scope. */
++    d3d12_command_list_update_conditional_rendering_state(list, false);
++
++    while (byte_count)
++    {
++        /* Keeps the shader's 32-bit byte offsets in range. */
++        args.byte_count = (uint32_t)min(byte_count, (VkDeviceSize)1 << 30);
++        args.src_va = src_va & ~(VkDeviceAddress)3;
++        args.dst_va = dst_va & ~(VkDeviceAddress)3;
++        args.src_offset = src_va & 3;
++        args.dst_offset = dst_va & 3;
++
++        /* The shader loops over the words, so a capped group count covers any size. */
++        workgroup_count = min(vkd3d_compute_workgroup_count((args.dst_offset + args.byte_count + 3) / 4, 64), 4096u);
++
++        if (list->predication.fallback_enabled)
++        {
++            direct_args.dispatch.x = workgroup_count;
++            direct_args.dispatch.y = 1;
++            direct_args.dispatch.z = 1;
++
++            if (!d3d12_command_list_emit_predicated_command(list, VKD3D_PREDICATE_COMMAND_DISPATCH, 0, &direct_args, &scratch))
++                break;
++        }
++
++        VK_CALL(vkCmdBindPipeline(list->cmd.vk_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
++                predicate_ops->vk_copy_buffer_pipeline));
++        d3d12_command_list_meta_push_data(list, list->cmd.vk_command_buffer,
++                predicate_ops->vk_copy_buffer_pipeline_layout,
++                VK_SHADER_STAGE_COMPUTE_BIT, sizeof(args), &args);
++
++        if (list->predication.fallback_enabled)
++            VK_CALL(vkCmdDispatchIndirect(list->cmd.vk_command_buffer, scratch.buffer, scratch.offset));
++        else
++            VK_CALL(vkCmdDispatch(list->cmd.vk_command_buffer, workgroup_count, 1, 1));
++
++        src_va += args.byte_count;
++        dst_va += args.byte_count;
++        byte_count -= args.byte_count;
++    }
++
++    vk_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
++    vk_barrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
++    vk_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++    vk_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
++    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
++
++    d3d12_command_list_invalidate_current_pipeline(list, true);
++}
++
+ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_list_iface *iface,
+         ID3D12Resource *dst, UINT64 dst_offset, ID3D12Resource *src, UINT64 src_offset, UINT64 byte_count)
+ {
+@@ -9484,7 +9568,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
+ 
+     d3d12_command_list_mark_copy_buffer_write(list, copy_info.dstBuffer, buffer_copy.dstOffset, buffer_copy.size,
+             !!(dst_resource->flags & VKD3D_RESOURCE_RESERVED));
+-    VK_CALL(vkCmdCopyBuffer2(list->cmd.vk_command_buffer, &copy_info));
++
++    if (list->predication.va)
++    {
++        d3d12_command_list_copy_buffer_predicated(list, dst_resource->res.va + dst_offset,
++                src_resource->res.va + src_offset, byte_count);
++    }
++    else
++        VK_CALL(vkCmdCopyBuffer2(list->cmd.vk_command_buffer, &copy_info));
+ 
+     VKD3D_BREADCRUMB_COMMAND(COPY);
+ }
+@@ -11276,7 +11367,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
+ 
+         d3d12_command_list_mark_copy_buffer_write(list, copy_info.dstBuffer, vk_buffer_copy.dstOffset, vk_buffer_copy.size,
+                 !!(dst_resource->flags & VKD3D_RESOURCE_RESERVED));
+-        VK_CALL(vkCmdCopyBuffer2(list->cmd.vk_command_buffer, &copy_info));
++
++        if (list->predication.va)
++        {
++            d3d12_command_list_copy_buffer_predicated(list, dst_resource->res.va,
++                    src_resource->res.va, dst_resource->desc.Width);
++        }
++        else
++            VK_CALL(vkCmdCopyBuffer2(list->cmd.vk_command_buffer, &copy_info));
+     }
+     else
+     {
+diff --git a/libs/vkd3d/meson.build b/libs/vkd3d/meson.build
+index 873a89f..4cc7913 100644
+--- a/libs/vkd3d/meson.build
++++ b/libs/vkd3d/meson.build
+@@ -21,6 +21,7 @@ vkd3d_shaders =[
+   'shaders/cs_resolve_predicate.comp',
+   'shaders/cs_resolve_query.comp',
+ 
++  'shaders/cs_copy_buffer.comp',
+   'shaders/cs_copy_buffer_to_emulated_d24.comp',
+   'shaders/cs_copy_emulated_d24_to_buffer.comp',
+ 
+diff --git a/libs/vkd3d/meta.c b/libs/vkd3d/meta.c
+index 1669645..da56b2a 100644
+--- a/libs/vkd3d/meta.c
++++ b/libs/vkd3d/meta.c
+@@ -1801,9 +1801,11 @@ static void vkd3d_predicate_ops_cleanup(struct vkd3d_predicate_ops *meta_predica
+     for (i = 0; i < VKD3D_PREDICATE_COMMAND_COUNT; i++)
+         VK_CALL(vkDestroyPipeline(device->vk_device, meta_predicate_ops->vk_command_pipelines[i], NULL));
+     VK_CALL(vkDestroyPipeline(device->vk_device, meta_predicate_ops->vk_resolve_pipeline, NULL));
++    VK_CALL(vkDestroyPipeline(device->vk_device, meta_predicate_ops->vk_copy_buffer_pipeline, NULL));
+ 
+     VK_CALL(vkDestroyPipelineLayout(device->vk_device, meta_predicate_ops->vk_command_pipeline_layout, NULL));
+     VK_CALL(vkDestroyPipelineLayout(device->vk_device, meta_predicate_ops->vk_resolve_pipeline_layout, NULL));
++    VK_CALL(vkDestroyPipelineLayout(device->vk_device, meta_predicate_ops->vk_copy_buffer_pipeline_layout, NULL));
+ }
+ 
+ static HRESULT vkd3d_predicate_ops_init(struct vkd3d_predicate_ops *meta_predicate_ops,
+@@ -1849,6 +1851,11 @@ static HRESULT vkd3d_predicate_ops_init(struct vkd3d_predicate_ops *meta_predica
+             &push_constant_range, &meta_predicate_ops->vk_resolve_pipeline_layout)) < 0)
+         return hresult_from_vk_result(vr);
+ 
++    push_constant_range.size = sizeof(struct vkd3d_predicate_copy_buffer_args);
++    if ((vr = vkd3d_meta_create_pipeline_layout(device, 0, NULL,
++            &push_constant_range, &meta_predicate_ops->vk_copy_buffer_pipeline_layout)) < 0)
++        goto fail;
++
+     spec_info.mapEntryCount = ARRAY_SIZE(spec_map);
+     spec_info.pMapEntries = spec_map;
+     spec_info.dataSize = sizeof(struct spec_data);
+@@ -1870,6 +1877,11 @@ static HRESULT vkd3d_predicate_ops_init(struct vkd3d_predicate_ops *meta_predica
+             &meta_predicate_ops->vk_resolve_pipeline)) < 0)
+         goto fail;
+ 
++    if ((vr = vkd3d_meta_create_compute_pipeline(device, sizeof(cs_copy_buffer), cs_copy_buffer,
++            meta_predicate_ops->vk_copy_buffer_pipeline_layout, NULL, true, NULL,
++            &meta_predicate_ops->vk_copy_buffer_pipeline)) < 0)
++        goto fail;
++
+     return S_OK;
+ 
+ fail:
+diff --git a/libs/vkd3d/shaders/cs_copy_buffer.comp b/libs/vkd3d/shaders/cs_copy_buffer.comp
+new file mode 100644
+index 0000000..51e0dbe
+--- /dev/null
++++ b/libs/vkd3d/shaders/cs_copy_buffer.comp
+@@ -0,0 +1,64 @@
++#version 450
++
++#extension GL_EXT_buffer_reference : require
++
++layout(local_size_x = 64) in;
++
++layout(std430, buffer_reference, buffer_reference_align = 4)
++readonly buffer src_data_t {
++  uint data[];
++};
++
++layout(std430, buffer_reference, buffer_reference_align = 4)
++buffer dst_data_t {
++  uint data[];
++};
++
++/* Copies byte_count bytes from byte src_offset of src to byte dst_offset of dst.
++ * src and dst are 4-byte aligned, the offsets are 0-3. */
++layout(push_constant)
++uniform u_info_t {
++  src_data_t src;
++  dst_data_t dst;
++  uint src_offset;
++  uint dst_offset;
++  uint byte_count;
++};
++
++uint load_src_byte(uint index) {
++  return bitfieldExtract(src.data[index >> 2u], int(8u * (index & 3u)), 8);
++}
++
++void main() {
++  uint dst_end = dst_offset + byte_count;
++  uint word_count = (dst_end + 3u) >> 2u;
++  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
++
++  for (uint word = gl_GlobalInvocationID.x; word < word_count; word += stride) {
++    uint begin = max(4u * word, dst_offset);
++    uint end = min(4u * word + 4u, dst_end);
++
++    if (src_offset == dst_offset && end - begin == 4u) {
++      /* Byte b of dst is byte b of src. */
++      dst.data[word] = src.data[word];
++      continue;
++    }
++
++    uint value = 0u;
++    uint mask = 0u;
++
++    for (uint b = begin; b < end; b++) {
++      uint shift = 8u * (b & 3u);
++      value |= load_src_byte(b - dst_offset + src_offset) << shift;
++      mask |= 0xffu << shift;
++    }
++
++    if (mask == ~0u) {
++      dst.data[word] = value;
++    } else {
++      /* Keep the bytes of the word outside the copy. */
++      atomicAnd(dst.data[word], ~mask);
++      atomicOr(dst.data[word], value);
++    }
++  }
++}
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 8fe8c2d..36ec4b1 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -5004,12 +5004,23 @@ struct vkd3d_predicate_resolve_args
+     VkBool32 invert;
+ };
+ 
++struct vkd3d_predicate_copy_buffer_args
++{
++    VkDeviceAddress src_va;
++    VkDeviceAddress dst_va;
++    uint32_t src_offset;
++    uint32_t dst_offset;
++    uint32_t byte_count;
++};
++
+ struct vkd3d_predicate_ops
+ {
+     VkPipelineLayout vk_command_pipeline_layout;
+     VkPipelineLayout vk_resolve_pipeline_layout;
++    VkPipelineLayout vk_copy_buffer_pipeline_layout;
+     VkPipeline vk_command_pipelines[VKD3D_PREDICATE_COMMAND_COUNT];
+     VkPipeline vk_resolve_pipeline;
++    VkPipeline vk_copy_buffer_pipeline;
+     uint32_t data_sizes[VKD3D_PREDICATE_COMMAND_COUNT];
+ };
+ 
+diff --git a/libs/vkd3d/vkd3d_shaders.h b/libs/vkd3d/vkd3d_shaders.h
+index 85b6fd7..808920c 100644
+--- a/libs/vkd3d/vkd3d_shaders.h
++++ b/libs/vkd3d/vkd3d_shaders.h
+@@ -50,6 +50,7 @@ enum vkd3d_meta_copy_mode
+ #include <cs_execute_indirect_patch.h>
+ #include <cs_execute_indirect_patch_debug_ring.h>
+ #include <cs_execute_indirect_multi_dispatch.h>
++#include <cs_copy_buffer.h>
+ #include <cs_copy_buffer_to_emulated_d24.h>
+ #include <cs_copy_emulated_d24_to_buffer.h>
+ #include <vs_fullscreen_layer.h>
+diff --git a/tests/d3d12_command.c b/tests/d3d12_command.c
+index abfc422..f87c9a0 100644
+--- a/tests/d3d12_command.c
++++ b/tests/d3d12_command.c
+@@ -4684,6 +4684,92 @@ void test_conditional_rendering(void)
+     destroy_test_context(&context);
+ }
+ 
++void test_conditional_rendering_copy_buffer(void)
++{
++    ID3D12GraphicsCommandList *command_list;
++    ID3D12Resource *conditions, *src, *dst;
++    struct test_context context;
++    struct resource_readback rb;
++    ID3D12CommandQueue *queue;
++    unsigned int i;
++    uint32_t value;
++
++    static const uint64_t predicate_args[] = {0, 1};
++    static const uint32_t src_data[] = {0x11111111, 0x22222222, 0x33323130, 0x44444444};
++    static const uint32_t dst_data[] = {0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
++    static const uint32_t expected[] = {0xdeadbeef, 0x22222222, 0xdeadbeef, 0x323130ef};
++
++    if (!init_test_context(&context, NULL))
++        return;
++    command_list = context.list;
++    queue = context.queue;
++
++    if (is_intel_windows_device(context.device))
++    {
++        skip("Predicated rendering is broken on Intel.\n");
++        destroy_test_context(&context);
++        return;
++    }
++
++    conditions = create_default_buffer(context.device, sizeof(predicate_args),
++            D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
++    upload_buffer_data(conditions, 0, sizeof(predicate_args), &predicate_args, queue, command_list);
++    reset_command_list(command_list, context.allocator);
++    src = create_upload_buffer(context.device, sizeof(src_data), src_data);
++    dst = create_default_buffer(context.device, sizeof(dst_data),
++            D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
++    upload_buffer_data(dst, 0, sizeof(dst_data), &dst_data, queue, command_list);
++    reset_command_list(command_list, context.allocator);
++    transition_resource_state(command_list, conditions,
++            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PREDICATION);
++
++    /* Skip on zero. */
++    ID3D12GraphicsCommandList_SetPredication(command_list, conditions, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
++    ID3D12GraphicsCommandList_CopyBufferRegion(command_list, dst, 0, src, 0, 4);
++    /* Copy on non-zero, also bytes 8-10 to 13-15. */
++    ID3D12GraphicsCommandList_SetPredication(command_list, conditions,
++            sizeof(uint64_t), D3D12_PREDICATION_OP_EQUAL_ZERO);
++    ID3D12GraphicsCommandList_CopyBufferRegion(command_list, dst, 4, src, 4, 4);
++    ID3D12GraphicsCommandList_CopyBufferRegion(command_list, dst, 13, src, 8, 3);
++    /* Skip on non-zero. */
++    ID3D12GraphicsCommandList_SetPredication(command_list, conditions,
++            sizeof(uint64_t), D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
++    ID3D12GraphicsCommandList_CopyBufferRegion(command_list, dst, 8, src, 8, 4);
++    ID3D12GraphicsCommandList_SetPredication(command_list, NULL, 0, 0);
++
++    transition_resource_state(command_list, dst,
++            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    get_buffer_readback_with_command_list(dst, DXGI_FORMAT_R32_UINT, &rb, queue, command_list);
++    for (i = 0; i < ARRAY_SIZE(expected); i++)
++    {
++        value = get_readback_uint(&rb, i, 0, 0);
++        ok(value == expected[i], "Got %#x, expected %#x at %u.\n", value, expected[i], i);
++    }
++    release_resource_readback(&rb);
++
++    /* Skip a buffer CopyResource() on zero. */
++    reset_command_list(command_list, context.allocator);
++    transition_resource_state(command_list, dst,
++            D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
++    ID3D12GraphicsCommandList_SetPredication(command_list, conditions, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
++    ID3D12GraphicsCommandList_CopyResource(command_list, dst, src);
++    ID3D12GraphicsCommandList_SetPredication(command_list, NULL, 0, 0);
++    transition_resource_state(command_list, dst,
++            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    get_buffer_readback_with_command_list(dst, DXGI_FORMAT_R32_UINT, &rb, queue, command_list);
++    for (i = 0; i < ARRAY_SIZE(expected); i++)
++    {
++        value = get_readback_uint(&rb, i, 0, 0);
++        ok(value == expected[i], "Got %#x, expected %#x at %u after CopyResource.\n", value, expected[i], i);
++    }
++    release_resource_readback(&rb);
++
++    ID3D12Resource_Release(conditions);
++    ID3D12Resource_Release(src);
++    ID3D12Resource_Release(dst);
++    destroy_test_context(&context);
++}
++
+ void test_write_buffer_immediate(void)
+ {
+     D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameters[3];
+diff --git a/tests/d3d12_tests.h b/tests/d3d12_tests.h
+index 432028a..058549e 100644
+--- a/tests/d3d12_tests.h
++++ b/tests/d3d12_tests.h
+@@ -260,6 +260,7 @@ decl_test(test_queue_wait);
+ decl_test(test_graphics_compute_queue_synchronization);
+ decl_test(test_early_depth_stencil_tests);
+ decl_test(test_conditional_rendering);
++decl_test(test_conditional_rendering_copy_buffer);
+ decl_test(test_bufinfo_instruction_dxbc);
+ decl_test(test_bufinfo_instruction_dxil);
+ decl_test(test_write_buffer_immediate);

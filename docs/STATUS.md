@@ -9,11 +9,10 @@ prospero-win v0.3.0.
 
 | Backend | Passed | Failed | Ignored | Failures |
 |---|---|---|---|---|
-| Windows D3D12 | 978 | 1 | 45 | `execute_indirect_reads_the_arguments_written_before_it` (also fails on upstream `main` on this GPU) |
-| vkd3d-proton 3.1 (patched, `b_ndebug`) + DXVK 3.1.1 | 975 | 2 | 45 | `gpu_depth_buffer_created_for_unordered_access_is_placed`, `set_predication_buffer_state_and_kickoff` |
+| Windows D3D12 | 982 | 1 | 45 | `execute_indirect_reads_the_arguments_written_before_it` (also fails on upstream `main` on this GPU, see below) |
+| vkd3d-proton 3.1 (patched, `b_ndebug`) + DXVK 3.1.1 | 982 | 1 | 45 | `gpu_depth_buffer_created_for_unordered_access_is_placed` |
 
-23 GPU tests report `SKIPPED` on this GPU (no wave64). The vkd3d-proton row was measured before
-the PE-loader patch; the e2e test title passes on both backends.
+23 GPU tests report `SKIPPED` on this GPU (no wave64). The e2e test title passes on both backends.
 
 What it took to get XCL onto vkd3d-proton:
 
@@ -40,8 +39,24 @@ Left as they are:
 
 - `gpu_depth_buffer_…`: vkd3d-proton does not refuse UNORDERED_ACCESS as an initial state without
   `ALLOW_UNORDERED_ACCESS`; the test checks that Windows does. XCL's own mapping works.
-- Predication: vkd3d-proton implements it with VK_EXT_conditional_rendering, which does not cover
-  copies; D3D12 predicates `CopyBufferRegion` too.
+- `execute_indirect_…` on the RTX 3060 (driver 610.62, Windows D3D12): the ExecuteIndirect runs the
+  group count the memory held before the list, in 40 of 40 tries. XCL's workaround (a transition
+  of a buffer of its own, measured on an RTX 5090) does not help here, and neither did: a global
+  enhanced barrier (SYNC_EXECUTE_INDIRECT / ACCESS_INDIRECT_ARGUMENT), a global aliasing barrier,
+  one resource instead of two aliased ones, a DIRECT queue, and an explicit
+  COMMON → UNORDERED_ACCESS → INDIRECT_ARGUMENT sequence in plain D3D12 without XCL. Either the
+  driver or something common to all variants of the test; not fixed.
+- RADV's `maxBufferSize` (4 GiB − 4) vs XCL's 4 GiB sparse windows: left as it is. vkd3d-proton
+  warns and creates them; its sparse sizes are rounded up to 64 KiB, so a smaller D3D12 size
+  would change nothing, and one tile less per window would leave unbacked holes in title
+  reservations that cross window boundaries.
+
+Fixed since:
+
+- Predication of buffer copies (`patches/vkd3d-proton/0003`): VK_EXT_conditional_rendering does not
+  cover transfer commands; while a predicate is set, CopyBufferRegion and buffer CopyResource go
+  through a meta compute shader whose dispatch is predicated. XCL's
+  `set_predication_buffer_state_and_kickoff` passes on vkd3d-proton.
 
 ## PS5 (prospero-win)
 
@@ -89,6 +104,8 @@ Open on the PS5:
 
 - Feature level 12_0 is out of reach while RADV on the console lacks `shaderResourceResidency` and
   `residencyNonResidentStrict` (tiled resources tier 1); XCL runs at 11_0 there.
+- The title's window without DWM (`patches/xcl/0006`): kept just right of the virtual screen under
+  Wine (DWM cloaking is a stub there), so the cloaking check can pass; not yet run on the console.
 - vkd3d-proton disables mesh shaders without fragment-shader barycentrics (its UE5 workaround);
   XCL needs them for NGG programs and does not use SV_Barycentrics. `patches/vkd3d-proton/0002`
   opts `xcl.exe` in: on the console vkd3d logs "Detected game xcl.exe", XCL's "no mesh shaders"
