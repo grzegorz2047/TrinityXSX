@@ -64,13 +64,23 @@ Left as they are:
    and Opus voices, MFPlat, the VFS and XGameRuntime (task queues, users, saves). The failure:
    `user32: … not cloaked` – Wine has no DWM, so DWMWA_CLOAK does nothing and the title's own
    window is not hidden (prospero-win shows the game's windows, so it may cover XCL's).
+5. With `patches/xcl/0004` XCL takes the console GPU at feature level 11_0 ("PS5 (8160 MiB VRAM),
+   feature level 11_0") instead of WARP, and the GPU checks still pass. The test title is not
+   repeatable on one data folder: a second run sees the first run's overlay (its appended
+   `hello.txt`, the whiteout of `delete_me.txt`) and fails two file checks; the overlay
+   (`…/XCL/XCL.TestTitle/overlay`) has to be emptied between runs.
+
+`tools/vkcaps` on the console (`PS5`, Vulkan 1.4.354, RADV): sparse binding and residency for
+buffers and 2D / 3D images are there, but `shaderResourceResidency` and
+`residencyNonResidentStrict` are 0, so vkd3d-proton stops at tiled resources tier 1 and feature
+level 11_0. `VK_EXT_mesh_shader` is there, `VK_KHR_fragment_shader_barycentric` is not;
+`maxBufferSize` is 4 GiB − 4; descriptor buffer, shader object and fragment shader interlock are
+there.
 
 Open on the PS5:
 
-- vkd3d-proton refuses feature level 12_0 there (`Feature level 0xc000 is not supported`): XCL logs
-  "tiled resources tier 1", and vkd3d-proton needs tier 2 for 12_0. XCL then took its WARP path,
-  which DXVK maps to the console GPU. `patches/xcl/0004` asks the GPU for 11_0 before WARP (not yet
-  run on the console); `tools/vkcaps` prints which Vulkan feature tier 2 is missing.
+- Feature level 12_0 is out of reach while RADV on the console lacks `shaderResourceResidency` and
+  `residencyNonResidentStrict` (tiled resources tier 1); XCL runs at 11_0 there.
 - vkd3d-proton disables mesh shaders (no fragment-shader barycentrics, its UE5 workaround); XCL
   needs them for NGG programs. vkd3d-proton has a per-executable opt-in list.
 - RADV's `maxBufferSize` is 4 GiB − 4; XCL's three sparse windows are 4 GiB buffers (vkd3d-proton
