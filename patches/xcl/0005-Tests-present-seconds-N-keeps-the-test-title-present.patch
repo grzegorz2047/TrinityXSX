@@ -1,0 +1,155 @@
+From 034737b629d8b0b7c7f0738056ad829edee14fb6 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 03:58:51 +0100
+Subject: [PATCH 5/5] Tests: --present-seconds N keeps the test title
+ presenting for N seconds
+
+The test title presents one frame (PresentX of a cleared back buffer)
+and ends a moment later. On the PS5 under prospero-win XCL's window
+showed black in that moment, which cannot tell a frame that was gone
+too soon from frames that never reach the screen.
+
+With `--present-seconds N` it presents one frame per frame-clock token
+for N seconds at the end of its checks, red, green, blue and white for
+half a second each, and prints how many frames it presented. Without
+the argument the check is the single frame as before (same colour, same
+calls; the list is now reset per frame).
+
+Measured on an RTX 3060 Laptop GPU, Windows 11 (Windows D3D12, child
+host): `xcl run <test title> -- --hello --present-seconds 3`: 180 frames
+in 3.0 s, 51 checks passed. cargo test -p xcl --test e2e: 3 passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tests/testtitle/src/gpu.rs  | 82 ++++++++++++++++++++++++++-----------
+ tests/testtitle/src/main.rs |  8 ++++
+ 2 files changed, 67 insertions(+), 23 deletions(-)
+
+diff --git a/tests/testtitle/src/gpu.rs b/tests/testtitle/src/gpu.rs
+index d84d465..bb12889 100644
+--- a/tests/testtitle/src/gpu.rs
++++ b/tests/testtitle/src/gpu.rs
+@@ -285,6 +285,17 @@ pub fn pso_capture_and_fallback() -> Result<(), String> {
+ /// origin wait that hands out the frame token (#80), a cleared 640×360 back buffer handed to
+ /// `PresentX` (queue #30) with that token, then the frame's statistics (#81).
+ pub fn present_x_frame() -> Result<(), String> {
++    present_x(0.0)
++}
++
++/// `--present-seconds N`: as `present_x_frame`, one frame per frame-clock token for `seconds`,
++/// red, green, blue and white in turn for half a second each – to watch the presentation where
++/// one frame is gone before it can be seen (Wine on the PS5).
++pub fn present_x_for(seconds: f64) -> Result<(), String> {
++    present_x(seconds)
++}
++
++fn present_x(seconds: f64) -> Result<(), String> {
+     unsafe {
+         let dev = device()?;
+         let queue: ID3D12CommandQueue = dev.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).map_err(e)?;
+@@ -334,38 +345,63 @@ pub fn present_x_frame() -> Result<(), String> {
+         dev.CreateRenderTargetView(&bb, None, rtv);
+         let alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).map_err(e)?;
+         let list: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None).map_err(e)?;
+-        xslot::<ClearRtv>(&list, X_CLEAR_RENDER_TARGET_VIEW)(list.as_raw(), rtv, &[0.1, 0.5, 0.9, 1.0], 0, std::ptr::null());
+-        // consoles want the back buffer in COMMON / PRESENT for PresentX
+-        list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
++        list.Close().map_err(e)?;
++        let fence: ID3D12Fence = dev.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e)?;
++        let present: unsafe extern "system" fn(*mut c_void, u32, *const u8, *const u8) -> HRESULT = std::mem::transmute(slot(queue.as_raw(), 30));
++        let transition = |before, after| D3D12_RESOURCE_BARRIER {
+             Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+             Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+             Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                 Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                     pResource: transmute_copy(&bb),
+                     Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+-                    StateBefore: D3D12_RESOURCE_STATE_RENDER_TARGET,
+-                    StateAfter: D3D12_RESOURCE_STATE_PRESENT,
++                    StateBefore: before,
++                    StateAfter: after,
+                 }),
+             },
+-        }]);
+-        list.Close().map_err(e)?;
+-        queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().map_err(e)?)]);
++        };
++        const COLORS: [[f32; 4]; 4] = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
++        let started = std::time::Instant::now();
++        let mut frame = 0u64;
++        loop {
++            if frame > 0 {
++                let hr = wait_event(d, 0, 500, std::ptr::null(), 0, &mut token);
++                ensure!(hr == 0 && token != 0, "WaitFrameEventX (frame {frame}) hr={hr:#x} token={token}");
++            }
++            alloc.Reset().map_err(e)?;
++            list.Reset(&alloc, None).map_err(e)?;
++            if frame > 0 {
++                list.ResourceBarrier(&[transition(D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
++            }
++            let color = if seconds > 0.0 { COLORS[(started.elapsed().as_millis() / 500) as usize % COLORS.len()] } else { [0.1, 0.5, 0.9, 1.0] };
++            xslot::<ClearRtv>(&list, X_CLEAR_RENDER_TARGET_VIEW)(list.as_raw(), rtv, &color, 0, std::ptr::null());
++            // consoles want the back buffer in COMMON / PRESENT for PresentX
++            list.ResourceBarrier(&[transition(D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT)]);
++            list.Close().map_err(e)?;
++            queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().map_err(e)?)]);
+ 
+-        // plane 0: { u64 frame token; u32 resource count @8; ID3D12Resource** @0x10 }
+-        let resources = [bb.as_raw()];
+-        let mut plane = [0u8; 0x40];
+-        plane[..8].copy_from_slice(&token.to_le_bytes());
+-        plane[8..12].copy_from_slice(&1u32.to_le_bytes());
+-        plane[0x10..0x18].copy_from_slice(&(resources.as_ptr() as u64).to_le_bytes());
+-        let present: unsafe extern "system" fn(*mut c_void, u32, *const u8, *const u8) -> HRESULT = std::mem::transmute(slot(queue.as_raw(), 30));
+-        let hr = present(queue.as_raw(), 1, plane.as_ptr(), std::ptr::null());
+-        ensure!(hr == 0, "PresentX hr={hr:#x}");
+-        let (mut n, mut stats) = (1u32, [0u8; 0x40]);
+-        let hr = statistics(d, token, 0, &mut n, stats.as_mut_ptr());
+-        ensure!(hr == 0 && n == 1, "GetFrameStatisticsX hr={hr:#x} count={n}");
+-        let fence: ID3D12Fence = dev.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e)?;
+-        queue.Signal(&fence, 1).map_err(e)?;
+-        wait(&queue, &fence, 1)?;
++            // plane 0: { u64 frame token; u32 resource count @8; ID3D12Resource** @0x10 }
++            let resources = [bb.as_raw()];
++            let mut plane = [0u8; 0x40];
++            plane[..8].copy_from_slice(&token.to_le_bytes());
++            plane[8..12].copy_from_slice(&1u32.to_le_bytes());
++            plane[0x10..0x18].copy_from_slice(&(resources.as_ptr() as u64).to_le_bytes());
++            let hr = present(queue.as_raw(), 1, plane.as_ptr(), std::ptr::null());
++            ensure!(hr == 0, "PresentX (frame {frame}) hr={hr:#x}");
++            let (mut n, mut stats) = (1u32, [0u8; 0x40]);
++            let hr = statistics(d, token, 0, &mut n, stats.as_mut_ptr());
++            ensure!(hr == 0 && n == 1, "GetFrameStatisticsX (frame {frame}) hr={hr:#x} count={n}");
++            // the allocator and the back buffer are used again: the GPU finishes the frame first
++            frame += 1;
++            queue.Signal(&fence, frame).map_err(e)?;
++            wait(&queue, &fence, frame)?;
++            if started.elapsed().as_secs_f64() >= seconds {
++                break;
++            }
++        }
++        if seconds > 0.0 {
++            println!("xcl_testtitle: presented {frame} frames in {:.1} s", started.elapsed().as_secs_f64());
++        }
+         ensure!(set_interval(d, std::ptr::null_mut(), 0, 0, 0) >= 0, "stopping the frame clock");
+         Ok(())
+     }
+diff --git a/tests/testtitle/src/main.rs b/tests/testtitle/src/main.rs
+index d5ae267..5370a2e 100644
+--- a/tests/testtitle/src/main.rs
++++ b/tests/testtitle/src/main.rs
+@@ -698,6 +698,14 @@ fn main() {
+     check("MFPlat: MFResetDXGIDeviceManagerX resets IMFDXGIDeviceManager with the d3d12_xs device", gpu::mfplat_reset_dxgi_device_manager);
+     check("XAudio2: console flags/device, XMA2 & Opus voices decoded, PCM passes, callbacks", audio::xaudio2_console_voices);
+ 
++    // `--present-seconds N`: present every frame for N seconds at the end, to watch the screen
++    // of a port where the one frame above is gone before it can be seen (Wine on the PS5)
++    let args: Vec<String> = std::env::args().collect();
++    if let Some(at) = args.iter().position(|a| a == "--present-seconds") {
++        let seconds = args.get(at + 1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(10.0);
++        check("D3D12.X: PresentX every frame for --present-seconds", || gpu::present_x_for(seconds));
++    }
++
+     let failures = FAILURES.load(Ordering::SeqCst);
+     println!("xcl_testtitle: done, failures: {failures}");
+     std::process::exit(failures as i32);

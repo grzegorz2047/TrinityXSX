@@ -1,7 +1,7 @@
 From 33ce2ccf8dceacfe1d70aa50c6d591064c59fc88 Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 03:24:27 +0100
-Subject: [PATCH 4/4] D3D12.X: a GPU without feature level 12_0 is used at 11_0
+Subject: [PATCH 4/5] D3D12.X: a GPU without feature level 12_0 is used at 11_0
  before WARP
 
 The title's device (hle::d3d12x::real) and the launcher's GPU check

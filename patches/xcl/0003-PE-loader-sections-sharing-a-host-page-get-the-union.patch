@@ -1,7 +1,7 @@
 From 982dca12dc0386e6694089fb05eac83d682d440a Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 02:51:53 +0100
-Subject: [PATCH 3/4] PE loader: sections sharing a host page get the union of
+Subject: [PATCH 3/5] PE loader: sections sharing a host page get the union of
  their access
 
 Under Wine on the PS5 (prospero-win) the host has 16 KiB pages. The

@@ -49,7 +49,7 @@ id = xcl-testtitle
 name = XCL test title
 executable = C:\XCL\xcl.exe
 working_directory = C:\XCL
-arguments = run --in-process testtitle -- --hello
+arguments = run --in-process testtitle -- --hello --present-seconds 10
 dll_overrides = d3d12,d3d12core,dxgi,d3d11=n
 prefix = default
 runtime = wine-wow64
