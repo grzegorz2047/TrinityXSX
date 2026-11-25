@@ -44,8 +44,9 @@ Left as they are:
   of a buffer of its own, measured on an RTX 5090) does not help here, and neither did: a global
   enhanced barrier (SYNC_EXECUTE_INDIRECT / ACCESS_INDIRECT_ARGUMENT), a global aliasing barrier,
   one resource instead of two aliased ones, a DIRECT queue, and an explicit
-  COMMON → UNORDERED_ACCESS → INDIRECT_ARGUMENT sequence in plain D3D12 without XCL. Either the
-  driver or something common to all variants of the test; not fixed.
+  COMMON → UNORDERED_ACCESS → INDIRECT_ARGUMENT sequence in plain D3D12 without XCL. It still
+  fails on driver 621.40. Either the driver or something common to all variants of the test; not
+  fixed. It passes on vkd3d-proton on the same GPU.
 - RADV's `maxBufferSize` (4 GiB − 4) vs XCL's 4 GiB sparse windows: left as it is. vkd3d-proton
   warns and creates them; its sparse sizes are rounded up to 64 KiB, so a smaller D3D12 size
   would change nothing, and one tile less per window would leave unbacked holes in title
@@ -84,9 +85,13 @@ on the PS5's CPU), whole suite on vkd3d-proton + DXVK: **980 passed, 3 failed, 4
    `PS5 (radv 26.2.0)` (SM 6.8, DXR 1.1, descriptor buffer). Then the title faulted writing its
    own `.data`.
 3. Cause: the console has 16 KiB pages. The loader protected `.rdata` and `.data` at 4 KiB
-   granularity; both share a host page, the last VirtualProtect (`.rdata`, read-only) won. Found
-   from Wine's `+virtual` views and the faulting instruction (the fault address is the 16 KiB
-   host page). Fixed in `patches/xcl/0003`.
+   granularity, and they share a host page. prospero-win's Wine (patch 0974, read from its source,
+   not verified on the console) then write-protects the whole host page and single-steps writes
+   to the writable 4 KiB page; the 256th stepped write in one host page is reported as an access
+   violation at the host page's first read-only page – here 0x10015fc000, while the instruction
+   wrote `.data` at 0x10015fe068. Found from Wine's `+virtual` views and the faulting instruction.
+   Fixed in `patches/xcl/0003` (sections sharing a host page get the union of their access); its
+   commit message still says "the last VirtualProtect wins", which is not exactly what happens.
 4. With that fix the test title runs to the end on the console: **49 passed, 1 failed**. Passing
    there: the triangle rendered on the PS5 GPU and read back, PresentX and the frame clock,
    console device and command-list methods, sparse VRAM heaps and uploads, UMA windows, textures

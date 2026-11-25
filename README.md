@@ -13,7 +13,8 @@ XCL stays a Windows program. It runs on Vulkan through
 console's RADV driver. This repository holds the changes as patches on pinned upstream
 revisions, the scripts that build and package them, and the findings.
 
-Status: [docs/STATUS.md](docs/STATUS.md).
+Status: [docs/STATUS.md](docs/STATUS.md). Drafts for the upstream projects (not sent):
+[docs/upstream/](docs/upstream/).
 
 ## Layout
 
