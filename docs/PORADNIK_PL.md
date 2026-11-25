@@ -81,8 +81,8 @@ Możesz wskazać dowolny folder na PS5 bezpośrednio w aplikacji:
 | **Kwadrat (□)** | Zarządzaj folderami | Dodaj nowy folder | Anuluj |
 | **R1** | Edytuj ustawienia gry (`xcl.toml`) | — | — |
 | **OPTIONS** | Profil offline i język interfejsu (EN/PL/PT/ES) | — | — |
-| **L1** | Otwórz Web Companion i kod QR | — | — |
-| **Kliknięcie Touchpada** (lub **L3+R3**) | Otwórz/zamknij **Menu TrinityXSX** (działa także w trakcie gry: Wznów, Powrót do biblioteki, Klawiatura ekranowa, Wyjście do menu PS5) | Otwórz/zamknij Menu | Otwórz/zamknij Menu |
+| **L1** | Otwórz Web Companion i kod QR (logi, backup/przywracanie save'ów `.zip`, presety, `xcl.toml`) | — | — |
+| **Kliknięcie Touchpada** (lub **L3+R3**) | Otwórz/zamknij **Menu TrinityXSX** (pasek FPS/VRAM, Zrzut diagnostyki, Wznów, Powrót do biblioteki, Klawiatura ekranowa, Wyjście do menu PS5) | Otwórz/zamknij Menu | Otwórz/zamknij Menu |
 | **Trójkąt (Δ)** | Odśwież listę gier | Usuń folder z listy | Użyj bieżącego folderu |
 | **Kółko (O)** | Wyjście do menu PS5 | Powrót do biblioteki | Poziom wyżej |
 

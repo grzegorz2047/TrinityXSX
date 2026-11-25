@@ -20,9 +20,9 @@
 - **Standalone PS5 home-screen app (`PPSA83601.ffpkg`)** — MIT-licensed native launcher (`eboot.bin`) + bundled MIT one-shot elevation helper (`lapy.elf`) + self-seeding Wine prefix.
 - **Multi-folder game library & DualSense folder browser** — scans `C:\XCL\games`, `/data/xboxseries`, `/mnt/ext0..1/xboxseries`, `/mnt/usb0..1/xboxseries`, and any custom folder you add from the controller (`game_paths.txt`), with automatic background detection of newly copied games.
 - **Local cover art & game preview** — decodes PNG artwork straight from each game's `MicrosoftGame.config` (no internet needed), showing `TitleId`, version, config status, and save folder size.
-- **In-app per-game `xcl.toml` editor (`R1`)** — tune console model (Series S/X), RAM/UMA budgets, Direct DXIL, raytracing, offline mode, and diagnostic tracing straight from the DualSense.
-- **Phone / PC Web Companion & QR code (`L1`)** — scan the QR code on the same Wi-Fi to download a ready-to-attach `trinityxsx-logs.zip` for GitHub bug reports or edit `xcl.toml` and `game_paths.txt` from a browser.
-- **In-game DualSense Touchpad Quick Menu** — click the Touchpad (or `L3+R3`) anywhere in the library or inside a running Xbox game to Resume, Return to TrinityXSX Library, open the PS5 On-Screen Keyboard, or Exit to PS5 Home.
+- **In-app per-game `xcl.toml` editor & compatibility presets (`R1`)** — apply built-in `TitleId` / tuning presets (Recommended, Low-RAM 4 GB, DXC Shaders, Series X, Debug Trace) or tune RAM/UMA budgets, Direct DXIL, raytracing, and offline mode straight from the DualSense.
+- **Phone / PC Web Companion & QR code (`L1`)** — scan the QR code on the same Wi-Fi to download `trinityxsx-logs.zip` bug bundles, **back up and restore game saves (`.zip`)**, apply presets, or edit `xcl.toml` and `game_paths.txt` from a browser.
+- **In-game DualSense Touchpad Quick Menu** — click the Touchpad (or `L3+R3`) anywhere in the library or inside a running Xbox game to inspect live **FPS / frame-time / VRAM** telemetry, trigger a **1-tap diagnostic dump**, Resume, Return to TrinityXSX Library, open the PS5 On-Screen Keyboard, or Exit to PS5 Home.
 - **Offline profiles, multi-language UI (EN / PL / PT / ES), and 0-FPS loading stall diagnostics** — built to make testing new games and reporting bugs effortless.
 - **Verified gameplay:** XCL Test Title passes **51/51** on PS5; **Minecraft Preview 1.18.3064.0 (Scarlett)** runs offline at ~60 FPS with DualSense controls, 3D worlds, persistent saves, and audio ([docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md)).
 
@@ -56,9 +56,9 @@ Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_
 | Path | What |
 |---|---|
 | `pins.env` | Pinned upstream revisions, release tags, and verified SHA-256 checksums |
-| `patches/xcl/` | XCL patches (`0001`..`0020`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor, Web Companion QR, stall watchdog, profiles & i18n, Touchpad Quick Menu `PresentX` pause |
+| `patches/xcl/` | XCL patches (`0001`..`0021`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor & presets, Web Companion QR + save backup/restore, stall watchdog, profiles & i18n, Touchpad Quick Menu telemetry & `PresentX` pause |
 | `patches/vkd3d-proton/` | vkd3d-proton patches: extended D3D12 vtables (`VKD3D_VTBL_IS`), predicated buffer copies, mesh shaders without barycentrics |
-| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu overlay patches (`0001`..`0006`) |
+| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0007`) |
 | `standalone/` | MIT-licensed native PS5 launcher (`eboot.bin`), catalog/staging/UFS2 `.ffpkg` image builder, unit tests |
 | `configs/` | Clean example `game.example.xcl.toml`, tested Minecraft preset, and `trinityxsx-library.profile` |
 | `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`) |
@@ -85,7 +85,7 @@ For full standalone `PPSA83601.ffpkg` packaging steps, see [standalone/README.md
 ## CI, Releases & Upstream Sync
 
 - **`.github/workflows/ci.yml`** runs on `push`, `pull_request`, and `workflow_dispatch`: applies `patches/xcl/` and builds + tests XCL (`windows-2025`), applies `patches/vkd3d-proton/` and builds vkd3d-proton (MSYS2 UCRT64), runs `standalone` unit tests and verifies `patches/prospero-win/` on `ubuntu-24.04`, and assembles the PS5 package plus standalone `xcl-library.exe` artifacts. Each build is cached by its inputs.
-- **`.github/workflows/release.yml`** runs on `v*` tags (or manually via `workflow_dispatch`): builds all artifacts cleanly and publishes a GitHub Release with `xcl-library-<tag>.exe`, `TrinityXSX-prospero-win-<tag>.zip`, and `SHA256SUMS-<tag>.txt`.
+- **`.github/workflows/release.yml`** runs on `v*` tags (or manually via `workflow_dispatch`): builds XCL, vkd3d-proton, and the complete `fsck_ufs`-verified standalone **`PPSA83601-<tag>.ffpkg.zip`** (via [`tools/build-standalone-ffpkg.sh`](tools/build-standalone-ffpkg.sh)) and publishes a GitHub Release with `PPSA83601-<tag>.ffpkg.zip`, `xcl-library-<tag>.exe`, `TrinityXSX-prospero-win-<tag>.zip`, and `SHA256SUMS-<tag>.txt`.
 - **`.github/workflows/upstream-sync.yml`** + **`tools/sync_upstream.py`** keep dependencies current without breaking reproducible builds: every Monday (or locally via `python tools/sync_upstream.py --check` / `--apply`), it checks `xcl-dev/xcl`, `HansKristian-Work/vkd3d-proton` (+ `dxil-spirv`), `doitsujin/dxvk`, `microsoft/DirectXShaderCompiler`, `mpereiraesaa/prospero-win`, and `mpereiraesaa/PS5-Lapy-JB-Daemon`, tests our patch series against upstream `HEAD`, detects upstreamed patches, and opens/updates a `chore/upstream-sync` PR so CI verifies the updated `pins.env` before merging.
 
 ## Licences

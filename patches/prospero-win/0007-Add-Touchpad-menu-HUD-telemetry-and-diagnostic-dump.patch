@@ -1,0 +1,233 @@
+From 88be0dc97feb4676efd214f0cfbdcd577f719aae Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 17:37:41 +0100
+Subject: [PATCH] Add Touchpad menu live FPS/VRAM telemetry bar and Save
+ Diagnostic Dump
+
+---
+ native/wine64_main.c     | 42 ++++++++++++++++++++++++++++++++++++++--
+ src/pw_game_menu.c       | 27 ++++++++++++++++++++------
+ src/pw_game_menu.h       |  1 +
+ src/pw_launcher_render.c | 28 ++++++++++++++++++---------
+ src/pw_launcher_render.h |  2 +-
+ 5 files changed, 82 insertions(+), 18 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index dc69038..fe4ced2 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1518,6 +1518,8 @@ int main(int argc, char **argv)
+         static struct pw_title_menu menu_snapshot;
+         static int menu_drawn_open = 0;
+         static int menu_drawn_cursor = -1;
++        static char menu_telemetry[128] = "";
++        static char menu_notice[96] = "";
+         const PwPadPs5 *seen = &pad;
+         if (pad_read) {
+             uint32_t held = pad.core.previous_buttons, pressed = pad.core.pressed_edges,
+@@ -1535,12 +1537,48 @@ int main(int argc, char **argv)
+                 pressed = view.pressed;
+                 released = view.released;
+                 neutral = view.neutral;
++                if (!was_open && game_menu.open) {
++                    /* Refresh compact FPS/VRAM telemetry snapshot when opening menu. */
++                    menu_telemetry[0] = '\0';
++                    menu_notice[0] = '\0';
++                    char hud_path[256];
++                    snprintf(hud_path, sizeof(hud_path), "%s/hud_stats.txt", PW_WINE64_ROOT_DATA);
++                    int hfd = open(hud_path, O_RDONLY);
++                    if (hfd >= 0) {
++                        ssize_t n = read(hfd, menu_telemetry, sizeof(menu_telemetry) - 1);
++                        close(hfd);
++                        if (n > 0) {
++                            menu_telemetry[n] = '\0';
++                            for (ssize_t k = 0; k < n; k++) {
++                                if (menu_telemetry[k] == '\r' || menu_telemetry[k] == '\n') {
++                                    menu_telemetry[k] = '\0';
++                                    break;
++                                }
++                            }
++                        }
++                    }
++                }
+                 if (was_open && !game_menu.open) {
+                     menu_drawn_open = 0;
+                     menu_drawn_cursor = -1;
++                    menu_notice[0] = '\0';
+                     shown_sequence = 0; /* force GDI library repaint on resume */
+                 }
+-                if (view.action == PW_GAME_MENU_ACTION_KEYBOARD && osk_status == PW_OK) {
++                if (view.action == PW_GAME_MENU_ACTION_DUMP_DIAG) {
++                    char req_path[256];
++                    snprintf(req_path, sizeof(req_path), "%s/dump_diag.req", PW_WINE64_ROOT_DATA);
++                    int rfd = open(req_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++                    if (rfd >= 0) {
++                        (void)write(rfd, "1\n", 2);
++                        close(rfd);
++                        snprintf(menu_notice, sizeof(menu_notice),
++                                 "DIAGNOSTIC DUMP SAVED - DOWNLOAD VIA WEB COMPANION (L1)");
++                    } else {
++                        snprintf(menu_notice, sizeof(menu_notice), "CANNOT WRITE DIAGNOSTIC REQUEST");
++                    }
++                    PS5LOG_LOG("PW_WINE64 menu action=dump-diag");
++                    menu_drawn_open = 0; /* redraw menu with notice banner */
++                } else if (view.action == PW_GAME_MENU_ACTION_KEYBOARD && osk_status == PW_OK) {
+                     pw_osk_open(&osk);
+                 } else if (view.action == PW_GAME_MENU_ACTION_LIBRARY) {
+                     PS5LOG_LOG("PW_WINE64 menu action=library");
+@@ -1681,7 +1719,7 @@ int main(int argc, char **argv)
+                     frame_shown, PW_LAUNCHER_RENDER_WIDTH, PW_LAUNCHER_RENDER_HEIGHT,
+                     PW_LAUNCHER_RENDER_WIDTH * 4u, PW_WINE64_MAX_FRAME
+                 };
+-                if (pw_launcher_render_menu(&menu_snapshot, &menu_target) == PW_OK) {
++                if (pw_launcher_render_menu(&menu_snapshot, menu_telemetry, menu_notice, &menu_target) == PW_OK) {
+                     const PwPresentFrame menu_frame = {
+                         frame_shown, PW_LAUNCHER_RENDER_WIDTH, PW_LAUNCHER_RENDER_HEIGHT,
+                         PW_LAUNCHER_RENDER_WIDTH * 4u, PW_PRESENT_BGRX8
+diff --git a/src/pw_game_menu.c b/src/pw_game_menu.c
+index e08dcbb..332751e 100644
+--- a/src/pw_game_menu.c
++++ b/src/pw_game_menu.c
+@@ -2,17 +2,19 @@
+ #include "pw_game_menu.h"
+ #include <string.h>
+ 
+-enum { ACTION_NONE, ACTION_CLOSE, ACTION_LIBRARY, ACTION_KEYBOARD, ACTION_EXIT };
++enum { ACTION_NONE, ACTION_CLOSE, ACTION_DUMP_DIAG, ACTION_LIBRARY, ACTION_KEYBOARD, ACTION_EXIT };
+ typedef struct MenuLine { const char *text; int action; } MenuLine;
+ 
+ static const MenuLine with_keyboard[] = {
+     { "RESUME", ACTION_CLOSE },
++    { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+     { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+     { "ON-SCREEN KEYBOARD", ACTION_KEYBOARD },
+     { "EXIT TO PS5 HOME", ACTION_EXIT },
+ };
+ static const MenuLine without_keyboard[] = {
+     { "RESUME", ACTION_CLOSE },
++    { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+     { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+     { "EXIT TO PS5 HOME", ACTION_EXIT },
+ };
+@@ -83,12 +85,25 @@ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_
+             int count = 0;
+             const MenuLine *lines = lines_of(menu, &count);
+             switch (lines[menu->cursor].action) {
+-            case ACTION_KEYBOARD: view->action = PW_GAME_MENU_ACTION_KEYBOARD; break;
+-            case ACTION_LIBRARY:  view->action = PW_GAME_MENU_ACTION_LIBRARY; break;
+-            case ACTION_EXIT:     view->action = PW_GAME_MENU_ACTION_EXIT; break;
+-            default: break;
++            case ACTION_DUMP_DIAG:
++                view->action = PW_GAME_MENU_ACTION_DUMP_DIAG;
++                break;
++            case ACTION_KEYBOARD:
++                view->action = PW_GAME_MENU_ACTION_KEYBOARD;
++                menu->open = 0;
++                break;
++            case ACTION_LIBRARY:
++                view->action = PW_GAME_MENU_ACTION_LIBRARY;
++                menu->open = 0;
++                break;
++            case ACTION_EXIT:
++                view->action = PW_GAME_MENU_ACTION_EXIT;
++                menu->open = 0;
++                break;
++            default:
++                menu->open = 0;
++                break;
+             }
+-            menu->open = 0;
+         }
+     }
+     snapshot_of(menu, snapshot);
+diff --git a/src/pw_game_menu.h b/src/pw_game_menu.h
+index db3d32b..08d1fda 100644
+--- a/src/pw_game_menu.h
++++ b/src/pw_game_menu.h
+@@ -20,6 +20,7 @@ typedef struct PwGameMenu {
+ enum {
+     PW_GAME_MENU_ACTION_NONE = 0,
+     PW_GAME_MENU_ACTION_KEYBOARD,
++    PW_GAME_MENU_ACTION_DUMP_DIAG,
+     PW_GAME_MENU_ACTION_LIBRARY,
+     PW_GAME_MENU_ACTION_EXIT
+ };
+diff --git a/src/pw_launcher_render.c b/src/pw_launcher_render.c
+index 2c28ae0..0ddb3bd 100644
+--- a/src/pw_launcher_render.c
++++ b/src/pw_launcher_render.c
+@@ -330,7 +330,7 @@ int pw_launcher_navigate(PwLauncherScene *scene,PwLauncherAction action,uint32_t
+     return 0;
+ }
+ 
+-int pw_launcher_render_menu(const struct pw_title_menu *menu,const PwPresentTarget *target)
++int pw_launcher_render_menu(const struct pw_title_menu *menu,const char *telemetry,const char *notice,const PwPresentTarget *target)
+ {
+     if(!menu || !target || !target->pixels)return PW_ERR_PRECONDITION;
+     if(target->width!=W || target->height!=H || target->stride<(uint32_t)W*4u ||
+@@ -339,6 +339,7 @@ int pw_launcher_render_menu(const struct pw_title_menu *menu,const PwPresentTarg
+     const Canvas c={target->pixels,target->stride};
+     const uint32_t bg=rgb(14,23,29);
+     const uint32_t panel=rgb(24,37,44);
++    const uint32_t pill=rgb(16,28,34);
+     const uint32_t card=rgb(32,48,56);
+     const uint32_t card_sel=rgb(39,78,72);
+     const uint32_t mint=rgb(133,230,189);
+@@ -347,25 +348,34 @@ int pw_launcher_render_menu(const struct pw_title_menu *menu,const PwPresentTarg
+ 
+     fill(&c,0,0,W,H,bg);
+ 
+-    const int32_t pw=960,ph=640;
++    const int32_t pw=1040,ph=740;
+     const int32_t px=(W-pw)/2,py=(H-ph)/2;
+     rounded(&c,px,py,pw,ph,18,panel,panel);
+     fill(&c,px,py,pw,6,mint);
+ 
+     const char *heading=menu->title[0]?menu->title:"TRINITYXSX MENU";
+-    text(&c,px+54,py+48,heading,5,snow,pw-108);
+-    text(&c,px+54,py+104,"QUICK OVERLAY  -  GAME PAUSED",3,mint,pw-108);
++    text(&c,px+52,py+40,heading,5,snow,pw-104);
++
++    /* Live FPS / VRAM telemetry pill written by XCL (or LIBRARY / IDLE). */
++    const char *stats=(telemetry && telemetry[0])?telemetry:"LIBRARY / IDLE  -  GAME PAUSED";
++    rounded(&c,px+48,py+98,pw-96,46,8,pill,pill);
++    text(&c,px+66,py+112,stats,3,mint,pw-132);
+ 
+     uint32_t count=menu->lines>PW_TITLE_MENU_LINES?PW_TITLE_MENU_LINES:menu->lines;
+     for(uint32_t i=0;i<count;i++) {
+-        int32_t ry=py+168+(int32_t)i*92;
++        int32_t ry=py+166+(int32_t)i*84;
+         int selected=(int32_t)i==menu->selected;
+-        rounded(&c,px+48,ry,pw-96,76,10,selected?card_sel:card,selected?card_sel:card);
+-        if(selected)fill(&c,px+48,ry,8,76,mint);
+-        text(&c,px+80,ry+24,menu->line[i],4,selected?snow:muted,pw-160);
++        rounded(&c,px+48,ry,pw-96,70,10,selected?card_sel:card,selected?card_sel:card);
++        if(selected)fill(&c,px+48,ry,8,70,mint);
++        text(&c,px+80,ry+22,menu->line[i],4,selected?snow:muted,pw-160);
++    }
++
++    if(notice && notice[0]) {
++        rounded(&c,px+48,py+ph-120,pw-96,48,8,card_sel,card_sel);
++        text(&c,px+66,py+ph-106,notice,3,snow,pw-132);
+     }
+ 
+     const char *hint="D-PAD MOVE    X SELECT    O / TOUCHPAD RESUME";
+-    text(&c,px+54,py+ph-54,hint,3,muted,pw-108);
++    text(&c,px+52,py+ph-52,hint,3,muted,pw-104);
+     return PW_OK;
+ }
+diff --git a/src/pw_launcher_render.h b/src/pw_launcher_render.h
+index f31513c..81079a2 100644
+--- a/src/pw_launcher_render.h
++++ b/src/pw_launcher_render.h
+@@ -43,6 +43,6 @@ int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *targe
+ 
+ struct pw_title_menu;
+ /* Draws the TrinityXSX Touchpad quick menu centered in a 1920x1080 BGRX target. */
+-int pw_launcher_render_menu(const struct pw_title_menu *menu,const PwPresentTarget *target);
++int pw_launcher_render_menu(const struct pw_title_menu *menu,const char *telemetry,const char *notice,const PwPresentTarget *target);
+ 
+ #endif
+-- 
+2.48.1.windows.1
+
