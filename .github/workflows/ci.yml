@@ -1,0 +1,179 @@
+# Auxiliary CI: checks that the patches still apply to the pinned upstreams and build, runs XCL's
+# test suite on a Windows runner (no GPU: GPU tests print SKIPPED and pass; the test title's
+# end-to-end runs are skipped as in XCL's own CI, the runner has no Gaming Services and only the
+# Basic Render Driver), cross-builds the patched vkd3d-proton with MinGW and uploads the PS5
+# package. Nothing here gates anything, and it never talks to a console.
+#
+# Caching, so a run does only what its inputs changed:
+# - each build's outputs are cached under a key of exactly its inputs (pins.env, its patches,
+#   this file). On a hit the job restores them and skips the toolchain, the build and the tests:
+#   with the same inputs and no GPU they give the same result;
+# - XCL is built once, in the release profile, and its tests run on that build; rust-cache keeps
+#   the dependencies (the workspace crates rebuild: a fresh checkout has new file times);
+# - the package job clones nothing: the test title's data and the licences come with the
+#   artifacts, and DXVK / DXC downloads are cached by pins.env.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xcl:
+    name: XCL (Windows, no GPU)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Keep line endings as they are (the patches apply byte for byte)
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Outputs of these inputs, if built before
+        id: out
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: xcl-out-${{ hashFiles('pins.env', 'patches/xcl/**', '.github/workflows/ci.yml') }}
+
+      - name: Fetch XCL and apply patches/xcl
+        if: steps.out.outputs.cache-hit != 'true'
+        shell: bash
+        run: tools/setup-sources.sh --only xcl
+
+      - name: Rust (stable, MSVC)
+        if: steps.out.outputs.cache-hit != 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.out.outputs.cache-hit != 'true'
+        with:
+          workspaces: xcl -> target
+
+      - name: Build (release)
+        if: steps.out.outputs.cache-hit != 'true'
+        working-directory: xcl
+        run: cargo build --workspace --release
+
+      - name: Test (release build, GPU tests skip)
+        if: steps.out.outputs.cache-hit != 'true'
+        working-directory: xcl
+        run: cargo test --workspace --release -- --test-threads=4 --skip test_title_runs_
+
+      - name: Collect outputs
+        if: steps.out.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p out/xcl/target/release out/xcl/tests/data
+          cp xcl/target/release/{xcl.exe,xcl_testtitle.exe,testgame_mw.dll} out/xcl/target/release/
+          cp -r xcl/tests/data/testgame out/xcl/tests/data/
+          cp xcl/LICENSE out/xcl/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcl-release
+          path: out/
+          if-no-files-found: error
+
+  vkd3d-proton:
+    name: vkd3d-proton (MinGW cross build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Outputs of these inputs, if built before
+        id: out
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: vkd3d-out-${{ hashFiles('pins.env', 'patches/vkd3d-proton/**', 'patches/dxil-spirv/**', '.github/workflows/ci.yml') }}
+
+      - name: Toolchain
+        if: steps.out.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mingw-w64 mingw-w64-tools meson ninja-build glslang-tools
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          x86_64-w64-mingw32-gcc --version | head -1
+          meson --version
+
+      - name: Fetch vkd3d-proton and apply patches/vkd3d-proton, patches/dxil-spirv
+        if: steps.out.outputs.cache-hit != 'true'
+        run: tools/setup-sources.sh --only vkd3d
+
+      - name: Build (release, asserts off)
+        if: steps.out.outputs.cache-hit != 'true'
+        working-directory: vkd3d-proton
+        run: |
+          meson setup build-ndebug --cross-file build-win64.txt --buildtype release -Db_ndebug=true --strip
+          ninja -C build-ndebug
+
+      - name: Collect outputs
+        if: steps.out.outputs.cache-hit != 'true'
+        run: |
+          v=out/vkd3d-proton
+          mkdir -p $v/build-ndebug/libs/d3d12 $v/build-ndebug/libs/d3d12core $v/subprojects/dxil-spirv
+          cp vkd3d-proton/build-ndebug/libs/d3d12/d3d12.dll $v/build-ndebug/libs/d3d12/
+          cp vkd3d-proton/build-ndebug/libs/d3d12core/d3d12core.dll $v/build-ndebug/libs/d3d12core/
+          cp vkd3d-proton/LICENSE vkd3d-proton/COPYING $v/
+          cp vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT $v/subprojects/dxil-spirv/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vkd3d-proton
+          path: out/
+          if-no-files-found: error
+
+  package:
+    name: PS5 package (prospero-win)
+    needs: [xcl, vkd3d-proton]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            tools/dxvk
+            tools/dxc
+          key: deps-${{ hashFiles('pins.env') }}
+
+      - name: DXVK and DXC (checksums verified)
+        run: tools/fetch-deps.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: xcl-release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: vkd3d-proton
+
+      - name: Assemble
+        run: tools/make-ps5-package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcl-prospero-win
+          path: dist/prospero-win
+          if-no-files-found: error
