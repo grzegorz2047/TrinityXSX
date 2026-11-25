@@ -1,0 +1,219 @@
+From 33ce2ccf8dceacfe1d70aa50c6d591064c59fc88 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 03:24:27 +0100
+Subject: [PATCH 4/4] D3D12.X: a GPU without feature level 12_0 is used at 11_0
+ before WARP
+
+The title's device (hle::d3d12x::real) and the launcher's GPU check
+(preflight) asked each hardware adapter for feature level 12_0 only,
+then took WARP at 11_0. vkd3d-proton on the PS5's RADV (under
+prospero-win) refuses 12_0: the GPU has tiled resources tier 1 only
+("Feature level 0xc000 is not supported"). XCL then ran on "WARP
+(software renderer)", which DXVK's dxgi answered with the same GPU, so
+it worked by accident and was reported as WARP; on Windows the same
+fallback would have been the software renderer.
+
+gpu::adapter::create_device() now asks every adapter for 12_0, then
+every adapter for 11_0, then WARP, and both callers use it (they had
+the same loop copied). A device below 12_0 says so in its name and in
+the log. On a GPU that gives 12_0 nothing changes.
+
+Test: first_device() picks an adapter that gives only 11_0 (asked at
+12_0 first), and prefers a later adapter with 12_0 to an earlier one
+with 11_0.
+
+Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
+cargo test --workspace --no-fail-fast -- --test-threads=4: 976 passed,
+1 failed, 45 ignored, 23 SKIPPED; the failure is
+execute_indirect_reads_the_arguments_written_before_it, as on main on
+this GPU. Not yet run on the PS5.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/xcl/src/gpu/adapter.rs       | 40 +++++++++++++++++++++++++++++
+ crates/xcl/src/gpu/adapter_tests.rs | 25 +++++++++++++++++-
+ crates/xcl/src/hle/d3d12x/real.rs   | 26 +++++--------------
+ crates/xcl/src/preflight.rs         | 21 +++------------
+ 4 files changed, 73 insertions(+), 39 deletions(-)
+
+diff --git a/crates/xcl/src/gpu/adapter.rs b/crates/xcl/src/gpu/adapter.rs
+index cd0b61f..498204e 100644
+--- a/crates/xcl/src/gpu/adapter.rs
++++ b/crates/xcl/src/gpu/adapter.rs
+@@ -14,6 +14,7 @@
+ 
+ use std::fmt;
+ 
++use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_12_0};
+ use windows::Win32::Graphics::Dxgi::*;
+ 
+ /// The environment variable that overrides `d3d12_adapter`.
+@@ -149,6 +150,45 @@ pub fn candidates(factory: &IDXGIFactory6, sel: &Selector) -> Vec<(IDXGIAdapter1
+     hw.into_iter().enumerate().filter(|(i, _)| keep[*i]).map(|(_, a)| a).collect()
+ }
+ 
++/// The feature levels a hardware adapter is asked for, in this order: 12_0 (the console's), then
++/// 11_0. vkd3d-proton on the PS5's RADV gives only 11_0 (tiled resources tier 1); without the
++/// second level that GPU was passed over for WARP – DXVK's dxgi hands out the same GPU as WARP
++/// there, but on Windows WARP is the software renderer.
++pub const LEVELS: [D3D_FEATURE_LEVEL; 2] = [D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_0];
++
++/// The first `(adapter index, level, device)` that `create` gives: every adapter at the first
++/// level, then every adapter at the next one (a device at 12_0 on any adapter is preferred to
++/// one at 11_0 on a higher-performance one).
++pub fn first_device<A, L: Copy, D>(adapters: &[A], levels: &[L], mut create: impl FnMut(&A, L) -> Option<D>) -> Option<(usize, L, D)> {
++    levels.iter().find_map(|&l| adapters.iter().enumerate().find_map(|(i, a)| create(a, l).map(|d| (i, l, d))))
++}
++
++/// A D3D12 device and what it is.
++pub struct Device {
++    pub device: windows::Win32::Graphics::Direct3D12::ID3D12Device,
++    /// "<adapter> (<n> MiB VRAM)", ", feature level 11_0" when below 12_0; or "WARP (software renderer)"
++    pub name: String,
++    pub warp: bool,
++    pub level: D3D_FEATURE_LEVEL,
++}
++
++/// The device the title gets (`hle::d3d12x::real`) and the launcher's checks probe (`preflight`):
++/// the first of `adapters` at a level of `LEVELS` (`first_device`), else WARP at 11_0.
++pub fn create_device(factory: &IDXGIFactory6, adapters: &[(IDXGIAdapter1, DXGI_ADAPTER_DESC1)]) -> Result<Device, String> {
++    let found = first_device(adapters, &LEVELS, |(a, _), l| crate::gpu::agility::create_device(a, l).ok());
++    if let Some((i, level, device)) = found {
++        let desc = &adapters[i].1;
++        let mut name = format!("{} ({} MiB VRAM)", self::name(desc), desc.DedicatedVideoMemory >> 20);
++        if level != D3D_FEATURE_LEVEL_12_0 {
++            name.push_str(", feature level 11_0");
++        }
++        return Ok(Device { device, name, warp: false, level });
++    }
++    let warp: IDXGIAdapter = unsafe { factory.EnumWarpAdapter() }.map_err(|e| format!("WARP: {e}"))?;
++    let device = crate::gpu::agility::create_device(&warp, D3D_FEATURE_LEVEL_11_0).map_err(|e| format!("D3D12 device (WARP): {e}"))?;
++    Ok(Device { device, name: "WARP (software renderer)".into(), warp: true, level: D3D_FEATURE_LEVEL_11_0 })
++}
++
+ /// "`sel` matches no adapter (have: 0 = …, 1 = …)" – for logs and test skips.
+ pub fn no_match(factory: &IDXGIFactory6, sel: &Selector) -> String {
+     let have: Vec<String> = hardware(factory).iter().enumerate().map(|(i, (_, d))| format!("{i} = {}", name(d))).collect();
+diff --git a/crates/xcl/src/gpu/adapter_tests.rs b/crates/xcl/src/gpu/adapter_tests.rs
+index 70fc209..e8bbf1c 100644
+--- a/crates/xcl/src/gpu/adapter_tests.rs
++++ b/crates/xcl/src/gpu/adapter_tests.rs
+@@ -1,4 +1,4 @@
+-use super::{select_indices, Selector};
++use super::{first_device, select_indices, Selector, LEVELS};
+ 
+ #[test]
+ fn selector_parsing() {
+@@ -53,3 +53,26 @@ fn numeric_selector_falls_back_to_model_token_when_out_of_range() {
+     assert!(select_indices(&two, &Selector::parse("80")).is_empty());
+     assert_eq!(select_indices(&two, &Selector::parse("2080")), vec![0]);
+ }
++
++/// The PS5 under prospero-win: vkd3d-proton on its RADV refuses 12_0 and gives 11_0. That GPU is
++/// taken at 11_0 instead of nothing (WARP), and a GPU that gives 12_0 still wins over one
++/// listed before it that gives only 11_0.
++#[test]
++fn a_gpu_without_12_0_is_used_at_11_0_and_12_0_wins() {
++    use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_12_0};
++    assert_eq!(LEVELS, [D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_0]);
++    // "ps5" gives only 11_0, "rtx" any level, "none" nothing
++    fn create(a: &&'static str, l: D3D_FEATURE_LEVEL) -> Option<&'static str> {
++        (*a == "rtx" || (*a == "ps5" && l == D3D_FEATURE_LEVEL_11_0)).then_some(*a)
++    }
++    let mut asked = Vec::new();
++    let got = first_device(&["ps5"], &LEVELS, |a, l| {
++        asked.push((*a, l));
++        create(a, l)
++    });
++    assert_eq!(got, Some((0, D3D_FEATURE_LEVEL_11_0, "ps5")));
++    assert_eq!(asked, vec![("ps5", D3D_FEATURE_LEVEL_12_0), ("ps5", D3D_FEATURE_LEVEL_11_0)]);
++    assert_eq!(first_device(&["ps5", "rtx"], &LEVELS, create), Some((1, D3D_FEATURE_LEVEL_12_0, "rtx")));
++    assert_eq!(first_device(&["none"], &LEVELS, create), None);
++    assert_eq!(first_device(&[] as &[&'static str], &LEVELS, create), None);
++}
+diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
+index fed31e6..8e0bfe8 100644
+--- a/crates/xcl/src/hle/d3d12x/real.rs
++++ b/crates/xcl/src/hle/d3d12x/real.rs
+@@ -504,33 +504,19 @@ pub fn init() -> Result<String, String> {
+             }
+         }
+         let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(|e| format!("DXGI: {e}"))?;
+-        let mut device: Option<ID3D12Device> = None;
+-        let mut name = String::new();
+         let sel = crate::gpu::adapter::Selector::from_env_or(&cfg.d3d12_adapter);
++        let mut list = Vec::new();
+         if sel != crate::gpu::adapter::Selector::Warp {
+-            let mut list = crate::gpu::adapter::candidates(&factory, &sel);
++            list = crate::gpu::adapter::candidates(&factory, &sel);
+             if list.is_empty() {
+                 crate::xlog_warn!("D3D12: {} – using auto", crate::gpu::adapter::no_match(&factory, &sel));
+                 list = crate::gpu::adapter::candidates(&factory, &crate::gpu::adapter::Selector::Auto);
+             }
+-            for (adapter, desc) in list {
+-                if let Ok(dev) = crate::gpu::agility::create_device(&adapter, D3D_FEATURE_LEVEL_12_0) {
+-                    device = Some(dev);
+-                    name = format!("{} ({} MiB VRAM)", crate::gpu::adapter::name(&desc), desc.DedicatedVideoMemory >> 20);
+-                    break;
+-                }
+-            }
+         }
+-        let device = match device {
+-            Some(d) => d,
+-            None => {
+-                let warp: IDXGIAdapter = factory.EnumWarpAdapter().map_err(|e| format!("WARP: {e}"))?;
+-                let d = crate::gpu::agility::create_device(&warp, D3D_FEATURE_LEVEL_11_0)
+-                    .map_err(|e| format!("D3D12 device (WARP): {e}"))?;
+-                name = "WARP (software renderer)".into();
+-                d
+-            }
+-        };
++        let crate::gpu::adapter::Device { device, name, warp, level } = crate::gpu::adapter::create_device(&factory, &list)?;
++        if !warp && level != D3D_FEATURE_LEVEL_12_0 {
++            crate::xlog_warn!("D3D12: no adapter gives feature level 12_0 – {name}");
++        }
+         if debug {
+             // the debug layer's messages into XCL's log (they otherwise go to a debugger only)
+             if let Ok(q) = device.cast::<ID3D12InfoQueue1>() {
+diff --git a/crates/xcl/src/preflight.rs b/crates/xcl/src/preflight.rs
+index 230a29b..ab85908 100644
+--- a/crates/xcl/src/preflight.rs
++++ b/crates/xcl/src/preflight.rs
+@@ -100,34 +100,19 @@ pub fn checks(f: &Found) -> Vec<Check> {
+ /// choice and the same fallback to WARP as the D3D12 backend's device.
+ fn probe_gpu(setting: &str) -> Result<Gpu, String> {
+     use crate::gpu::adapter::{self, Selector};
+-    use windows::Win32::Graphics::Direct3D::*;
+     use windows::Win32::Graphics::Direct3D12::*;
+     use windows::Win32::Graphics::Dxgi::*;
+     unsafe {
+         let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(|e| format!("DXGI: {e}"))?;
+         let sel = Selector::from_env_or(setting);
+-        let mut found: Option<(ID3D12Device, String)> = None;
++        let mut list = Vec::new();
+         if sel != Selector::Warp {
+-            let mut list = adapter::candidates(&factory, &sel);
++            list = adapter::candidates(&factory, &sel);
+             if list.is_empty() {
+                 list = adapter::candidates(&factory, &Selector::Auto);
+             }
+-            for (a, desc) in list {
+-                if let Ok(dev) = crate::gpu::agility::create_device(&a, D3D_FEATURE_LEVEL_12_0) {
+-                    found = Some((dev, format!("{} ({} MiB VRAM)", adapter::name(&desc), desc.DedicatedVideoMemory >> 20)));
+-                    break;
+-                }
+-            }
+         }
+-        let warp = found.is_none();
+-        let (dev, name) = match found {
+-            Some(x) => x,
+-            None => {
+-                let w: IDXGIAdapter = factory.EnumWarpAdapter().map_err(|e| format!("WARP: {e}"))?;
+-                let d = crate::gpu::agility::create_device(&w, D3D_FEATURE_LEVEL_11_0).map_err(|e| format!("WARP: {e}"))?;
+-                (d, "WARP (software renderer)".into())
+-            }
+-        };
++        let adapter::Device { device: dev, name, warp, .. } = adapter::create_device(&factory, &list)?;
+         // the highest model asked for that the runtime knows; a lower one comes back if that is all
+         let mut shader_model = (0, 0);
+         for m in [D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_0] {

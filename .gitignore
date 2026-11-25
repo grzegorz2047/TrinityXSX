@@ -12,3 +12,5 @@
 /spirv-dump/
 *.log
 __pycache__/
+!/tools/vkcaps/
+/tools/vkcaps/*.exe

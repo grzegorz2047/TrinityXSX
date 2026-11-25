@@ -67,8 +67,10 @@ Left as they are:
 
 Open on the PS5:
 
-- vkd3d-proton refuses feature level 12_0 there (`Feature level 0xc000 is not supported`); XCL then
-  takes its WARP path, which DXVK maps to the console GPU, and labels the adapter "WARP".
+- vkd3d-proton refuses feature level 12_0 there (`Feature level 0xc000 is not supported`): XCL logs
+  "tiled resources tier 1", and vkd3d-proton needs tier 2 for 12_0. XCL then took its WARP path,
+  which DXVK maps to the console GPU. `patches/xcl/0004` asks the GPU for 11_0 before WARP (not yet
+  run on the console); `tools/vkcaps` prints which Vulkan feature tier 2 is missing.
 - vkd3d-proton disables mesh shaders (no fragment-shader barycentrics, its UE5 workaround); XCL
   needs them for NGG programs. vkd3d-proton has a per-executable opt-in list.
 - RADV's `maxBufferSize` is 4 GiB − 4; XCL's three sparse windows are 4 GiB buffers (vkd3d-proton
