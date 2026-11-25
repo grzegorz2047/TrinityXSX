@@ -1,0 +1,24 @@
+[package]
+name = "aether-drift"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Open-source Xbox Series X|S (Scarlett) 3D 1080p 60 FPS anti-gravity racer built in Rust + D3D12.X for TrinityXSX on PS5."
+
+[[bin]]
+name = "aether_drift"
+path = "src/main.rs"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[profile.release]
+opt-level = 3
+debug = 1
