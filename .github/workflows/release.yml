@@ -1,4 +1,5 @@
-# Build and publish a GitHub Release when pushing a v* tag or running manually.
+# Build and publish a complete GitHub Release (including standalone PPSA83601.ffpkg.zip)
+# when pushing a v* tag or running manually.
 name: Release
 
 on:
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: 'Release tag (e.g. v0.2.1)'
         required: true
         type: string
       prerelease:
@@ -27,6 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: python3 -m unittest standalone.test_standalone -v
+      - run: bash -n tools/build-standalone-ffpkg.sh
       - name: Verify patches/prospero-win apply cleanly
         run: |
           set -euo pipefail
@@ -157,11 +159,87 @@ jobs:
           path: out/
           if-no-files-found: error
 
-  publish:
-    name: Assemble & publish GitHub Release
+  standalone-ffpkg:
+    name: Build standalone PPSA83601.ffpkg
     needs: [xcl, vkd3d-proton, standalone]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install PS5 cross-build & Wine prefix toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 lld-18 llvm-18 \
+            mingw-w64 bison flex pkg-config zlib1g-dev \
+            wine64 wine zip unzip xz-utils
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            tools/dxvk
+            tools/dxc
+          key: deps-${{ hashFiles('pins.env') }}
+
+      - name: Restore cached PS5 Wine server, prefix seed & opus.dll
+        uses: actions/cache@v6
+        with:
+          path: .work/wine-cache
+          key: wine-cache-v1-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'standalone/native/build_prefix_seed.py') }}
+
+      - name: Fetch DXVK and DXC
+        run: tools/fetch-deps.sh
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: xcl-release
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vkd3d-proton
+
+      - name: Assemble XCL runtime & build PPSA83601.ffpkg
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          CONTENT_VERSION=$(python3 - "$TAG" <<'PY'
+          import re, sys
+          m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+          if m:
+              maj, minor, patch = (int(x) for x in m.groups())
+              print(f"{max(maj, 1):02d}.{minor:03d}.{patch:03d}")
+          else:
+              print("01.000.016")
+          PY
+          )
+          echo "Building PPSA83601.ffpkg for ${TAG} (contentVersion=${CONTENT_VERSION})"
+          tools/make-ps5-package.sh
+          bash tools/build-standalone-ffpkg.sh \
+            --xcl-runtime dist/prospero-win/prefix/drive_c/XCL \
+            --library-exe xcl/target/release/xcl.exe \
+            --content-version "$CONTENT_VERSION" \
+            --wine-cache .work/wine-cache \
+            --output dist/ffpkg/PPSA83601.ffpkg
+          (cd dist/ffpkg && zip -6 "PPSA83601-${TAG}.ffpkg.zip" PPSA83601.ffpkg)
+          rm -f dist/ffpkg/PPSA83601.ffpkg
+          ls -lh dist/ffpkg/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: standalone-ffpkg
+          path: dist/ffpkg/PPSA83601-*.ffpkg.zip
+          if-no-files-found: error
+
+  publish:
+    name: Assemble & publish GitHub Release
+    needs: [xcl, vkd3d-proton, standalone, standalone-ffpkg]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -185,6 +263,11 @@ jobs:
         with:
           name: vkd3d-proton
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: standalone-ffpkg
+          path: release-assets
+
       - name: Assemble release assets
         run: |
           set -euo pipefail
@@ -194,42 +277,62 @@ jobs:
           mkdir -p release-assets
           cp xcl/target/release/xcl.exe "release-assets/xcl-library-${TAG}.exe"
           (cd dist/prospero-win && zip -qr "../../release-assets/TrinityXSX-prospero-win-${TAG}.zip" .)
-          (cd release-assets && sha256sum "xcl-library-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt")
+          (
+            cd release-assets
+            sha256sum "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
+          )
           cat "release-assets/SHA256SUMS-${TAG}.txt"
 
-      - name: Create or update GitHub Release
+      - name: Create or update GitHub Release (with retry)
         run: |
           set -euo pipefail
           . ./pins.env
+          XCL_LAST=$(ls patches/xcl/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
+          PW_LAST=$(ls patches/prospero-win/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
           cat > release-notes.md <<EOF
           ## TrinityXSX ${RELEASE_TAG}
 
-          Experimental Xbox Series X|S (GDK) compatibility runtime and standalone PS5 home-screen library (\`PPSA83601\`).
+          Experimental Xbox Series X|S (GDK / Scarlett) compatibility runtime and standalone PS5 home-screen library (\`PPSA83601\`).
 
           ### Included CI-built assets
-          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary (multi-folder \`game_paths.txt\`, DualSense folder browser, Minecraft Preview controller/audio/save fixes). Copy to \`/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe\` to update an existing standalone install.
+          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — complete standalone PS5 home-screen app (\`fsck_ufs\` verified). Extract \`PPSA83601.ffpkg\` to \`/mnt/ext1/PPSA83601.ffpkg\` and mount with ShadowMountPlus.
+          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary. Copy to \`/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe\` for fast runtime-only updates.
           - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle with all third-party licenses.
-          - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for CI-built assets.
+          - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for all release assets.
 
           ### Pinned upstream revisions
-          - **XCL:** \`${XCL_REV}\` (+ patches \`0001\`..\`0017\`)
+          - **XCL:** \`${XCL_REV}\` (+ patches \`0001\`..\`${XCL_LAST}\`)
           - **vkd3d-proton:** \`${VKD3D_REV}\` (dxil-spirv \`${DXIL_SPIRV_REV}\`)
           - **DXVK:** \`v${DXVK_VERSION}\`
           - **DXC:** \`${DXC_TAG}\`
-          - **prospero-win:** \`${PROSPERO_WIN_TAG}\` (\`${PROSPERO_WIN_REV}\`)
+          - **prospero-win:** \`${PROSPERO_WIN_TAG}\` (\`${PROSPERO_WIN_REV}\` + patches \`0001\`..\`${PW_LAST}\`)
+          - **PS5-Lapy-JB-Daemon:** \`${LAPY_REV}\`
 
           No games, keys, BIOS, or console SDK files are included.
           EOF
 
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" release-assets/* --clobber
-          else
-            PRERELEASE_FLAG="--prerelease"
-            if [ "${{ inputs.prerelease }}" = "false" ]; then
-              PRERELEASE_FLAG=""
+          publish_once() {
+            if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+              gh release upload "${RELEASE_TAG}" release-assets/* --clobber
+            else
+              PRERELEASE_FLAG="--prerelease"
+              if [ "${{ inputs.prerelease }}" = "false" ]; then
+                PRERELEASE_FLAG=""
+              fi
+              gh release create "${RELEASE_TAG}" release-assets/* \
+                --title "TrinityXSX ${RELEASE_TAG}" \
+                --notes-file release-notes.md \
+                $PRERELEASE_FLAG
             fi
-            gh release create "${RELEASE_TAG}" release-assets/* \
-              --title "TrinityXSX ${RELEASE_TAG}" \
-              --notes-file release-notes.md \
-              $PRERELEASE_FLAG
-          fi
+          }
+
+          for attempt in 1 2 3 4; do
+            if publish_once; then
+              exit 0
+            fi
+            delay=$((attempt * 15))
+            echo "GitHub Release API attempt ${attempt} failed; retrying in ${delay}s..." >&2
+            sleep "$delay"
+          done
+          echo "Failed to publish release ${RELEASE_TAG} after 4 attempts" >&2
+          exit 1

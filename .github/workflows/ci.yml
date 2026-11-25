@@ -14,6 +14,7 @@ on:
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
       - tools/make-ps5-package.sh
+      - tools/build-standalone-ffpkg.sh
       - tools/sync_upstream.py
       - .github/workflows/ci.yml
   pull_request:
@@ -24,9 +25,15 @@ on:
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
       - tools/make-ps5-package.sh
+      - tools/build-standalone-ffpkg.sh
       - tools/sync_upstream.py
       - .github/workflows/ci.yml
   workflow_dispatch:
+    inputs:
+      build_ffpkg:
+        description: 'Also build and verify full standalone PPSA83601.ffpkg'
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,8 +53,10 @@ jobs:
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
 
-      - name: Syntax-check tools/sync_upstream.py
-        run: python3 -m py_compile tools/sync_upstream.py
+      - name: Syntax-check tools/sync_upstream.py & standalone build scripts
+        run: |
+          python3 -m py_compile tools/sync_upstream.py standalone/native/build_launcher.py standalone/native/build_prefix_seed.py
+          bash -n tools/build-standalone-ffpkg.sh
 
       - name: Verify patches/prospero-win apply cleanly to pinned prospero-win
         run: |
@@ -234,4 +243,69 @@ jobs:
         with:
           name: trinityxsx-release-bundle
           path: dist/release-bundle
+          if-no-files-found: error
+
+  standalone-ffpkg:
+    name: Standalone PPSA83601.ffpkg (optional / dispatch)
+    if: github.event_name == 'workflow_dispatch' && inputs.build_ffpkg == true
+    needs: [xcl, vkd3d-proton, standalone]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install PS5 cross-build & Wine prefix toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 lld-18 llvm-18 \
+            mingw-w64 bison flex pkg-config zlib1g-dev \
+            wine64 wine zip unzip xz-utils
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            tools/dxvk
+            tools/dxc
+          key: deps-${{ hashFiles('pins.env') }}
+
+      - name: Restore cached PS5 Wine server, prefix seed & opus.dll
+        uses: actions/cache@v6
+        with:
+          path: .work/wine-cache
+          key: wine-cache-v1-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'standalone/native/build_prefix_seed.py') }}
+
+      - name: Fetch DXVK and DXC
+        run: tools/fetch-deps.sh
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: xcl-release
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vkd3d-proton
+
+      - name: Assemble XCL runtime & build PPSA83601.ffpkg
+        run: |
+          set -euo pipefail
+          tools/make-ps5-package.sh
+          bash tools/build-standalone-ffpkg.sh \
+            --xcl-runtime dist/prospero-win/prefix/drive_c/XCL \
+            --library-exe xcl/target/release/xcl.exe \
+            --content-version 01.000.016 \
+            --wine-cache .work/wine-cache \
+            --output dist/ffpkg/PPSA83601.ffpkg
+          (cd dist/ffpkg && zip -6 PPSA83601-ci.ffpkg.zip PPSA83601.ffpkg)
+          rm -f dist/ffpkg/PPSA83601.ffpkg
+          ls -lh dist/ffpkg/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: standalone-ffpkg-ci
+          path: dist/ffpkg/PPSA83601-ci.ffpkg.zip
           if-no-files-found: error

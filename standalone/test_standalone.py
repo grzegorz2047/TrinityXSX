@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from .catalog import ManifestError, read_game, scan
+from .native.build_prefix_seed import CONSOLE_CPU, CPU_KEY, PC_CPU, rewrite_system_reg, sanitize_symlinks
 from .stage import RUNNER_EXECUTABLE, RUNTIME_FILES, profile_text, stage
 
 
@@ -113,6 +114,19 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual((library_output / "sce_sys/icon0.png").read_bytes(), icon.read_bytes())
         self.assertEqual((library_output / "profiles/profiles.lst").read_text(), "trinityxsx-library.profile\n")
         self.assertFalse((runner / RUNNER_EXECUTABLE).exists())
+
+    def test_prefix_seed_registry_rewrite_preserves_other_sections(self):
+        reg = (
+            b"WINE REGISTRY Version 2\n\n"
+            b"[Software\\\\Microsoft\\\\Other]\n" + PC_CPU + b"\n\n"
+            + CPU_KEY + b"\n" + PC_CPU + b"\n\n"
+            b"[Software\\\\Trailing]\n@=\"keep\"\n"
+        )
+        rewritten = rewrite_system_reg(reg)
+        self.assertIn(CPU_KEY + b"\n" + CONSOLE_CPU, rewritten)
+        self.assertIn(b"[Software\\\\Microsoft\\\\Other]\n" + PC_CPU, rewritten)
+        self.assertIn(b"[Software\\\\Trailing]\n@=\"keep\"", rewritten)
+        sanitize_symlinks(self.root / "games")
 
 
 if __name__ == "__main__":
