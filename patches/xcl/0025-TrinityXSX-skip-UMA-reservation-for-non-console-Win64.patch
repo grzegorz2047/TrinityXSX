@@ -1,0 +1,48 @@
+From af971184885e459ed984bdfa6471fc8ae898479d Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 23:55:20 +0100
+Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console Win64
+ PE titles
+
+- Honor XCL_NO_UMA in gpu::uma::get() to skip sparse/coherent UMA window allocation
+- Automatically set XCL_NO_UMA=1 in host_main for Win64 PE titles without console DLL imports,
+  freeing ~1 GiB of PS5 unified memory for native Vulkan apps such as Godot
+---
+ crates/xcl/src/gpu/uma.rs | 4 ++++
+ crates/xcl/src/host.rs    | 5 ++++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/crates/xcl/src/gpu/uma.rs b/crates/xcl/src/gpu/uma.rs
+index 7592d04..ddb8b92 100644
+--- a/crates/xcl/src/gpu/uma.rs
++++ b/crates/xcl/src/gpu/uma.rs
+@@ -850,6 +850,10 @@ impl Uma {
+ pub fn get() -> Option<&'static Uma> {
+     GLOBAL
+         .get_or_init(|| {
++            if std::env::var_os("XCL_NO_UMA").is_some() {
++                crate::xlog_info!("UMA: disabled (XCL_NO_UMA) – plain allocations");
++                return None;
++            }
+             let mb = std::env::var("XCL_UMA_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2048);
+             let req = configured_runtime_windows();
+             let coherent = coherent_hint_for(req);
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index 1afe11a..17d3929 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -59,7 +59,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+         {
+             boot.config.graphics = "null".into();
+         }
+-        crate::xlog_info!("non-console Win64 PE detected: disabling unused D3D12.X UMA and PresentX stall watchdog");
++        if std::env::var_os("XCL_NO_UMA").is_none() {
++            std::env::set_var("XCL_NO_UMA", "1");
++        }
++        crate::xlog_info!("non-console Win64 PE detected: disabling unused D3D12.X, UMA and PresentX stall watchdog");
+     }
+     crate::debug_tools::init(&boot.config);
+     crate::hle::netoff::install_getnameinfo_guard();
+-- 
+2.48.1.windows.1
+
