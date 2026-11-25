@@ -1,0 +1,24 @@
+[package]
+name = "neon-void"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Open-source Xbox Series X|S (Scarlett) 60 FPS twin-stick neon arcade shooter & D3D12.X/DualSense/XAudio2/PLS demo for TrinityXSX on PS5."
+
+[[bin]]
+name = "neon_void"
+path = "src/main.rs"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[profile.release]
+opt-level = 3
+debug = 1

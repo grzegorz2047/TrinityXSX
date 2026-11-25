@@ -24,7 +24,7 @@
 - **Phone / PC Web Companion & QR code (`L1`)** — scan the QR code on the same Wi-Fi to download `trinityxsx-logs.zip` bug bundles, **back up and restore game saves (`.zip`)**, apply presets, or edit `xcl.toml` and `game_paths.txt` from a browser.
 - **In-game DualSense Touchpad Quick Menu** — click the Touchpad (or `L3+R3`) anywhere in the library or inside a running Xbox game to inspect live **FPS / frame-time / VRAM** telemetry, trigger a **1-tap diagnostic dump**, Resume, Return to TrinityXSX Library, open the PS5 On-Screen Keyboard, or Exit to PS5 Home.
 - **Offline profiles, multi-language UI (EN / PL / PT / ES), and 0-FPS loading stall diagnostics** — built to make testing new games and reporting bugs effortless.
-- **Verified gameplay:** XCL Test Title passes **51/51** on PS5; **Minecraft Preview 1.18.3064.0 (Scarlett)** runs offline at ~60 FPS with DualSense controls, 3D worlds, persistent saves, and audio ([docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md)).
+- **Verified gameplay:** XCL Test Title passes **51/51** on PS5; **Minecraft Preview 1.18.3064.0 (Scarlett)** runs offline at ~60 FPS with DualSense controls, 3D worlds, persistent saves, and audio ([docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md)); and **[NEON VOID XSX](samples/neon-void/README.md)** — an original MIT-licensed open-source 60 FPS Scarlett twin-stick neon arcade shooter & VRAM stress benchmark built in Rust — is included right in this repo for legal testing.
 
 ## Supported PS5 Firmware & Console Requirements
 
