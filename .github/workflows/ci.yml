@@ -12,15 +12,30 @@
 # - XCL is built once, in the release profile, and its tests run on that build; rust-cache keeps
 #   the dependencies (the workspace crates rebuild: a fresh checkout has new file times);
 # - the package job clones nothing: the test title's data and the licences come with the
-#   artifacts, and DXVK / DXC downloads are cached by pins.env.
+#   artifacts, and DXVK / DXC downloads are cached by pins.env;
+# - a push that changes none of the jobs' inputs starts no run (`paths` below).
 name: CI
 
+# Only what the jobs read starts a run: docs, the PS5 tools (vk-backend, ftp_*, pdbsym, vkcaps)
+# and anything else do not.
 on:
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '**.md']
+    paths:
+      - pins.env
+      - patches/**
+      - tools/setup-sources.sh
+      - tools/fetch-deps.sh
+      - tools/make-ps5-package.sh
+      - .github/workflows/ci.yml
   pull_request:
-    paths-ignore: ['docs/**', '**.md']
+    paths:
+      - pins.env
+      - patches/**
+      - tools/setup-sources.sh
+      - tools/fetch-deps.sh
+      - tools/make-ps5-package.sh
+      - .github/workflows/ci.yml
   workflow_dispatch:
 
 permissions:
