@@ -1,0 +1,24 @@
+Subject: [PATCH] Skip Wine server config directory owner check on PS5
+
+--- /dev/null
++++ b/wine/patches/0997-server-ps5-skip-config-dir-ownership.patch
+@@ -0,0 +1,19 @@
++Subject: [PATCH] server: skip config directory ownership check on PS5
++
++Patches 0110, 0111 and 0580 already skip Unix uid checks on PS5 because the
++console is single-user and files uploaded via FTP have uid 0 while an
++unelevated title runs as uid 1. Skip the remaining config_dir owner check in
++create_server_dir() for the same reason.
++
++--- a/server/request.c
+++++ b/server/request.c
++@@ -974,7 +974,9 @@
++         fatal_error( "open %s: %s\n", config_dir, strerror( errno ));
++     if (fstat( config_dir_fd, &st ) == -1)
++         fatal_error( "stat %s: %s\n", config_dir, strerror( errno ));
+++#ifndef __PROSPERO__  /* one user; its file systems do not keep unix owners */
++     if (st.st_uid != getuid())
++         fatal_error( "%s is not owned by you\n", config_dir );
+++#endif
++ 
++     /* create the base directory if needed */

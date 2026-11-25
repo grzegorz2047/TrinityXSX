@@ -1,0 +1,543 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 25 Nov 2026 10:40:00 +0100
+Subject: [PATCH] TrinityXSX: scan and launch Xbox Series games from a library
+
+Scan game folders at startup and on refresh. Show Scarlett titles in a
+controller-friendly window, select an entry, and run its manifest's executable
+in the current Wine process. Preserve existing configs and seed offline PS5
+settings on first launch. Provide a read-only command to inspect the catalog.
+
+diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
+index f6e5a61..c887a5d 100644
+--- a/crates/xcl/src/lib.rs
++++ b/crates/xcl/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod host;
+ pub mod insn;
+ pub mod inspect;
+ pub mod launcher;
++pub mod library;
+ pub mod loader;
+ pub mod modules;
+ pub mod pe;
+diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
+index 5ee51fe..0bd467b 100644
+--- a/crates/xcl/src/main.rs
++++ b/crates/xcl/src/main.rs
+@@ -4,6 +4,8 @@ use std::ffi::c_void;
+ use std::path::PathBuf;
+ use std::sync::atomic::Ordering;
+ 
++mod library_menu;
++
+ /// Our own TLS callback: ntdll calls it for every thread start/exit in the process.
+ /// In host mode it initialises the game's static TLS for the new thread and forwards
+ /// the notification to the game's TLS callbacks / DllMains.
+@@ -27,6 +29,8 @@ Usage:
+   xcl run --in-process <game folder | file.exe> [-- game arguments]
+       The same, with the game in this process instead of a child (for runtimes with one
+       process per program, such as Wine on the PS5).
++  xcl library <games folder> [--list]
++      TrinityXSX library for unpacked Scarlett game folders. --list prints the catalog.
+   xcl inspect <file.exe|file.dll> [--json]
+       Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
+   xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
+@@ -62,6 +66,9 @@ fn main() {
+ 
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     let code = match args.first().map(String::as_str) {
++        Some("library") if args.len() == 2 || (args.len() == 3 && args[2] == "--list") => {
++            library_menu::run(PathBuf::from(&args[1]), args.len() == 3)
++        }
+         Some("run") if args.len() >= 2 && !(args[1] == "--in-process" && args.len() < 3) => {
+             let in_process = args[1] == "--in-process";
+             let target = if in_process { 2 } else { 1 };
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -208,6 +208,12 @@
+ Console WASAPI requests rejected with `E_INVALIDARG` are retried without the extra
+ `0x01000000` stream flag used by FMOD's GameCore output. Accepted requests, other flags,
+ and device/format errors retain the system audio client's behavior.
++
++`xcl library <games folder>` opens the TrinityXSX catalog for unpacked Scarlett
++games. It scans on open and refresh, selects the executable from `MicrosoftGame.config`,
++creates an initial offline PS5 configuration on first launch and runs the game in
++the same process. The folder and existing title configurations can be reused by
++`xcl run`. `--list` prints the detected games without opening the menu.
+ 
+ - **DXC:** 1.8 or newer is recommended, from the
+   [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+diff --git a/crates/xcl/Cargo.toml b/crates/xcl/Cargo.toml
+--- a/crates/xcl/Cargo.toml
++++ b/crates/xcl/Cargo.toml
+@@ -46,6 +46,7 @@
+ version = "0.61"
+ features = [
+     "Win32_Foundation",
++    "Win32_Graphics_Gdi",
+     "Win32_Security",
+     "Win32_Storage_FileSystem",
+     "Win32_System_Diagnostics_Debug",
+diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/xcl/src/library.rs
+@@ -0,0 +1,198 @@
++//! Game folder discovery and initial configuration for TrinityXSX.
++
++use std::fs::{self, File, OpenOptions};
++use std::io::{self, Read, Write};
++use std::path::{Component, Path, PathBuf};
++
++use crate::{config::Config, launcher};
++
++#[derive(Debug)]
++pub struct Game {
++    pub name: String,
++    pub identity: String,
++    pub version: String,
++    pub executable: PathBuf,
++}
++
++struct Metadata {
++    name: String,
++    identity: String,
++    version: String,
++    executable: String,
++}
++
++fn attribute(xml: &str, tag: &str, key: &str) -> Option<String> {
++    launcher::xml_attrs(xml, tag, key).into_iter().next()
++}
++
++fn metadata(raw: &[u8]) -> Result<Metadata, &'static str> {
++    let xml = launcher::decode_game_config(raw).ok_or("unsupported manifest encoding")?;
++    let identity = attribute(&xml, "Identity", "Name").ok_or("missing Identity Name")?;
++    if identity.is_empty() || identity.len() > 50 || !identity.as_bytes()[0].is_ascii_alphanumeric()
++        || !identity.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
++        || identity.ends_with('.')
++    {
++        return Err("invalid package identity");
++    }
++    let mut choices = Vec::new();
++    for (start, _) in xml.match_indices("<Executable") {
++        let Some(end) = xml[start..].find('>') else { continue };
++        let tag = &xml[start..start + end + 1];
++        if !attribute(tag, "Executable", "TargetDeviceFamily").is_some_and(|s| s.eq_ignore_ascii_case("Scarlett"))
++            || attribute(tag, "Executable", "IsDevOnly").is_some_and(|s| s.eq_ignore_ascii_case("true") || s == "1")
++        {
++            continue;
++        }
++        if let Some(name) = attribute(tag, "Executable", "Name") {
++            let default = attribute(tag, "Executable", "Id").is_some_and(|s| s.eq_ignore_ascii_case("Game"));
++            choices.push((default, name));
++        }
++    }
++    if choices.iter().any(|(default, _)| *default) {
++        choices.retain(|(default, _)| *default);
++    }
++    let [(_, executable)] = choices.as_slice() else { return Err("expected one Scarlett game executable") };
++    let path = Path::new(executable);
++    if executable.contains([':', '\0']) || !path.components().all(|c| matches!(c, Component::Normal(_)))
++        || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
++    {
++        return Err("invalid executable path");
++    }
++    let name = attribute(&xml, "ShellVisuals", "DefaultDisplayName")
++        .map(|name| name.trim().to_owned())
++        .filter(|name| !name.is_empty() && !name.starts_with("ms-resource:"))
++        .unwrap_or_else(|| identity.clone());
++    Ok(Metadata {
++        name,
++        identity,
++        version: attribute(&xml, "Identity", "Version").unwrap_or_default(),
++        executable: executable.clone(),
++    })
++}
++
++fn from_folder(folder: &Path) -> Result<Game, String> {
++    let manifest = fs::read_dir(folder).map_err(|e| e.to_string())?.flatten()
++        .find(|entry| entry.file_name().eq_ignore_ascii_case("MicrosoftGame.config"))
++        .ok_or("missing MicrosoftGame.config")?;
++    if !manifest.file_type().is_ok_and(|kind| kind.is_file()) {
++        return Err("manifest must be a regular file".into());
++    }
++    let mut bytes = Vec::new();
++    const LIMIT: usize = 256 * 1024;
++    File::open(manifest.path()).and_then(|file| file.take((LIMIT + 1) as u64).read_to_end(&mut bytes))
++        .map_err(|e| e.to_string())?;
++    if bytes.len() > LIMIT {
++        return Err("manifest exceeds 256 KiB".into());
++    }
++    let info = metadata(&bytes)?;
++    let executable = folder.join(&info.executable).canonicalize().map_err(|e| e.to_string())?;
++    if !executable.starts_with(folder) || !executable.is_file() {
++        return Err("executable is outside the game folder or missing".into());
++    }
++    Ok(Game { name: info.name, identity: info.identity, version: info.version, executable })
++}
++
++pub fn scan(root: &Path) -> io::Result<(Vec<Game>, usize)> {
++    let root = root.canonicalize()?;
++    let mut games = Vec::new();
++    let mut skipped = 0;
++    for entry in fs::read_dir(root)?.flatten() {
++        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
++            continue;
++        }
++        match from_folder(&entry.path()) {
++            Ok(game) => games.push(game),
++            Err(error) => {
++                skipped += 1;
++                eprintln!("TrinityXSX: skipped {} ({error})", entry.file_name().to_string_lossy());
++            }
++        }
++    }
++    games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.executable.cmp(&b.executable)));
++    Ok((games, skipped))
++}
++
++fn default_config(identity: &str) -> Config {
++    let mut config = Config {
++        device_type: "lockhart".into(),
++        console_type_raw: 5,
++        title_memory_mb: 6144,
++        coherent_mb: 1024,
++        raytracing: "off".into(),
++        keyboard_mouse: false,
++        direct_dxil: "all".into(),
++        network: false,
++        window_width: 1920,
++        window_height: 1080,
++        window_pos: "0,0".into(),
++        ..Config::default()
++    };
++    if identity.eq_ignore_ascii_case("Microsoft.MinecraftBeta") {
++        config.gamertag = "PS5Player".into();
++        config.user_id = 2533274790395905;
++        config.title_memory = "standard".into();
++        config.pls_mb = 2048;
++        config.uma_mb = 2048;
++    }
++    config
++}
++
++fn write_initial_config(path: &Path, config: &Config) -> io::Result<()> {
++    let body = toml::to_string(config).map_err(io::Error::other)?;
++    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
++        Ok(file) => file,
++        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
++        Err(error) => return Err(error),
++    };
++    if let Err(error) = file.write_all(body.as_bytes()) {
++        drop(file);
++        let _ = fs::remove_file(path);
++        return Err(error);
++    }
++    Ok(())
++}
++
++pub fn prepare(game: &Game) -> Result<(), String> {
++    let (_, _, title) = launcher::resolve_target(&game.executable)?;
++    if !crate::inspect::console_imports(&game.executable).is_some_and(|imports| !imports.is_empty()) {
++        return Err("the selected executable is not an Xbox Series PE program".into());
++    }
++    let dir = launcher::data_root().join(title);
++    fs::create_dir_all(&dir).and_then(|_| write_initial_config(&dir.join("xcl.toml"), &default_config(&game.identity)))
++        .map_err(|e| format!("{}: {e}", dir.display()))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn ignores_other_platforms_and_developer_entries() {
++        let raw = br#"<Game><Identity Name="Example.Game" Version="1.0.0.0"/>
++            <ShellVisuals DefaultDisplayName="Example &amp; Friends"/>
++            <Executable Name="desktop.exe" Id="Game" TargetDeviceFamily="Desktop"/>
++            <Executable Name="tools.exe" TargetDeviceFamily="Scarlett" IsDevOnly="true"/>
++            <Executable Name="game.exe" Id="Game" TargetDeviceFamily="Scarlett"/>
++            </Game>"#;
++        let selected = metadata(raw).unwrap();
++        assert_eq!(selected.executable, "game.exe");
++        assert_eq!(selected.name, "Example & Friends");
++        assert_eq!(selected.version, "1.0.0.0");
++    }
++
++    #[test]
++    fn refuses_paths_outside_the_game() {
++        let raw = br#"<Game><Identity Name="Example.Game"/>
++            <Executable Name="..\outside.exe" TargetDeviceFamily="Scarlett"/></Game>"#;
++        assert!(metadata(raw).is_err());
++    }
++
++    #[test]
++    fn existing_configuration_is_preserved() {
++        let path = std::env::temp_dir().join(format!("xcl-library-{}.toml", std::process::id()));
++        fs::write(&path, "network = true\n").unwrap();
++        write_initial_config(&path, &default_config("Microsoft.MinecraftBeta")).unwrap();
++        assert_eq!(fs::read_to_string(&path).unwrap(), "network = true\n");
++        fs::remove_file(path).unwrap();
++    }
++}
+diff --git a/crates/xcl/src/library_menu.rs b/crates/xcl/src/library_menu.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/xcl/src/library_menu.rs
+@@ -0,0 +1,254 @@
++//! TrinityXSX's controller-friendly library window. It closes before in-process launch.
++
++use std::path::PathBuf;
++use std::ptr::{null, null_mut};
++
++use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
++use windows_sys::Win32::Graphics::Gdi::*;
++use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
++use windows_sys::Win32::UI::WindowsAndMessaging::*;
++
++use xcl::library::{self, Game};
++
++const ROWS: usize = 6;
++const ACCEPT: u16 = 0x1000;
++const BACK: u16 = 0x2000;
++const REFRESH: u16 = 0x8000;
++const UP: u16 = 0x0001;
++const DOWN: u16 = 0x0002;
++type ReadPad = unsafe extern "system" fn(u32, *mut PadState) -> u32;
++
++#[repr(C)]
++#[derive(Default)]
++struct PadState {
++    packet: u32,
++    buttons: u16,
++    triggers: [u8; 2],
++    sticks: [i16; 4],
++}
++
++struct Menu {
++    root: PathBuf,
++    games: Vec<Game>,
++    selected: usize,
++    previous: Option<u16>,
++    chosen: Option<PathBuf>,
++    status: String,
++    read_pad: Option<ReadPad>,
++}
++
++impl Menu {
++    fn scan(&mut self) {
++        let before = self.games.get(self.selected).map(|game| game.executable.clone());
++        match library::scan(&self.root) {
++            Ok((games, skipped)) => {
++                self.games = games;
++                self.selected = before.and_then(|path| self.games.iter().position(|game| game.executable == path)).unwrap_or(0);
++                self.status = if skipped == 0 { String::new() } else { format!("Skipped folders: {skipped}") };
++            }
++            Err(error) => {
++                self.games.clear();
++                self.selected = 0;
++                self.status = format!("Cannot read games folder: {error}");
++            }
++        }
++        println!("TrinityXSX: {} game(s) in {}", self.games.len(), self.root.display());
++    }
++
++    fn input(&mut self, buttons: u16) -> bool {
++        if buttons & BACK != 0 {
++            return true;
++        }
++        if buttons & REFRESH != 0 {
++            self.scan();
++        }
++        if buttons & UP != 0 {
++            self.selected = self.selected.saturating_sub(1);
++        }
++        if buttons & DOWN != 0 && self.selected + 1 < self.games.len() {
++            self.selected += 1;
++        }
++        if buttons & ACCEPT != 0 {
++            if let Some(game) = self.games.get(self.selected) {
++                match library::prepare(game) {
++                    Ok(()) => {
++                        self.chosen = Some(game.executable.clone());
++                        return true;
++                    }
++                    Err(error) => self.status = format!("Cannot start game: {error}"),
++                }
++            }
++        }
++        false
++    }
++
++    unsafe fn pad_buttons(&mut self) -> u16 {
++        let mut state = PadState::default();
++        if !self.read_pad.is_some_and(|read| read(0, &mut state) == 0) {
++            return 0;
++        }
++        let buttons = state.buttons;
++        let pressed = self.previous.map_or(0, |previous| buttons & !previous);
++        self.previous = Some(buttons);
++        pressed
++    }
++}
++
++const fn rgb(r: u32, g: u32, b: u32) -> u32 { r | (g << 8) | (b << 16) }
++
++unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
++    let brush = CreateSolidBrush(color);
++    FillRect(dc, &rect, brush);
++    DeleteObject(brush);
++}
++
++unsafe fn text(dc: HDC, value: &str, mut rect: RECT, size: i32, weight: i32, color: u32) {
++    if value.is_empty() {
++        return;
++    }
++    let font = CreateFontW(-size, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, super::wide("Segoe UI").as_ptr());
++    let old = SelectObject(dc, font);
++    SetBkMode(dc, TRANSPARENT as i32);
++    SetTextColor(dc, color);
++    let text = super::wide(value);
++    DrawTextW(dc, text.as_ptr(), (text.len() - 1) as i32, &mut rect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
++    SelectObject(dc, old);
++    DeleteObject(font);
++}
++
++unsafe fn paint(window: HWND, menu: &Menu) {
++    let mut ps: PAINTSTRUCT = std::mem::zeroed();
++    let dc = BeginPaint(window, &mut ps);
++    let mut client: RECT = std::mem::zeroed();
++    GetClientRect(window, &mut client);
++    fill(dc, client, rgb(14, 23, 29));
++    let scale = |vertical: i32| (vertical * client.bottom / 1080).max(1);
++    let left = client.right / 12;
++    let right = client.right - left;
++    let region = |x, y, h| RECT { left: x, top: scale(y), right, bottom: scale(y + h) };
++    let snow = rgb(238, 247, 248);
++    let muted = rgb(178, 199, 203);
++    let mint = rgb(133, 230, 189);
++
++    text(dc, "TrinityXSX", region(left, 64, 84), scale(65), 700, snow);
++    text(dc, &format!("Game library  ·  {}", menu.games.len()), region(left, 152, 52), scale(30), 400, mint);
++    if menu.games.is_empty() {
++        text(dc, "Drop an Xbox Series game folder here", region(left, 350, 64), scale(40), 600, snow);
++        text(dc, &menu.root.display().to_string(), region(left, 425, 52), scale(25), 400, muted);
++        text(dc, "Refresh to scan again", region(left, 485, 52), scale(25), 400, muted);
++    }
++    let first = (menu.selected / ROWS) * ROWS;
++    for (i, game) in menu.games.iter().enumerate().skip(first).take(ROWS) {
++        let top = 220 + ((i - first) as i32) * 106;
++        let selected = i == menu.selected;
++        fill(dc, region(left, top, 94), if selected { rgb(39, 78, 72) } else { rgb(28, 42, 49) });
++        if selected {
++            let mut rail = region(left, top, 94);
++            rail.right = left + scale(6);
++            fill(dc, rail, mint);
++        }
++        let inset = left + scale(26);
++        text(dc, &game.name, region(inset, top + 8, 47), scale(34), 600, snow);
++        text(dc, &format!("{}  ·  {}", game.identity, game.version), region(inset, top + 51, 38), scale(23), 400, muted);
++    }
++    text(dc, &menu.status, region(left, 892, 42), scale(25), 400, mint);
++    text(dc, "D-pad  Select     X  Play     Triangle  Refresh     Circle  Back", region(left, 958, 44), scale(27), 600, snow);
++    EndPaint(window, &ps);
++}
++
++unsafe extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
++    if msg == WM_DESTROY {
++        PostQuitMessage(0);
++        return 0;
++    }
++    let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Menu;
++    let Some(menu) = pointer.as_mut() else { return DefWindowProcW(window, msg, wparam, lparam) };
++    let pressed = match msg {
++        WM_PAINT => {
++            paint(window, menu);
++            return 0;
++        }
++        WM_TIMER => menu.pad_buttons(),
++        WM_KEYDOWN => match wparam {
++            0x26 => UP, 0x28 => DOWN, 0x0d => ACCEPT, 0x1b => BACK, 0x52 => REFRESH,
++            _ => 0,
++        },
++        _ => return DefWindowProcW(window, msg, wparam, lparam),
++    };
++    if pressed != 0 {
++        if menu.input(pressed) {
++            DestroyWindow(window);
++        } else {
++            InvalidateRect(window, null(), 0);
++        }
++    }
++    0
++}
++
++fn choose(root: PathBuf) -> Result<Option<PathBuf>, String> {
++    let read_pad = unsafe {
++        super::system_proc("xinput1_4.dll", "XInputGetState").or_else(|| super::system_proc("xinput1_3.dll", "XInputGetState"))
++            .map(|proc| std::mem::transmute::<usize, ReadPad>(proc))
++    };
++    let mut menu = Menu { root, games: Vec::new(), selected: 0, previous: None, chosen: None, status: String::new(), read_pad };
++    menu.scan();
++    unsafe {
++        let class = super::wide("TrinityXSXLibrary");
++        let instance = GetModuleHandleW(null());
++        let desc = WNDCLASSW {
++            style: CS_HREDRAW | CS_VREDRAW,
++            lpfnWndProc: Some(window_proc),
++            hInstance: instance,
++            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
++            lpszClassName: class.as_ptr(),
++            ..std::mem::zeroed()
++        };
++        if RegisterClassW(&desc) == 0 {
++            return Err(std::io::Error::last_os_error().to_string());
++        }
++        let title = super::wide("TrinityXSX");
++        let window = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_POPUP, 0, 0,
++            GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
++            null_mut(), null_mut(), instance, null());
++        if window.is_null() {
++            return Err(std::io::Error::last_os_error().to_string());
++        }
++        SetWindowLongPtrW(window, GWLP_USERDATA, &mut menu as *mut Menu as isize);
++        ShowWindow(window, SW_SHOW);
++        SetTimer(window, 1, 25, None);
++        println!("TrinityXSX: library window opened (XInput={})", read_pad.is_some());
++        let mut message: MSG = std::mem::zeroed();
++        while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
++            TranslateMessage(&message);
++            DispatchMessageW(&message);
++        }
++    }
++    Ok(menu.chosen)
++}
++
++pub fn run(root: PathBuf, list: bool) -> i32 {
++    if list {
++        match library::scan(&root) {
++            Ok((games, skipped)) => {
++                for game in games {
++                    println!("{}\t{}\t{}\t{}", game.name, game.identity, game.version, game.executable.display());
++                }
++                println!("Skipped folders: {skipped}");
++                return 0;
++            }
++            Err(error) => {
++                eprintln!("TrinityXSX: {error}");
++                return 2;
++            }
++        }
++    }
++    match std::thread::spawn(move || choose(root)).join() {
++        Ok(Ok(Some(executable))) => {
++            println!("TrinityXSX: starting {}", executable.display());
++            xcl::launcher::run_with(&executable, &[], true)
++        }
++        Ok(Ok(None)) => 0,
++        Ok(Err(error)) => { eprintln!("TrinityXSX: {error}"); 2 }
++        Err(_) => { eprintln!("TrinityXSX: library thread ended unexpectedly"); 2 }
++    }
++}

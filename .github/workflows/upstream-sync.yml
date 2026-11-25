@@ -1,0 +1,72 @@
+# Weekly check against all pinned upstream repositories and binary releases.
+# Applies our patch series to the latest upstream HEAD; when patches apply cleanly
+# (or can be dropped because upstream merged them), opens/updates a PR so CI tests
+# the new pins before merging. Conflicts are reported without breaking main.
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Open/update PR with clean upstream updates'
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Check upstream repositories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream commits and test patches
+        run: |
+          set -euo pipefail
+          FLAG="--apply"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.apply }}" = "false" ]; then
+            FLAG="--check"
+          fi
+          python3 tools/sync_upstream.py $FLAG --report upstream-report.md --json upstream-report.json
+          cat upstream-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update PR if pins.env or patches changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet pins.env patches/; then
+            echo "No clean upstream updates to apply."
+            exit 0
+          fi
+          BRANCH="chore/upstream-sync"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add pins.env patches/
+          git commit -m "chore(deps): sync pinned upstream revisions"
+          git push --force origin "$BRANCH"
+
+          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q '[0-9]'; then
+            PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+            gh pr edit "$PR_NUM" --body-file upstream-report.md
+          else
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore(deps): sync pinned upstream revisions" \
+              --body-file upstream-report.md
+          fi

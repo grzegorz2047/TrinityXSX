@@ -31,8 +31,10 @@ if [ -z "$only" ] || [ "$only" = vkd3d ]; then
     [ "$(git -C "$dest/vkd3d-proton/subprojects/dxil-spirv" rev-parse HEAD)" = "$DXIL_SPIRV_REV" ] ||
       { echo "dxil-spirv is not at $DXIL_SPIRV_REV" >&2; exit 1; }
     git -C "$dest/vkd3d-proton" am -q "$root"/patches/vkd3d-proton/*.patch
-    git -C "$dest/vkd3d-proton/subprojects/dxil-spirv" am -q "$root"/patches/dxil-spirv/*.patch
-    git -C "$dest/vkd3d-proton" log --oneline -n 1
-    git -C "$dest/vkd3d-proton/subprojects/dxil-spirv" log --oneline -n "$(ls "$root"/patches/dxil-spirv/*.patch | wc -l)"
+    if compgen -G "$root/patches/dxil-spirv/*.patch" >/dev/null; then
+      git -C "$dest/vkd3d-proton/subprojects/dxil-spirv" am -q "$root"/patches/dxil-spirv/*.patch
+      git -C "$dest/vkd3d-proton/subprojects/dxil-spirv" log --oneline -n "$(ls "$root"/patches/dxil-spirv/*.patch | wc -l)"
+    fi
+    git -C "$dest/vkd3d-proton" log --oneline -n "$(ls "$root"/patches/vkd3d-proton/*.patch | wc -l)"
   fi
 fi

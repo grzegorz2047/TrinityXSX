@@ -1,7 +1,7 @@
-From 6850da1c460b3cfa3892a92e5561e6f99cc62f80 Mon Sep 17 00:00:00 2001
+From 33513aaa0bbacf72c0d69f4d4361393503aee2ed Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 04:46:20 +0100
-Subject: [PATCH] vkd3d: Honour predication for buffer copies.
+Subject: [PATCH 2/3] vkd3d: Honour predication for buffer copies.
 
 D3D12 predicates CopyBufferRegion and CopyResource, but
 VK_EXT_conditional_rendering does not apply to transfer commands, so
@@ -35,10 +35,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 libs/vkd3d/shaders/cs_copy_buffer.comp
 
 diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
-index 61c9afe..de8f321 100644
+index f38195d..5d0398e 100644
 --- a/libs/vkd3d/command.c
 +++ b/libs/vkd3d/command.c
-@@ -7283,6 +7283,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearState(d3d12_command_list_i
+@@ -7290,6 +7290,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearState(d3d12_command_list_i
      d3d12_command_list_check_render_pass_validation(list, "ClearState called within a render pass.\n", false);
  
      d3d12_command_list_end_current_render_pass(list, false);
@@ -47,7 +47,7 @@ index 61c9afe..de8f321 100644
      d3d12_command_list_reset_api_state(list, pipeline_state);
  }
  
-@@ -9432,6 +9434,88 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+@@ -9453,6 +9455,88 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
      d3d12_command_list_check_compute_barrier(list);
  }
  
@@ -136,7 +136,7 @@ index 61c9afe..de8f321 100644
  static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_list_iface *iface,
          ID3D12Resource *dst, UINT64 dst_offset, ID3D12Resource *src, UINT64 src_offset, UINT64 byte_count)
  {
-@@ -9484,7 +9568,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
+@@ -9505,7 +9589,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
  
      d3d12_command_list_mark_copy_buffer_write(list, copy_info.dstBuffer, buffer_copy.dstOffset, buffer_copy.size,
              !!(dst_resource->flags & VKD3D_RESOURCE_RESERVED));
@@ -152,7 +152,7 @@ index 61c9afe..de8f321 100644
  
      VKD3D_BREADCRUMB_COMMAND(COPY);
  }
-@@ -11276,7 +11367,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
+@@ -11322,7 +11413,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
  
          d3d12_command_list_mark_copy_buffer_write(list, copy_info.dstBuffer, vk_buffer_copy.dstOffset, vk_buffer_copy.size,
                  !!(dst_resource->flags & VKD3D_RESOURCE_RESERVED));
@@ -169,10 +169,10 @@ index 61c9afe..de8f321 100644
      else
      {
 diff --git a/libs/vkd3d/meson.build b/libs/vkd3d/meson.build
-index 873a89f..4cc7913 100644
+index 2ed3fc3..c74debf 100644
 --- a/libs/vkd3d/meson.build
 +++ b/libs/vkd3d/meson.build
-@@ -21,6 +21,7 @@ vkd3d_shaders =[
+@@ -19,6 +19,7 @@ vkd3d_shaders =[
    'shaders/cs_resolve_predicate.comp',
    'shaders/cs_resolve_query.comp',
  
@@ -291,10 +291,10 @@ index 0000000..51e0dbe
 +  }
 +}
 diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
-index 8fe8c2d..36ec4b1 100644
+index 036694b..bde3e8a 100644
 --- a/libs/vkd3d/vkd3d_private.h
 +++ b/libs/vkd3d/vkd3d_private.h
-@@ -5004,12 +5004,23 @@ struct vkd3d_predicate_resolve_args
+@@ -5058,12 +5058,23 @@ struct vkd3d_predicate_resolve_args
      VkBool32 invert;
  };
  
@@ -428,7 +428,7 @@ index abfc422..f87c9a0 100644
  {
      D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameters[3];
 diff --git a/tests/d3d12_tests.h b/tests/d3d12_tests.h
-index 432028a..058549e 100644
+index ebab07f..b10016e 100644
 --- a/tests/d3d12_tests.h
 +++ b/tests/d3d12_tests.h
 @@ -260,6 +260,7 @@ decl_test(test_queue_wait);
@@ -439,3 +439,6 @@ index 432028a..058549e 100644
  decl_test(test_bufinfo_instruction_dxbc);
  decl_test(test_bufinfo_instruction_dxil);
  decl_test(test_write_buffer_immediate);
+-- 
+2.56.1
+

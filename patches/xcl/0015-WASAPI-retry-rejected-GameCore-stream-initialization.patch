@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 25 Nov 2026 10:03:00 +0100
+Subject: [PATCH] WASAPI: retry rejected GameCore stream initialization
+
+FMOD's GameCore backend initializes two probe clients successfully, but
+its final stream has flags 0x01040000. Wine rejects the additional bit
+with E_INVALIDARG, after which FMOD stops all clients and emits no audio.
+
+Patch the system audio client's shared Initialize slot, preserving the
+original call. Retry only E_INVALIDARG requests containing 0x01000000,
+removing that bit and returning the real retry result. Keep all other
+arguments, accepted requests and unrelated errors unchanged. Pin the
+implementation module and release the setup COM objects/apartment.
+
+Includes a regression test that fails with pass-through initialization.
+
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -204,6 +204,10 @@
+ 
+ Built-in task queue monitors are notified for submissions through every queue sharing
+ their port, including composite queues, so a manual dispatcher can wake for shared work.
++
++Console WASAPI requests rejected with `E_INVALIDARG` are retried without the extra
++`0x01000000` stream flag used by FMOD's GameCore output. Accepted requests, other flags,
++and device/format errors retain the system audio client's behavior.
+ 
+ - **DXC:** 1.8 or newer is recommended, from the
+   [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+diff --git a/crates/xcl/Cargo.toml b/crates/xcl/Cargo.toml
+index c3b23a1..ec535ae 100644
+--- a/crates/xcl/Cargo.toml
++++ b/crates/xcl/Cargo.toml
+@@ -35,6 +35,8 @@ features = [
+     "Win32_Media_MediaFoundation",
+     "Win32_Security",
+     "Win32_System_Com",
++    "Win32_System_Com_StructuredStorage",
++    "Win32_System_Variant",
+     "Win32_System_LibraryLoader",
+     "Win32_System_Threading",
+     "Win32_UI_WindowsAndMessaging",
+diff --git a/crates/xcl/src/hle/mod.rs b/crates/xcl/src/hle/mod.rs
+index abea3ae..a090bb8 100644
+--- a/crates/xcl/src/hle/mod.rs
++++ b/crates/xcl/src/hle/mod.rs
+@@ -25,6 +25,7 @@ pub mod netoff;
+ pub mod opus;
+ pub mod playstation;
+ pub mod user;
++pub mod wasapi;
+ pub mod xaudio2;
+ pub mod xma2;
+ pub mod xg;
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index 9dde1cd..7d4fde0 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -126,6 +126,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     crate::stubs::init_db(&boot.config.stub_returns);
+     crate::hle::init(&boot.config);
+     crate::hle::kernelx::fine_timer();
++    crate::hle::wasapi::install();
+     crate::loader::set_cache_dir(boot.cache_dir());
+     let mut dirs = vec![boot.game_root.clone()];
+     if let Some(p) = boot.exe_path.parent() {
+diff --git a/crates/xcl/src/hle/wasapi.rs b/crates/xcl/src/hle/wasapi.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/xcl/src/hle/wasapi.rs
+@@ -0,0 +1,148 @@
++//! WASAPI compatibility for console clients. FMOD's GameCore backend passes bit 0x01000000
++//! to IAudioClient::Initialize; Wine rejects it before creating a stream. Only retry that
++//! rejected request without the extra bit; preserve accepted requests and all other flags.
++
++use std::ffi::c_void;
++use std::sync::{Mutex, Once};
++
++use crate::util::{E_INVALIDARG, HRESULT};
++
++const INITIALIZE: usize = 3;
++const CONSOLE_STREAM_FLAG: u32 = 0x0100_0000;
++type Initialize = unsafe extern "system" fn(*mut c_void, u32, u32, i64, i64, *const c_void, *const c_void) -> HRESULT;
++static ORIGINALS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
++
++unsafe extern "system" fn initialize(
++    this: *mut c_void, mode: u32, flags: u32, duration: i64, period: i64,
++    format: *const c_void, session: *const c_void,
++) -> HRESULT {
++    let vt = *(this as *const usize);
++    let original = ORIGINALS.lock().unwrap().iter().find(|&&(v, _)| v == vt).map(|&(_, f)| f);
++    let Some(original) = original else { return 0x8000_FFFFu32 as i32 };
++    let call: Initialize = std::mem::transmute(original);
++    let hr = call(this, mode, flags, duration, period, format, session);
++    if hr == E_INVALIDARG && flags & CONSOLE_STREAM_FLAG != 0 {
++        let retried = call(this, mode, flags & !CONSOLE_STREAM_FLAG, duration, period, format, session);
++        static LOGGED: Once = Once::new();
++        LOGGED.call_once(|| crate::xlog_info!("WASAPI: Initialize rejected flags {flags:#x}; retry without {CONSOLE_STREAM_FLAG:#x} -> {:#x}", retried as u32));
++        retried
++    } else {
++        hr
++    }
++}
++
++unsafe fn patch_client(client: *mut c_void) -> bool {
++    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN};
++    use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE};
++    let vt = *(client as *const *mut usize);
++    let slot = vt.add(INITIALIZE);
++    let mut originals = ORIGINALS.lock().unwrap();
++    if originals.iter().any(|&(v, _)| v == vt as usize) {
++        return true;
++    }
++    let original = slot.read();
++    // The client is released after installation; keep its implementation loaded for the hook.
++    let mut module = std::ptr::null_mut();
++    if GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++        original as *const u16, &mut module) == 0 {
++        return false;
++    }
++    let mut protection = 0;
++    if VirtualProtect(slot as *const c_void, std::mem::size_of::<usize>(), PAGE_READWRITE, &mut protection) == 0 {
++        return false;
++    }
++    originals.push((vt as usize, original));
++    slot.write(initialize as usize);
++    VirtualProtect(slot as *const c_void, std::mem::size_of::<usize>(), protection, &mut protection);
++    true
++}
++
++/// Install on the system audio client's shared vtable without starting a stream.
++pub fn install() {
++    static INSTALLED: Once = Once::new();
++    INSTALLED.call_once(|| unsafe {
++        use windows::core::Interface;
++        use windows::Win32::Media::Audio::{eConsole, eRender, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator};
++        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
++        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
++        let installed = (|| {
++            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
++            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
++            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ok()?;
++            Some(patch_client(client.as_raw()))
++        })().unwrap_or(false);
++        if initialized {
++            CoUninitialize();
++        }
++        if installed {
++            crate::xlog_info!("WASAPI: console stream flag compatibility installed");
++        } else {
++            crate::xlog_info!("WASAPI: compatibility hook unavailable (no default audio client or writable vtable)");
++        }
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::util::S_OK;
++
++    #[repr(C)]
++    struct Client {
++        vtable: *mut usize,
++        calls: Vec<u32>,
++        accepts_extra: bool,
++        error: HRESULT,
++    }
++
++    unsafe extern "system" fn system_initialize(
++        this: *mut c_void, mode: u32, flags: u32, duration: i64, period: i64,
++        format: *const c_void, session: *const c_void,
++    ) -> HRESULT {
++        assert_eq!((mode, duration, period, format as usize, session as usize), (0, 300000, 100000, 0x1230, 0x4560));
++        let client = &mut *(this as *mut Client);
++        client.calls.push(flags);
++        if client.error != S_OK {
++            client.error
++        } else if flags & 0x0200_0000 != 0 || (!client.accepts_extra && flags & CONSOLE_STREAM_FLAG != 0) {
++            E_INVALIDARG
++        } else {
++            S_OK
++        }
++    }
++
++    unsafe fn invoke(client: &mut Client, flags: u32) -> HRESULT {
++        let call: Initialize = std::mem::transmute(*client.vtable.add(INITIALIZE));
++        call(client as *mut Client as *mut c_void, 0, flags, 300000, 100000, 0x1230 as _, 0x4560 as _)
++    }
++
++    #[test]
++    fn rejected_console_initialize_retries_real_client_without_losing_flags_or_errors() {
++        unsafe {
++            // Keep the test vtable alive because the hook registry retains its address.
++            let vtable = Box::leak(Box::new([0, 0, 0, system_initialize as usize])).as_mut_ptr();
++            let mut client = Client { vtable, calls: Vec::new(), accepts_extra: false, error: S_OK };
++            let flags = CONSOLE_STREAM_FLAG | 0x40000;
++            assert_eq!(invoke(&mut client, flags), E_INVALIDARG);
++            client.calls.clear();
++            assert!(patch_client(&mut client as *mut Client as *mut c_void));
++            assert_eq!(invoke(&mut client, flags), S_OK);
++            assert_eq!(client.calls, [flags, 0x40000]);
++
++            client.calls.clear();
++            client.accepts_extra = true;
++            assert_eq!(invoke(&mut client, flags), S_OK);
++            assert_eq!(client.calls, [flags], "a host accepting the flag is unchanged");
++
++            client.calls.clear();
++            client.error = 0x8889_0008u32 as i32;
++            assert_eq!(invoke(&mut client, flags), client.error);
++            assert_eq!(client.calls, [flags], "format and device failures are not retried");
++
++            client.calls.clear();
++            client.error = S_OK;
++            assert_eq!(invoke(&mut client, 0x0204_0000), E_INVALIDARG);
++            assert_eq!(client.calls, [0x0204_0000], "other unknown flags remain rejected");
++        }
++    }
++}

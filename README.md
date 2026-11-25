@@ -16,6 +16,13 @@ revisions, the scripts that build and package them, and the findings.
 Status: [docs/STATUS.md](docs/STATUS.md). Drafts for the upstream projects (not sent):
 [docs/upstream/](docs/upstream/).
 
+Minecraft Preview on PS5: [tested offline workflow, controller, world-loading and audio fixes](docs/MINECRAFT_PS5.md).
+Its working files now live in this project (`configs/`, `tools/`, and ignored `games/`,
+`analysis/`, `ps5-logs/` directories).
+
+[Standalone PS5 prototype](standalone/README.md) stages the tested Minecraft profile
+and provides an independent MIT-licensed catalog tool.
+
 ## Layout
 
 | Path | What |
@@ -68,16 +75,15 @@ then `tools/vk-backend.sh off`.
   XCL's in the prefix at `drive_c/users/prospero/AppData/Local/XCL/XCL.TestTitle/logs/`,
   vkd3d-proton's at `drive_c/XCL/vkd3d.log`.
 
-## CI
+## CI, Releases & Upstream Sync
 
-`.github/workflows/ci.yml` is an aid, not a gate: it applies the patches to the pinned upstreams,
-builds and tests XCL on a Windows runner (no GPU: GPU tests report `SKIPPED`), builds the patched
-vkd3d-proton with MSYS2's UCRT64 MinGW, and uploads the PS5 package as an artifact. Each build is
-cached under a key of its inputs and skipped when they did not change.
-
+- **.github/workflows/ci.yml** runs on push, pull_request, and workflow_dispatch: applies patches/xcl/ and builds + tests XCL (windows-2025), applies patches/vkd3d-proton/ and builds vkd3d-proton (MSYS2 UCRT64), runs standalone unit tests and verifies patches/prospero-win/ on ubuntu-24.04, and assembles the PS5 package plus standalone xcl-library.exe artifacts. Each build is cached by its inputs.
+- **.github/workflows/release.yml** runs on * tags (or manually via workflow_dispatch): builds all artifacts cleanly and publishes a GitHub Release with xcl-library-<tag>.exe, TrinityXSX-prospero-win-<tag>.zip, and SHA256SUMS-<tag>.txt.
+- **.github/workflows/upstream-sync.yml** + **	ools/sync_upstream.py** keep dependencies current without breaking reproducible builds: every Monday (or locally via python tools/sync_upstream.py --check / --apply), it checks xcl-dev/xcl, HansKristian-Work/vkd3d-proton (+ dxil-spirv), doitsujin/dxvk, microsoft/DirectXShaderCompiler, mpereiraesaa/prospero-win, and mpereiraesaa/PS5-Lapy-JB-Daemon, tests our patch series against upstream HEAD, detects upstreamed patches, and opens/updates a chore/upstream-sync PR so CI verifies the updated pins.env before merging.
 ## Licences
 
-- Scripts and docs here: GPL-2.0-only ([LICENSE](LICENSE)), as XCL.
+- Scripts and docs here: GPL-2.0-only ([LICENSE](LICENSE)), as XCL. The independent
+  `standalone/` tools and documentation use the [MIT License](standalone/LICENSE).
 - `patches/xcl/`: GPL-2.0-only (XCL). `patches/vkd3d-proton/`: LGPL-2.1-or-later (vkd3d-proton).
   `patches/dxil-spirv/`: MIT (dxil-spirv).
 - The package bundles DXVK (zlib) and DXC (LLVM / Microsoft licences); their licence files go

@@ -1,8 +1,8 @@
-From 33ce2ccf8dceacfe1d70aa50c6d591064c59fc88 Mon Sep 17 00:00:00 2001
+From e3f67f0341c5cea816621d3155346cab04b22f9f Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 03:24:27 +0100
-Subject: [PATCH 4/6] D3D12.X: a GPU without feature level 12_0 is used at 11_0
- before WARP
+Subject: [PATCH 04/12] D3D12.X: a GPU without feature level 12_0 is used at
+ 11_0 before WARP
 
 The title's device (hle::d3d12x::real) and the launcher's GPU check
 (preflight) asked each hardware adapter for feature level 12_0 only,
@@ -132,10 +132,10 @@ index 70fc209..e8bbf1c 100644
 +    assert_eq!(first_device(&[] as &[&'static str], &LEVELS, create), None);
 +}
 diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
-index fed31e6..8e0bfe8 100644
+index 9241a3a..6048213 100644
 --- a/crates/xcl/src/hle/d3d12x/real.rs
 +++ b/crates/xcl/src/hle/d3d12x/real.rs
-@@ -504,33 +504,19 @@ pub fn init() -> Result<String, String> {
+@@ -512,33 +512,19 @@ pub fn init() -> Result<String, String> {
              }
          }
          let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(|e| format!("DXGI: {e}"))?;
@@ -217,3 +217,6 @@ index 230a29b..ab85908 100644
          // the highest model asked for that the runtime knows; a lower one comes back if that is all
          let mut shader_model = (0, 0);
          for m in [D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_0] {
+-- 
+2.48.1.windows.1
+

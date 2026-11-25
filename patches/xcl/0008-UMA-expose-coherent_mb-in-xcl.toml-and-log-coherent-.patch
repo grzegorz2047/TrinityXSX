@@ -1,0 +1,73 @@
+From 865e73fd3dd2c1616653e6ed7a604cf78f3f9ab9 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 07:08:03 +0100
+Subject: [PATCH 08/12] UMA: expose coherent_mb in xcl.toml and log coherent
+ window exhaustion
+
+---
+ crates/xcl/src/config.rs          |  5 +++++
+ crates/xcl/src/hle/d3d12x/real.rs | 10 ++++++++++
+ crates/xcl/src/host.rs            |  3 +++
+ 3 files changed, 18 insertions(+)
+
+diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
+index b561814..e00fdea 100644
+--- a/crates/xcl/src/config.rs
++++ b/crates/xcl/src/config.rs
+@@ -28,6 +28,10 @@ pub struct Config {
+     /// windows, see `gpu::uma`); 0 = 4095 for "advanced" title memory,
+     /// else 2048. `XCL_UMA_MB` overrides.
+     pub uma_mb: u64,
++    /// Committed coherent UMA window size (MiB, 0 = automatic 512 MiB / `uma_coherent.txt`).
++    /// Sets `XCL_COHERENT_MB` when unset. Raise for titles whose committed textures exceed
++    /// the default 512 MiB window (e.g. under runtimes that restrict custom env vars).
++    pub coherent_mb: u64,
+     pub log_level: String,
+     pub log_to_stderr: bool,
+     /// Executable inside the game folder (auto-detected when empty).
+@@ -173,6 +177,7 @@ impl Default for Config {
+             title_memory: "auto".into(),
+             pls_mb: 0,
+             uma_mb: 0,
++            coherent_mb: 0,
+             log_level: "info".into(),
+             log_to_stderr: true,
+             exe: String::new(),
+diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
+index 6048213..bc8e709 100644
+--- a/crates/xcl/src/hle/d3d12x/real.rs
++++ b/crates/xcl/src/hle/d3d12x/real.rs
+@@ -1233,6 +1233,16 @@ unsafe fn place_console_texture(this: *mut c_void, desc: usize, state: usize, cl
+     let align = (align as usize).max(0x1_0000);
+     let bytes = (size as usize).div_ceil(align) * align;
+     if u.size().saturating_sub(u.used()) < bytes + COHERENT_KEPT {
++        static FULL_WARN: AtomicU64 = AtomicU64::new(0);
++        if FULL_WARN.fetch_add(1, Ordering::Relaxed) < 8 {
++            crate::xlog_warn!(
++                "D3D12.X: coherent UMA full for committed texture ({} KB needed, {} / {} MB used, {} MB kept) – falling back to PC texture (raise coherent_mb / XCL_COHERENT_MB)",
++                bytes >> 10,
++                u.used() >> 20,
++                u.size() >> 20,
++                COHERENT_KEPT >> 20
++            );
++        }
+         return None;
+     }
+     let p = u.alloc(bytes, align)? as usize;
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index c2ef706..d34dcfe 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -34,6 +34,9 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     if std::env::var_os("XCL_UMA_MB").is_none() && boot.config.uma_mb != 0 {
+         std::env::set_var("XCL_UMA_MB", boot.config.uma_mb.to_string());
+     }
++    if std::env::var_os("XCL_COHERENT_MB").is_none() && boot.config.coherent_mb != 0 {
++        std::env::set_var("XCL_COHERENT_MB", boot.config.coherent_mb.to_string());
++    }
+     if std::env::var_os("XCL_DIRECT_DXIL").is_none() && !boot.config.direct_dxil.is_empty() {
+         std::env::set_var("XCL_DIRECT_DXIL", &boot.config.direct_dxil);
+     }
+-- 
+2.48.1.windows.1
+

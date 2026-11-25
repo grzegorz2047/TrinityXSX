@@ -1,0 +1,218 @@
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 55a1a8a..9f77312 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -9,8 +9,8 @@
+  * when Wine exits, or the game does not close in time, the title restarts
+  * into the launcher.
+  *
+- * The launcher and a game request the /data mount, where the library is.
+- * A game then loads ntdll.prx, prepares Wine's
++ * The library and Wine prefix use the available writable title data directory.
++ * A game loads ntdll.prx, prepares Wine's
+  * environment and enters __wine_main on a dedicated thread
+  * (src/pw_wine_start.c). Wine's stderr reaches ps5log/1 through the sink
+  * ntdll exports (Wine patch 0560), so its debug channels become telemetry;
+@@ -36,7 +36,6 @@
+ #include "../src/pw_script_input.h"
+ #include "../src/pw_wine_launch.h"
+ #include "../src/pw_game_menu.h"
+-#include "pw_data_mount.h"
+ #include "pw_audio_ps5.h"
+ #include "pw_pad_ps5.h"
+ #include "pw_hid_ps5.h"
+@@ -50,6 +49,7 @@
+ #include "pw_wine_display.h"
+ #include "../include/prospero_win.h"
+ 
++#include <fcntl.h>
+ #include <pthread.h>
+ #include <signal.h>
+ #include <stdio.h>
+@@ -238,6 +238,31 @@ static char catalog_detail[PW_WINE_LIBRARY_MAX][64];
+ static size_t catalog_count;
+ static const char *library_root = PW_WINE64_ROOT_SANDBOX;
+ 
++static void trinityxsx_write_startup(const char *line, size_t length)
++{
++    int fd = open(PW_WINE64_ROOT_DATA "/startup.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
++    if (fd < 0) return;
++    (void)write(fd, line, length);
++    close(fd);
++}
++
++static void trinityxsx_startup(const char *stage, int status, int detail)
++{
++    char line[128];
++    int length = snprintf(line, sizeof(line), "%s status=%d (0x%08x) detail=%d\n",
++                          stage, status, (unsigned)status, detail);
++    if (length <= 0 || (size_t)length >= sizeof(line)) return;
++    trinityxsx_write_startup(line, (size_t)length);
++}
++
++static void trinityxsx_startup_text(const char *tag, const char *message)
++{
++    char line[1024];
++    int length = snprintf(line, sizeof(line), "%s %.980s\n", tag, message);
++    if (length <= 0 || (size_t)length >= sizeof(line)) return;
++    trinityxsx_write_startup(line, (size_t)length);
++}
++
+ /* The largest desktop shown: Wine's PS5 driver defaults to 800x600
+  * (WINE_PS5_DESKTOP overrides, 1920x1080 for Warcraft III); bigger frames
+  * are counted and dropped. */
+@@ -345,6 +370,7 @@ static uint64_t calibration_tsc(void *context) { (void)context; return __builtin
+ 
+ static char sink_line[1024];
+ static size_t sink_used;
++static unsigned trinityxsx_sink_lines;
+ static pthread_mutex_t sink_lock = PTHREAD_MUTEX_INITIALIZER;
+ static volatile unsigned long sink_calls;
+ 
+@@ -356,6 +382,10 @@ static void wine_output_sink(const char *str, size_t len)
+         if (str[i] == '\n' || sink_used == sizeof(sink_line) - 1) {
+             sink_line[sink_used] = 0;
+             PS5LOG_LOG("WINE %s", sink_line);
++            if (trinityxsx_sink_lines < 32) {
++                trinityxsx_sink_lines++;
++                trinityxsx_startup_text("WINE", sink_line);
++            }
+             sink_used = 0;
+             if (str[i] == '\n') continue;
+         }
+@@ -612,6 +642,7 @@ static void *forward_fd(void *arg)
+     const PwFdForward *forward = arg;
+     char buffer[1024];
+     size_t used = 0;
++    unsigned startup_lines = 0;
+ 
+     for (;;) {
+         ssize_t got = read(forward->reader, buffer + used, sizeof(buffer) - 1 - used);
+@@ -624,6 +655,10 @@ static void *forward_fd(void *arg)
+             buffer[line] = 0;
+             if (line && buffer[line - 1] == '\r') buffer[line - 1] = 0;
+             PS5LOG_LOG("%s %s", forward->tag, buffer);
++            if (startup_lines < 32) {
++                startup_lines++;
++                trinityxsx_startup_text(forward->tag, buffer);
++            }
+             line += newline ? 1u : 0u;
+             memmove(buffer, buffer + line, used - line);
+             used -= line;
+@@ -669,6 +704,8 @@ static void leave_to_home(const char *reason)
+     int app_id, rc = -1;
+ 
+     display_quiesce(reason);
++    int exit_status = sceSystemServiceLoadExec("exit", NULL);
++    trinityxsx_startup("return-to-home", exit_status, 0);
+     app_id = sceSystemServiceGetAppIdOfRunningBigApp();
+     PS5LOG_LOG("PW_WINE64 leave close app_id=0x%x", (unsigned)app_id);
+     pw_diagnostics_close(reason);
+@@ -715,6 +752,7 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+  * the launcher. */
+ static void on_exit_report(void)
+ {
++    trinityxsx_startup("wine-exit", 0, (int)sink_calls);
+     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
+     restart_title(NULL, launch.cycle + 1u, "wine-exit");
+     pw_diagnostics_close("wine64-exit");
+@@ -722,22 +760,15 @@ static void on_exit_report(void)
+ 
+ /* ---- library ------------------------------------------------------------ */
+ 
+-/* Complete the one-shot helper exchange before loading profiles or starting
+- * Wine. A failed or incomplete request closes this process to Home. */
++/* Load profiles from the storage exposed by the title's existing mounts. */
+ static int open_library(void)
+ {
+-    PwDataMountResult mount;
+-    int status;
+-
+-    status = pw_data_mount_request(&mount);
+-    if (status == 0) library_root = PW_WINE64_ROOT_DATA;
+-    PS5LOG_LOG("PW_WINE64 data_mount data_before=%d elevated_before=%d helper_completed=%d "
+-               "helper_errno=%d data_after=%d elevated_after=%d waited_ms=%d settled_ms=%d root=%s",
+-               mount.data_before, mount.elevated_before, mount.helper_completed,
+-               mount.helper_errno, mount.data_after, mount.elevated_after, mount.waited_ms,
+-               mount.settled_ms, status == 0 ? library_root : "unavailable");
+-    if (status != 0) return -1;
+-    status = pw_wine_library_load(&library, library_root);
++    library_root = PW_WINE64_ROOT_DATA;
++    int status = pw_wine_library_load(&library, library_root);
++    if (status != PW_OK || (single_program() && !pw_wine_library_find(&library, fixed_profile))) {
++        library_root = PW_WINE64_ROOT_SANDBOX;
++        status = pw_wine_library_load(&library, library_root);
++    }
+     catalog_count = 0;
+     for (uint32_t i = 0; i < library.count; i++) {
+         const PwWineLibraryEntry *entry = &library.entries[i];
+@@ -765,7 +796,7 @@ static int open_library(void)
+     PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
+                    "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
+                (unsigned)library.count, (unsigned)catalog_count, library_root);
+-    return 0;
++    return status == PW_OK ? 0 : -1;
+ }
+ 
+ /* The USB keyboard and mouse's log lines. */
+@@ -1065,16 +1096,17 @@ int main(int argc, char **argv)
+     if (ps5log_load_config(ps5log_default_conf_paths, ps5log_default_conf_path_count,
+                            &log_config, NULL) == 0)
+         ps5log_init(&log_config, PW_TITLE_ID, PW_APP_NAME, now_ns());
+-    pw_hid_ps5_preload(hid_log);   /* before the /data grant changes the title's credentials */
+-    pw_osk_ps5_preload(osk_log);   /* the dialog's module is a system module too */
++    pw_hid_ps5_preload(hid_log);
++    pw_osk_ps5_preload(osk_log);
+     if (open_library() != 0) {
+-        PS5LOG_LOG("PW_WINE64 startup blocked reason=data-helper-incomplete");
+-        ps5log_close("data-helper-incomplete");
++        PS5LOG_LOG("PW_WINE64 startup blocked reason=library-unavailable root=%s", library_root);
++        ps5log_close("library-unavailable");
+         return 1;
+     }
+     (void)pw_wine_launch_parse(argc, argv, catalog, catalog_count, &launch);
+-    (void)pw_diagnostics_open(library_root, PW_BUILD_ID,
+-                              launch.app ? launch.app->id : "launcher", launch.cycle);
++    status = pw_diagnostics_open(library_root, PW_BUILD_ID,
++                                 launch.app ? launch.app->id : "launcher", launch.cycle);
++    trinityxsx_startup("library-ready", status, launch.mode);
+     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
+                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
+                launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
+@@ -1260,12 +1292,15 @@ int main(int argc, char **argv)
+     {
+         static PwFdForward forward_stderr = { -1, "WINESERVER" }, forward_stdout = { -1, "STDOUT" };
+         status = capture_fd(2, &forward_stderr);
++        trinityxsx_startup("stderr-capture", status, 0);
+         if (status != 0) PS5LOG_LOG("PW_WINE64 fd2_capture=failed status=%d", status);
+         status = capture_fd(1, &forward_stdout);
+         if (status != 0) PS5LOG_LOG("PW_WINE64 fd1_capture=failed status=%d", status);
+     }
+ 
+     status = pw_wine_start_load(&start, &config, &ops);
++    trinityxsx_startup("wine-module-load", status, start.stage);
++    trinityxsx_startup("wine-module-entry", start.module, start.module_start_result);
+     PS5LOG_LOG("PW_WINE64 load status=%d stage=%d module=0x%x segments=%u module_start=%d "
+                "adopted=%d stats=%d", status, start.stage, (unsigned)start.module,
+                start.segment_count, start.module_start_result, start.adopted != NULL,
+@@ -1363,10 +1398,12 @@ int main(int argc, char **argv)
+                        mapped == 0 ? host_dir : "-", cwd_status);
+         }
+         status = pw_wine_start_environment(&start, &config, &ops);
++        trinityxsx_startup("wine-environment", status, start.stage);
+         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+     }
+     if (status == PW_OK) {
+         status = pw_wine_start_run(&start, &config, &ops);
++        trinityxsx_startup("wine-thread", status, start.stage);
+         PS5LOG_LOG("PW_WINE64 run status=%d", status);
+     }
+ #if PW_WINE64_SCRIPT
+@@ -1732,6 +1769,7 @@ int main(int argc, char **argv)
+         }
+     }
+     PS5LOG_LOG("PW_WINE64 done status=%d stage=%d", status, start.stage);
++    trinityxsx_startup("wine-run-ended", status, start.stage);
+     if (status != PW_OK) restart_title(NULL, launch.cycle + 1u, "start-failed");
+     pw_diagnostics_close(status == PW_OK ? "wine64-restart-failed" : "wine64-start-failed");
+     _exit(1);

@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 25 Nov 2026 09:43:00 +0100
+Subject: [PATCH] XGameRuntime: notify monitors on shared task queue ports
+
+Manual dispatchers can sleep waiting for monitor notifications. Submitting
+through a composite queue must notify the other queues sharing its port,
+with each queue's own port index. Keep weak queue attachments on ports and
+invoke monitors outside the registry lock.
+
+The regression test fails on the previous implementation and checks both
+submission directions, remapped ports, dispatch, and unregistration.
+
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -201,6 +201,9 @@
+ `System32\xgameruntime.dll`. Unimplemented runtime families remain unavailable in this mode.
+ `XCL_TRACE_ASYNC=1` logs up to 1024 built-in async lifecycle events for diagnosing callbacks
+ or results that do not reach the title.
++
++Built-in task queue monitors are notified for submissions through every queue sharing
++their port, including composite queues, so a manual dispatcher can wake for shared work.
+ 
+ - **DXC:** 1.8 or newer is recommended, from the
+   [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+diff --git a/crates/xcl/src/hle/xgameruntime/taskqueue.rs b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
+index 4811b39..e79fd3e 100644
+--- a/crates/xcl/src/hle/xgameruntime/taskqueue.rs
++++ b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
+@@ -65,6 +65,7 @@ pub struct Port {
+     items: Mutex<VecDeque<QueuedItem>>,
+     cv: Condvar,
+     running: AtomicBool,
++    queues: Mutex<Vec<(Weak<Queue>, u32)>>,
+ }
+ 
+ impl Port {
+@@ -74,8 +75,22 @@ impl Port {
+             items: Mutex::new(VecDeque::new()),
+             cv: Condvar::new(),
+             running: AtomicBool::new(false),
++            queues: Mutex::new(Vec::new()),
+         })
+     }
++
++    fn notify_monitors(&self) {
++        // A shared port wakes every attached queue's monitor, using that queue's port number.
++        // Keep queues alive for notification, but hold no registry lock across title callbacks.
++        let snapshot: Vec<_> = {
++            let mut queues = self.queues.lock().unwrap();
++            queues.retain(|(q, _)| q.strong_count() != 0);
++            queues.iter().filter_map(|(q, port)| q.upgrade().map(|q| (q, *port))).collect()
++        };
++        for (q, port) in snapshot {
++            q.notify_monitors(port);
++        }
++    }
+ }
+ 
+ struct QueueState {
+@@ -211,23 +226,35 @@ static NEXT_MONITOR_TOKEN: AtomicU64 = AtomicU64::new(1);
+ 
+ impl Queue {
+     pub fn new(work_mode: u32, completion_mode: u32) -> Arc<Queue> {
+-        Arc::new(Queue {
++        let q = Arc::new(Queue {
+             ports: [Port::new(work_mode), Port::new(completion_mode)],
+             owns_ports: true,
+             state: Mutex::new(QueueState { terminated: false, inflight: [0, 0] }),
+             idle_cv: Condvar::new(),
+             monitors: Mutex::new(Vec::new()),
+-        })
++        });
++        Self::attach_ports(&q);
++        q
+     }
+ 
+     pub fn composite(work: Arc<Port>, completion: Arc<Port>) -> Arc<Queue> {
+-        Arc::new(Queue {
++        let q = Arc::new(Queue {
+             ports: [work, completion],
+             owns_ports: false,
+             state: Mutex::new(QueueState { terminated: false, inflight: [0, 0] }),
+             idle_cv: Condvar::new(),
+             monitors: Mutex::new(Vec::new()),
+-        })
++        });
++        Self::attach_ports(&q);
++        q
++    }
++
++    fn attach_ports(q: &Arc<Queue>) {
++        for (index, port) in q.ports.iter().enumerate() {
++            let mut queues = port.queues.lock().unwrap();
++            queues.retain(|(q, _)| q.strong_count() != 0);
++            queues.push((Arc::downgrade(q), index as u32));
++        }
+     }
+ 
+     pub fn is_terminated(&self) -> bool {
+@@ -292,7 +319,7 @@ pub fn submit_now(q: &Arc<Queue>, port: u32, item: Item) -> bool {
+                 }
+                 state.inflight[port as usize] += 1;
+             }
+-            q.notify_monitors(port);
++            p.notify_monitors();
+             // SAFETY: Caller guarantees `item.cb` is a valid `XTaskQueueCallback` for `item.ctx`.
+             unsafe { q.execute(port, item) };
+         }
+@@ -304,7 +331,7 @@ pub fn submit_now(q: &Arc<Queue>, port: u32, item: Item) -> bool {
+                 }
+                 state.inflight[port as usize] += 1;
+             }
+-            q.notify_monitors(port);
++            p.notify_monitors();
+             let q2 = q.clone();
+             spawn(Box::new(move || unsafe { q2.execute(port, item) }));
+         }
+@@ -320,7 +347,7 @@ pub fn submit_now(q: &Arc<Queue>, port: u32, item: Item) -> bool {
+                 }
+                 items.push_back(QueuedItem { item, queue: q.clone(), port });
+             }
+-            q.notify_monitors(port);
++            p.notify_monitors();
+             if !p.running.swap(true, Ordering::AcqRel) {
+                 let p2 = p.clone();
+                 spawn(Box::new(move || drain_serialized(p2)));
+@@ -339,7 +366,7 @@ pub fn submit_now(q: &Arc<Queue>, port: u32, item: Item) -> bool {
+                 items.push_back(QueuedItem { item, queue: q.clone(), port });
+             }
+             p.cv.notify_one();
+-            q.notify_monitors(port);
++            p.notify_monitors();
+         }
+     }
+     true
+@@ -911,6 +938,54 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn composite_submissions_notify_all_shared_port_monitors() {
++        struct Seen {
++            handle: usize,
++            calls: Mutex<Vec<(usize, u32)>>,
++        }
++        unsafe extern "system" fn monitor(ctx: *mut c_void, queue: *mut c_void, port: u32) {
++            let seen = &*(ctx as *const Seen);
++            seen.calls.lock().unwrap().push((queue as usize, port));
++        }
++        unsafe extern "system" fn noop(_ctx: *mut c_void, _canceled: bool) {}
++        unsafe {
++            let mut base = std::ptr::null_mut();
++            assert_eq!(XTaskQueueCreate(MODE_MANUAL, MODE_MANUAL, &mut base), S_OK);
++            let mut work = std::ptr::null_mut();
++            let mut completion = std::ptr::null_mut();
++            assert_eq!(XTaskQueueGetPort(base, PORT_WORK, &mut work), S_OK);
++            assert_eq!(XTaskQueueGetPort(base, PORT_COMPLETION, &mut completion), S_OK);
++            let mut comp = std::ptr::null_mut();
++            // Reverse the ports so each monitor must receive its own queue's port number.
++            assert_eq!(XTaskQueueCreateComposite(completion, work, &mut comp), S_OK);
++            let base_seen = Seen { handle: base as usize, calls: Mutex::new(Vec::new()) };
++            let comp_seen = Seen { handle: comp as usize, calls: Mutex::new(Vec::new()) };
++            let mut base_token = RegistrationToken { token: 0 };
++            let mut comp_token = RegistrationToken { token: 0 };
++            assert_eq!(XTaskQueueRegisterMonitor(base, &base_seen as *const Seen as *mut c_void, monitor as usize, &mut base_token), S_OK);
++            assert_eq!(XTaskQueueRegisterMonitor(comp, &comp_seen as *const Seen as *mut c_void, monitor as usize, &mut comp_token), S_OK);
++
++            assert_eq!(XTaskQueueSubmitCallback(comp, PORT_WORK, std::ptr::null_mut(), noop as usize), S_OK);
++            assert_eq!(*base_seen.calls.lock().unwrap(), [(base_seen.handle, PORT_COMPLETION)]);
++            assert_eq!(*comp_seen.calls.lock().unwrap(), [(comp_seen.handle, PORT_WORK)]);
++            assert!(XTaskQueueDispatch(base, PORT_COMPLETION, 0));
++            assert_eq!(XTaskQueueSubmitCallback(base, PORT_WORK, std::ptr::null_mut(), noop as usize), S_OK);
++            assert_eq!(*base_seen.calls.lock().unwrap(), [(base_seen.handle, PORT_COMPLETION), (base_seen.handle, PORT_WORK)]);
++            assert_eq!(*comp_seen.calls.lock().unwrap(), [(comp_seen.handle, PORT_WORK), (comp_seen.handle, PORT_COMPLETION)]);
++            assert!(XTaskQueueDispatch(comp, PORT_COMPLETION, 0));
++
++            XTaskQueueUnregisterMonitor(base, base_token);
++            assert_eq!(XTaskQueueSubmitCallback(comp, PORT_WORK, std::ptr::null_mut(), noop as usize), S_OK);
++            assert_eq!(base_seen.calls.lock().unwrap().len(), 2);
++            assert_eq!(comp_seen.calls.lock().unwrap().len(), 3);
++            assert!(XTaskQueueDispatch(comp, PORT_WORK, 0));
++            XTaskQueueUnregisterMonitor(comp, comp_token);
++            XTaskQueueCloseHandle(comp);
++            XTaskQueueCloseHandle(base);
++        }
++    }
++
+     #[test]
+     fn monitor_fires_on_submit_and_stops_after_unregister() {
+         unsafe extern "system" fn noop(_ctx: *mut c_void, _canceled: bool) {}

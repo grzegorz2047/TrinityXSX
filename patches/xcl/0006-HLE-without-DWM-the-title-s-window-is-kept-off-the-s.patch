@@ -1,7 +1,7 @@
-From 905fe08dd2b4ce170667a17c8a28abe0f4705aae Mon Sep 17 00:00:00 2001
+From 542cfc3a64fc3abc89c06950ade5600307696b77 Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 04:42:59 +0100
-Subject: [PATCH 6/6] HLE: without DWM the title's window is kept off the
+Subject: [PATCH 06/12] HLE: without DWM the title's window is kept off the
  screens
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -242,3 +242,6 @@ index 5370a2e..d150cf3 100644
          }
          DestroyWindow(w);
          DestroyWindow(a);
+-- 
+2.48.1.windows.1
+

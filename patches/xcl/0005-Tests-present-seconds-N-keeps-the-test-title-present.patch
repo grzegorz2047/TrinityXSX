@@ -1,7 +1,7 @@
-From 034737b629d8b0b7c7f0738056ad829edee14fb6 Mon Sep 17 00:00:00 2001
+From 2488fa6be564706ac941f0698c782e0b19d9e118 Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 03:58:51 +0100
-Subject: [PATCH 5/6] Tests: --present-seconds N keeps the test title
+Subject: [PATCH 05/12] Tests: --present-seconds N keeps the test title
  presenting for N seconds
 
 The test title presents one frame (PresentX of a cleared back buffer)
@@ -153,3 +153,6 @@ index d5ae267..5370a2e 100644
      let failures = FAILURES.load(Ordering::SeqCst);
      println!("xcl_testtitle: done, failures: {failures}");
      std::process::exit(failures as i32);
+-- 
+2.48.1.windows.1
+

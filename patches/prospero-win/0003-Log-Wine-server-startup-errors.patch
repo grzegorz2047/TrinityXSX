@@ -1,0 +1,63 @@
+Subject: [PATCH] Record the standalone Wine server startup error
+
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1298,6 +1298,8 @@
+         if (status != 0) PS5LOG_LOG("PW_WINE64 fd1_capture=failed status=%d", status);
+     }
+ 
++    if (!strcmp(library_root, PW_WINE64_ROOT_DATA))
++        setenv("WINE_PS5_SERVER_STARTUP_LOG", PW_WINE64_ROOT_DATA "/wineserver-startup.log", 1);
+     status = pw_wine_start_load(&start, &config, &ops);
+     trinityxsx_startup("wine-module-load", status, start.stage);
+     trinityxsx_startup("wine-module-entry", start.module, start.module_start_result);
+diff --git a/wine/patches/0999-server-ps5-record-fatal-startup-errors.patch b/wine/patches/0999-server-ps5-record-fatal-startup-errors.patch
+new file mode 100644
+index 0000000..9d3734a
+--- /dev/null
++++ b/wine/patches/0999-server-ps5-record-fatal-startup-errors.patch
+@@ -0,0 +1,44 @@
++Subject: [PATCH] server: record fatal PS5 startup errors
++
++--- a/server/request.c
+++++ b/server/request.c
++@@ -125,12 +125,39 @@
++     kill_thread( thread, 1 );
++ }
++ 
+++#ifdef __PROSPERO__
+++/* A foreground title can record its startup error even when stderr has no
+++ * usable descriptor. The launcher supplies a path in its writable data. */
+++static void write_server_startup_error( const char *format, va_list args )
+++{
+++    const char *path = getenv( "WINE_PS5_SERVER_STARTUP_LOG" );
+++    char buffer[1024];
+++    int length, fd;
+++
+++    if (!path || path[0] != '/') return;
+++    length = vsnprintf( buffer, sizeof(buffer), format, args );
+++    if (length <= 0) return;
+++    if ((fd = open( path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0644 )) == -1) return;
+++    write( fd, buffer, min( (size_t)length, sizeof(buffer) - 1 ));
+++    close( fd );
+++}
+++#endif
+++
++ /* die on a fatal error */
++ void fatal_error( const char *err, ... )
++ {
++     va_list args;
++ 
+++#ifdef __PROSPERO__
+++    va_list log_args;
+++#endif
+++
++     va_start( args, err );
+++#ifdef __PROSPERO__
+++    va_copy( log_args, args );
+++    write_server_startup_error( err, log_args );
+++    va_end( log_args );
+++#endif
++     fprintf( stderr, "wineserver: " );
++     vfprintf( stderr, err, args );
++     va_end( args );

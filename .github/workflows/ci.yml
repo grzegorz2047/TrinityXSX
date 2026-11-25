@@ -1,40 +1,30 @@
-# Auxiliary CI: checks that the patches still apply to the pinned upstreams and build, runs XCL's
-# test suite on a Windows runner (no GPU: GPU tests print SKIPPED and pass; the test title's
-# end-to-end runs are skipped as in XCL's own CI, the runner has no Gaming Services and only the
-# Basic Render Driver), builds the patched vkd3d-proton with MSYS2's MinGW and uploads the PS5
-# package. Nothing here gates anything, and it never talks to a console.
-#
-# Caching, so a run does only what its inputs changed:
-# - each build's outputs are cached under a key of exactly its inputs (pins.env, its patches)
-#   and a version (xcl-out-vN, vkd3d-out-vN): bump it when that job's build steps change. On a
-#   hit the job restores them and skips the toolchain, the build and the tests: with the same
-#   inputs and no GPU they give the same result;
-# - XCL is built once, in the release profile, and its tests run on that build; rust-cache keeps
-#   the dependencies (the workspace crates rebuild: a fresh checkout has new file times);
-# - the package job clones nothing: the test title's data and the licences come with the
-#   artifacts, and DXVK / DXC downloads are cached by pins.env;
-# - a push that changes none of the jobs' inputs starts no run (`paths` below).
+# Auxiliary CI: checks that the patches apply to the pinned upstreams and build, runs XCL's
+# test suite on a Windows runner (no GPU: GPU tests print SKIPPED and pass), builds the patched
+# vkd3d-proton with MSYS2's MinGW, verifies standalone tooling and prospero-win patches, and
+# uploads the PS5 package + standalone xcl-library.exe as artifacts.
 name: CI
 
-# Only what the jobs read starts a run: docs, the PS5 tools (vk-backend, ftp_*, pdbsym, vkcaps)
-# and anything else do not.
 on:
   push:
     branches: [main]
     paths:
       - pins.env
       - patches/**
+      - standalone/**
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
       - tools/make-ps5-package.sh
+      - tools/sync_upstream.py
       - .github/workflows/ci.yml
   pull_request:
     paths:
       - pins.env
       - patches/**
+      - standalone/**
       - tools/setup-sources.sh
       - tools/fetch-deps.sh
       - tools/make-ps5-package.sh
+      - tools/sync_upstream.py
       - .github/workflows/ci.yml
   workflow_dispatch:
 
@@ -46,6 +36,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  standalone:
+    name: Standalone tests & prospero-win patches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run standalone unit tests
+        run: python3 -m unittest standalone.test_standalone -v
+
+      - name: Syntax-check tools/sync_upstream.py
+        run: python3 -m py_compile tools/sync_upstream.py
+
+      - name: Verify patches/prospero-win apply cleanly to pinned prospero-win
+        run: |
+          set -euo pipefail
+          . ./pins.env
+          tmp=$(mktemp -d)
+          git init -q "$tmp/pw"
+          git -C "$tmp/pw" fetch -q --depth 1 "$PROSPERO_WIN_REPO" "$PROSPERO_WIN_REV"
+          git -C "$tmp/pw" checkout -q FETCH_HEAD
+          for p in patches/prospero-win/*.patch; do
+            echo "Applying $p"
+            git -C "$tmp/pw" apply --whitespace=nowarn "$PWD/$p"
+          done
+          rm -rf "$tmp"
+
   xcl:
     name: XCL (Windows, no GPU)
     runs-on: windows-2025
@@ -57,14 +74,14 @@ jobs:
       - name: Keep line endings as they are (the patches apply byte for byte)
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Outputs of these inputs, if built before
         id: out
-        uses: actions/cache@v6
+        uses: actions/cache@v4
         with:
           path: out
-          key: xcl-out-v1-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
+          key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
 
       - name: Fetch XCL and apply patches/xcl
         if: steps.out.outputs.cache-hit != 'true'
@@ -102,7 +119,7 @@ jobs:
           cp -r xcl/tests/data/testgame out/xcl/tests/data/
           cp xcl/LICENSE out/xcl/
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: xcl-release
           path: out/
@@ -116,17 +133,15 @@ jobs:
       - name: Keep line endings as they are (the patches apply byte for byte)
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Outputs of these inputs, if built before
         id: out
-        uses: actions/cache@v6
+        uses: actions/cache@v4
         with:
           path: out
-          key: vkd3d-out-v1-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/vkd3d-proton/**', 'patches/dxil-spirv/**') }}
+          key: vkd3d-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/vkd3d-proton/**', 'patches/dxil-spirv/**') }}
 
-      # MSYS2 UCRT64, as the local build: Ubuntu 24.04's mingw-w64 headers (v11) lack
-      # PATHCCH_NONE, which vkd3d-proton 3.1 uses. setup-msys2 caches the packages.
       - name: Toolchain (MSYS2 UCRT64)
         if: steps.out.outputs.cache-hit != 'true'
         uses: msys2/setup-msys2@v2
@@ -168,21 +183,21 @@ jobs:
           cp vkd3d-proton/LICENSE vkd3d-proton/COPYING $v/
           cp vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT $v/subprojects/dxil-spirv/
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: vkd3d-proton
           path: out/
           if-no-files-found: error
 
   package:
-    name: PS5 package (prospero-win)
-    needs: [xcl, vkd3d-proton]
+    name: PS5 package (prospero-win & xcl-library)
+    needs: [xcl, vkd3d-proton, standalone]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@v4
         with:
           path: |
             tools/dxvk
@@ -192,19 +207,31 @@ jobs:
       - name: DXVK and DXC (checksums verified)
         run: tools/fetch-deps.sh
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           name: xcl-release
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           name: vkd3d-proton
 
       - name: Assemble
-        run: tools/make-ps5-package.sh
+        run: |
+          tools/make-ps5-package.sh
+          mkdir -p dist/release-bundle
+          cp xcl/target/release/xcl.exe dist/release-bundle/xcl-library.exe
+          (cd dist/prospero-win && zip -qr ../release-bundle/TrinityXSX-prospero-win.zip .)
+          (cd dist/release-bundle && sha256sum xcl-library.exe TrinityXSX-prospero-win.zip > SHA256SUMS.txt)
+          cat dist/release-bundle/SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: xcl-prospero-win
           path: dist/prospero-win
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trinityxsx-release-bundle
+          path: dist/release-bundle
           if-no-files-found: error

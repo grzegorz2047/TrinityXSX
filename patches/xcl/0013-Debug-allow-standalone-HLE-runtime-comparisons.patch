@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Wed, 25 Nov 2026 09:31:00 +0100
+Subject: [PATCH] Debug: allow standalone HLE runtime comparisons on Windows
+
+The PS5 has no system Gaming Services runtime. Let Windows comparisons use
+the same built-in task queues and async implementation without changing
+the installed system DLL. Add bounded opt-in async lifecycle logging.
+Default runtime selection and logging remain unchanged.
+
+diff --git a/README.md b/README.md
+index 449f11f..4e42c48 100644
+--- a/README.md
++++ b/README.md
+@@ -196,6 +196,12 @@ KB5029331+), inbox `D3D12Core.dll` stops at SM 6.5; place the Microsoft D3D12 Ag
+ next to `xcl.exe`, directly next to `xcl.exe`, in `%LOCALAPPDATA%\XCL\D3D12\`, or point `%XCL_D3D12_DIR%` at it
+ (for `cargo test`, use `%LOCALAPPDATA%\XCL\D3D12\` or `%XCL_D3D12_DIR%`).
+ 
++For runtime diagnostics, `XCL_FORCE_HLE_RUNTIME=1` disables the system Gaming Services
++runtime and uses XCL's built-in XAsync/task queues, as on a host without
++`System32\xgameruntime.dll`. Unimplemented runtime families remain unavailable in this mode.
++`XCL_TRACE_ASYNC=1` logs up to 1024 built-in async lifecycle events for diagnosing callbacks
++or results that do not reach the title.
++
+ - **DXC:** 1.8 or newer is recommended, from the
+   [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+   and point `XCL_DXC_DIR` at its `bin\x64`. A Windows SDK may hold an older one (the same `10.0.26100.0`
+diff --git a/crates/xcl/src/hle/xgameruntime/api.rs b/crates/xcl/src/hle/xgameruntime/api.rs
+index 436b1de..369c59a 100644
+--- a/crates/xcl/src/hle/xgameruntime/api.rs
++++ b/crates/xcl/src/hle/xgameruntime/api.rs
+@@ -136,6 +136,10 @@ static PC: OnceLock<Option<Pc>> = OnceLock::new();
+ 
+ fn pc() -> Option<&'static Pc> {
+     PC.get_or_init(|| unsafe {
++        if std::env::var("XCL_FORCE_HLE_RUNTIME").is_ok_and(|v| v == "1") {
++            crate::xlog_info!("XGameRuntime: XCL_FORCE_HLE_RUNTIME=1 – using XCL's runtime without system Gaming Services");
++            return None;
++        }
+         use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+         let h = LoadLibraryExW(crate::util::wide("xgameruntime.dll").as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+         if h.is_null() {
+diff --git a/crates/xcl/src/hle/xgameruntime/xasync.rs b/crates/xcl/src/hle/xgameruntime/xasync.rs
+index d358dc5..4ac78af 100644
+--- a/crates/xcl/src/hle/xgameruntime/xasync.rs
++++ b/crates/xcl/src/hle/xgameruntime/xasync.rs
+@@ -34,6 +34,13 @@ const BLOCK_MAGIC: u32 = 0x5841_5359; // "XASY"
+ const FLAG_DONE: u8 = 1 << 0;
+ const FLAG_CONSUMED: u8 = 1 << 1;
+ 
++fn trace_async() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    static LINES: AtomicU64 = AtomicU64::new(0);
++    *ON.get_or_init(|| std::env::var("XCL_TRACE_ASYNC").is_ok_and(|v| v == "1"))
++        && LINES.fetch_add(1, Ordering::Relaxed) < 1024
++}
++
+ #[repr(C)]
+ pub struct XAsyncBlock {
+     pub queue: *mut c_void,
+@@ -181,6 +188,11 @@ unsafe fn lookup(b: *mut XAsyncBlock) -> Lookup {
+ }
+ 
+ unsafe fn register_state(b: *mut XAsyncBlock, s: Arc<State>) {
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] begin id={} block={b:p} queue={:p} modes={:?} callback={} provider={} identity={:#x}",
++            s.id, (*b).queue, taskqueue::queue_modes((*b).queue),
++            crate::modules::describe_address((*b).callback), crate::modules::describe_address(s.provider), s.identity);
++    }
+     let mut map = active_map().lock().unwrap();
+     write_header(b, BlockHeader { status: E_PENDING, flags: 0, id: s.id });
+     map.insert(b as usize, s);
+@@ -192,7 +204,14 @@ unsafe fn call_provider(s: &State, op: u32, b: *mut XAsyncBlock, buffer: *mut c_
+     }
+     let data = XAsyncProviderData { async_: b, buffer_size: size, buffer, context: s.context as *mut c_void };
+     let f: XAsyncProvider = std::mem::transmute(s.provider);
+-    f(op, &data)
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] provider enter id={} block={b:p} op={op} size={size}", s.id);
++    }
++    let hr = f(op, &data);
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] provider return id={} op={op} hr={:#x}", s.id, hr as u32);
++    }
++    hr
+ }
+ 
+ unsafe extern "system" fn do_work_cb(ctx: *mut c_void, canceled: bool) {
+@@ -219,6 +238,9 @@ unsafe extern "system" fn do_work_cb(ctx: *mut c_void, canceled: bool) {
+ 
+ unsafe extern "system" fn completion_cb(ctx: *mut c_void, _canceled: bool) {
+     let b = ctx as *mut XAsyncBlock;
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] completion block={b:p} callback={}", crate::modules::describe_address((*b).callback));
++    }
+     if (*b).callback != 0 {
+         let f: Completion = std::mem::transmute((*b).callback);
+         f(b);
+@@ -303,6 +325,10 @@ pub unsafe extern "system" fn XAsyncComplete(b: *mut XAsyncBlock, result: HRESUL
+     // Snapshot callback/queue before publishing completion so a waiter woken from
+     // `XAsyncGetStatus(b, true)` can safely destroy a stack-allocated `XAsyncBlock`.
+     let (cb, queue_ptr) = ((*b).callback, (*b).queue);
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] complete id={} block={b:p} hr={:#x} size={required} callback={} queue={queue_ptr:p}",
++            s.id, result as u32, crate::modules::describe_address(cb));
++    }
+     if cleanup_now {
+         call_provider(&s, OP_CLEANUP, b, std::ptr::null_mut(), 0);
+     }
+@@ -342,7 +368,10 @@ pub unsafe extern "system" fn XAsyncGetStatus(b: *mut XAsyncBlock, wait: bool) -
+             if g.is_done() { g.status } else { E_PENDING }
+         }
+         Lookup::Finished(h) => h.status,
+-        Lookup::Invalid => E_INVALIDARG,
++        Lookup::Invalid => {
++            if trace_async() { crate::xlog_info!("[ASYNC] status invalid block={b:p} wait={wait}"); }
++            E_INVALIDARG
++        }
+     }
+ }
+ 
+@@ -383,6 +412,9 @@ pub unsafe extern "system" fn XAsyncGetResult(
+         let f: unsafe extern "system" fn(usize, *mut XAsyncBlock, *const c_void, usize, *mut c_void, *mut usize) -> HRESULT = std::mem::transmute(f);
+         return f(o, b, identity, size, buffer, used);
+     }
++    if trace_async() {
++        crate::xlog_info!("[ASYNC] get-result block={b:p} identity={identity:p} size={size}");
++    }
+     match lookup(b) {
+         Lookup::Invalid => E_INVALIDARG,
+         Lookup::Finished(h) => {

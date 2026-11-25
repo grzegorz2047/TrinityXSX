@@ -10,6 +10,7 @@
 /analysis/
 /ps5-logs/
 /spirv-dump/
+/games/
 *.log
 __pycache__/
 !/tools/vkcaps/

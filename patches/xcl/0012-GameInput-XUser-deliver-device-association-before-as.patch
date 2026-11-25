@@ -1,0 +1,203 @@
+From 93d8f3ec1c26e460ae04612312fbc72c15b960f7 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 08:52:43 +0100
+Subject: [PATCH 12/12] GameInput/XUser: deliver device association before
+ async GameInput arrival
+
+---
+ crates/xcl/src/hle/gameinput.rs        | 33 ++++++-----
+ crates/xcl/src/hle/xgameruntime/mod.rs | 80 +++++++++++++++++++++-----
+ 2 files changed, 82 insertions(+), 31 deletions(-)
+
+diff --git a/crates/xcl/src/hle/gameinput.rs b/crates/xcl/src/hle/gameinput.rs
+index 7524662..cade957 100644
+--- a/crates/xcl/src/hle/gameinput.rs
++++ b/crates/xcl/src/hle/gameinput.rs
+@@ -824,16 +824,6 @@ fn start_poller() {
+     });
+ }
+ 
+-/// Number of async `RegisterDeviceCallback` enumerations currently in flight (spawned but not
+-/// yet finished calling the title's callback). `XUserRegisterForDeviceAssociationChanged` waits
+-/// until this drops to 0 so the title always sees GameInput device arrival before the device is
+-/// associated with the user (otherwise Minecraft's Ore UI drops gamepad input).
+-static DEVICE_ENUM_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+-
+-pub fn device_enum_pending() -> bool {
+-    DEVICE_ENUM_PENDING.load(Ordering::Acquire) > 0
+-}
+-
+ /// RegisterDeviceCallback(device, kind, status filter, enumeration kind, context, callback,
+ /// &token): the gamepad, connected – at once for a blocking enumeration, from another
+ /// thread for an asynchronous one, not at all without enumeration (it never comes or goes)
+@@ -850,9 +840,24 @@ unsafe extern "system" fn register_device_callback(_this: *mut Object, dev: *mut
+         let entry = Arc::new(CallbackEntry::new(t, CallbackKind::Device));
+         CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::clone(&entry));
+         let ctx = context as usize;
+-        DEVICE_ENUM_PENDING.fetch_add(1, Ordering::AcqRel);
+         let spawned = std::thread::Builder::new().name("xcl-gameinput-enum".into()).spawn(move || {
+             crate::eh::arm_current_thread();
++            // Let XUserRegisterForDeviceAssociationChanged (typically registered right after
++            // RegisterDeviceCallback) execute before async GameInput device arrival. In
++            // Minecraft Bedrock's GameControllerHandler_GameCore, player 0 is pre-created
++            // for the signed-in user before both callbacks are registered: if GameInput
++            // arrival runs first while XUserFindForDevice already returns that user, its
++            // fast-path attaches the gamepad without calling setConnected(0, true) and then
++            // the later association callback sees the device already attached and skips
++            // setConnected too, leaving Ore UI's gamepad list empty.
++            let wait_start = Instant::now();
++            let assoc_done = crate::hle::xgameruntime::wait_for_device_association(Duration::from_millis(300));
++            if crate::debug_tools::trace_input() {
++                crate::xlog_info!(
++                    "[INPUT] GameInput async enum proceeding after {} ms (assoc_delivered={assoc_done})",
++                    wait_start.elapsed().as_millis()
++                );
++            }
+             if let Some(_guard) = entry.try_enter() {
+                 // SAFETY: `cb` and `ctx` were registered by the caller; `_guard` keeps
+                 // `UnregisterCallback` blocked until `cb` returns so `ctx` stays valid.
+@@ -860,15 +865,9 @@ unsafe extern "system" fn register_device_callback(_this: *mut Object, dev: *mut
+                 crate::xlog_info!("GameInput: async device callback delivered");
+             }
+             CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| c.token != t);
+-            if DEVICE_ENUM_PENDING.fetch_sub(1, Ordering::AcqRel) == 1 {
+-                crate::hle::xgameruntime::on_gamepad_announced();
+-            }
+         });
+         if spawned.is_err() {
+             CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| c.token != t);
+-            if DEVICE_ENUM_PENDING.fetch_sub(1, Ordering::AcqRel) == 1 {
+-                crate::hle::xgameruntime::on_gamepad_announced();
+-            }
+         }
+     }
+     S_OK
+diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
+index 616b5d3..669d45a 100644
+--- a/crates/xcl/src/hle/xgameruntime/mod.rs
++++ b/crates/xcl/src/hle/xgameruntime/mod.rs
+@@ -852,11 +852,51 @@ static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize, bo
+ /// the local user was handed to the title (XUserAddResult): the input devices are associated
+ /// with it from then on
+ static USER_SIGNED_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++/// Signals when at least one `XUserRegisterForDeviceAssociationChanged` callback has finished
++/// executing on the title's queue, so async `GameInput::RegisterDeviceCallback` can let device
++/// association run first without racing ahead.
++fn association_signal() -> &'static (std::sync::Mutex<bool>, std::sync::Condvar) {
++    static SIG: std::sync::OnceLock<(std::sync::Mutex<bool>, std::sync::Condvar)> = std::sync::OnceLock::new();
++    SIG.get_or_init(|| (std::sync::Mutex::new(false), std::sync::Condvar::new()))
++}
++
++fn mark_association_delivered() {
++    let (lock, cv) = association_signal();
++    let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
++    *done = true;
++    cv.notify_all();
++}
++
++/// Wait up to `max_wait` for a device association callback to finish running, if the local user
++/// is already signed in. Returns `true` if a device association callback has been delivered.
++/// Titles that never register an association callback simply resume once `max_wait` elapses.
++pub fn wait_for_device_association(max_wait: std::time::Duration) -> bool {
++    if !USER_SIGNED_IN.load(Ordering::Acquire) {
++        return false;
++    }
++    let (lock, cv) = association_signal();
++    let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
++    if *done {
++        return true;
++    }
++    let deadline = std::time::Instant::now() + max_wait;
++    while !*done {
++        let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()) else {
++            break;
++        };
++        let (guard, wait_res) = cv.wait_timeout(done, rem).unwrap_or_else(|e| e.into_inner());
++        done = guard;
++        if wait_res.timed_out() {
++            break;
++        }
++    }
++    *done
++}
+ 
+-/// Fire every registered device association callback that has not been notified yet, once both
+-/// the user is signed in and no async GameInput device enumeration is still pending.
++/// Fire every registered device association callback that has not been notified yet once the
++/// user is signed in.
+ fn flush_association_callbacks() {
+-    if !USER_SIGNED_IN.load(Ordering::Acquire) || crate::hle::gameinput::device_enum_pending() {
++    if !USER_SIGNED_IN.load(Ordering::Acquire) {
+         return;
+     }
+     let pending: Vec<(usize, usize, usize)> = {
+@@ -875,12 +915,6 @@ fn flush_association_callbacks() {
+     }
+ }
+ 
+-/// Called by GameInput once its async device arrival enumeration finishes delivering the
+-/// gamepad to the title.
+-pub fn on_gamepad_announced() {
+-    flush_association_callbacks();
+-}
+-
+ /// The association a device gets when it becomes the signed-in user's: none → the user.
+ pub fn gamepad_association() -> DeviceAssociationChange {
+     DeviceAssociationChange { device_id: crate::hle::gameinput::gamepad_device_id(), old_user: 0, new_user: LOCAL_ID }
+@@ -905,11 +939,14 @@ unsafe extern "system" fn association_call(rec: *mut c_void, canceled: bool) {
+             std::str::from_utf8(&r.change.device_id).unwrap_or("?").trim_end()
+         );
+     }
+-    let f: unsafe extern "system" fn(*mut c_void, *const DeviceAssociationChange) = std::mem::transmute(r.cb);
+-    f(r.ctx as *mut c_void, &r.change);
++    if !canceled {
++        let f: unsafe extern "system" fn(*mut c_void, *const DeviceAssociationChange) = std::mem::transmute(r.cb);
++        f(r.ctx as *mut c_void, &r.change);
++    }
+     if trace {
+         crate::xlog_info!("[INPUT] XUser association_call RETURNED");
+     }
++    mark_association_delivered();
+ }
+ 
+ /// The title's association callback gets the gamepad → user association, on its queue's
+@@ -945,13 +982,10 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
+     *token = t;
+     ASSOCIATION_CALLBACKS.lock().unwrap().push((t, queue as usize, ctx as usize, cb, false));
+     let signed_in = USER_SIGNED_IN.load(Ordering::Acquire);
+-    let enum_pending = crate::hle::gameinput::device_enum_pending();
+     crate::xlog_info!(
+         "XUser: device association callback #{t:#x} registered (queue {queue:?}){}",
+         if !signed_in {
+             " – before the user is signed in"
+-        } else if enum_pending {
+-            " – waiting for GameInput device arrival"
+         } else {
+             ""
+         }
+@@ -1233,4 +1267,22 @@ mod tests {
+             let _ = std::fs::remove_file(&probe);
+         }
+     }
++
++    #[test]
++    fn wait_for_device_association_wakes_on_delivery() {
++        let _g = crate::hle::xgameruntime::xasync::ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
++        USER_SIGNED_IN.store(true, Ordering::Release);
++        {
++            let (lock, _) = association_signal();
++            *lock.lock().unwrap() = false;
++        }
++        let t = std::thread::spawn(|| {
++            std::thread::sleep(std::time::Duration::from_millis(20));
++            mark_association_delivered();
++        });
++        let start = std::time::Instant::now();
++        assert!(wait_for_device_association(std::time::Duration::from_secs(2)));
++        assert!(start.elapsed() < std::time::Duration::from_secs(1));
++        t.join().unwrap();
++    }
+ }
+-- 
+2.48.1.windows.1
+

@@ -1,0 +1,120 @@
+From c0c9a4891ff5ae2073d1e8ff02dd2f740c87bffd Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 06:58:52 +0100
+Subject: [PATCH 07/12] HLE: guard ws2_32!getnameinfo writes and expose
+ direct_dxil / network in xcl.toml
+
+RakNet (Minecraft Preview) passes hostlen=65 for a 64-byte stack buffer right before the stack cookie; Wine's getnameinfo zeroes up to hostlen, corrupting the cookie's low byte (0xC0000409). Copy only strlen+1 bytes back on success. Also allow setting direct_dxil and network=false via xcl.toml for runtimes like prospero-win that restrict custom env prefixes.
+---
+ crates/xcl/src/config.rs     |  7 +++++
+ crates/xcl/src/hle/netoff.rs | 50 ++++++++++++++++++++++++++++++++++++
+ crates/xcl/src/host.rs       |  7 +++++
+ 3 files changed, 64 insertions(+)
+
+diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
+index 3fbeff2..b561814 100644
+--- a/crates/xcl/src/config.rs
++++ b/crates/xcl/src/config.rs
+@@ -72,6 +72,11 @@ pub struct Config {
+     /// How far the right stick goes for a mouse speed: 1.0 = full deflection at 4000 mouse
+     /// counts a second.
+     pub mouse_sensitivity: f32,
++    /// Optional direct DXIL mode ("", "1", or "all") – sets `XCL_DIRECT_DXIL` when unset.
++    /// Useful under runtimes that restrict custom environment variables (e.g. prospero-win).
++    pub direct_dxil: String,
++    /// Network access for the title (default true). False sets `XCL_NETWORK=0` when unset.
++    pub network: bool,
+ }
+ 
+ impl Config {
+@@ -187,6 +192,8 @@ impl Default for Config {
+             xbox_live_tokens: false,
+             keyboard_mouse: true,
+             mouse_sensitivity: 1.0,
++            direct_dxil: String::new(),
++            network: true,
+         }
+     }
+ }
+diff --git a/crates/xcl/src/hle/netoff.rs b/crates/xcl/src/hle/netoff.rs
+index 8071b04..012792d 100644
+--- a/crates/xcl/src/hle/netoff.rs
++++ b/crates/xcl/src/hle/netoff.rs
+@@ -118,6 +118,56 @@ static O_GETADDRINFO: AtomicUsize = AtomicUsize::new(0);
+ static O_GETADDRINFO_W: AtomicUsize = AtomicUsize::new(0);
+ /// trampolines of hooks whose original is never called
+ static O_UNUSED: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
++static O_GETNAMEINFO: AtomicUsize = AtomicUsize::new(0);
++
++/// Guard `ws2_32.dll!getnameinfo` against Wine writing past the string length up to `hostlen`
++/// (e.g. zero-filling `host[0..hostlen]`): RakNet in Minecraft passes `hostlen = 65` for a
++/// 64-byte stack buffer right before the stack cookie, corrupting the cookie's low byte to 0.
++pub fn install_getnameinfo_guard() {
++    static ONCE: std::sync::Once = std::sync::Once::new();
++    ONCE.call_once(|| unsafe {
++        if let Err(e) = crate::hooks::hook("ws2_32.dll", "getnameinfo", safe_getnameinfo as usize, &O_GETNAMEINFO) {
++            crate::xlog_warn!("getnameinfo guard not installed: {e}");
++        }
++    });
++}
++
++unsafe extern "system" fn safe_getnameinfo(
++    sa: *const c_void,
++    salen: i32,
++    host: *mut u8,
++    hostlen: u32,
++    serv: *mut u8,
++    servlen: u32,
++    flags: i32,
++) -> i32 {
++    type Fn = unsafe extern "system" fn(*const c_void, i32, *mut u8, u32, *mut u8, u32, i32) -> i32;
++    let f: Fn = std::mem::transmute(O_GETNAMEINFO.load(Ordering::Acquire));
++    let mut host_tmp = if !host.is_null() && hostlen > 0 { vec![0u8; (hostlen as usize).max(256)] } else { Vec::new() };
++    let mut serv_tmp = if !serv.is_null() && servlen > 0 { vec![0u8; (servlen as usize).max(64)] } else { Vec::new() };
++    let h_ptr = if host_tmp.is_empty() { std::ptr::null_mut() } else { host_tmp.as_mut_ptr() };
++    let s_ptr = if serv_tmp.is_empty() { std::ptr::null_mut() } else { serv_tmp.as_mut_ptr() };
++    let r = f(sa, salen, h_ptr, host_tmp.len() as u32, s_ptr, serv_tmp.len() as u32, flags);
++    if r == 0 {
++        if !host_tmp.is_empty() {
++            let nul = host_tmp.iter().position(|&b| b == 0).unwrap_or(host_tmp.len() - 1);
++            let n = (nul + 1).min(hostlen as usize);
++            std::ptr::copy_nonoverlapping(host_tmp.as_ptr(), host, n);
++            if n == hostlen as usize && n > 0 {
++                *host.add(n - 1) = 0;
++            }
++        }
++        if !serv_tmp.is_empty() {
++            let nul = serv_tmp.iter().position(|&b| b == 0).unwrap_or(serv_tmp.len() - 1);
++            let n = (nul + 1).min(servlen as usize);
++            std::ptr::copy_nonoverlapping(serv_tmp.as_ptr(), serv, n);
++            if n == servlen as usize && n > 0 {
++                *serv.add(n - 1) = 0;
++            }
++        }
++    }
++    r
++}
+ 
+ unsafe fn orig_connect(s: usize, name: *const u8, len: i32) -> i32 {
+     match O_CONNECT.load(Ordering::Acquire) {
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index f3e57ce..c2ef706 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -34,6 +34,13 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     if std::env::var_os("XCL_UMA_MB").is_none() && boot.config.uma_mb != 0 {
+         std::env::set_var("XCL_UMA_MB", boot.config.uma_mb.to_string());
+     }
++    if std::env::var_os("XCL_DIRECT_DXIL").is_none() && !boot.config.direct_dxil.is_empty() {
++        std::env::set_var("XCL_DIRECT_DXIL", &boot.config.direct_dxil);
++    }
++    if std::env::var_os("XCL_NETWORK").is_none() && !boot.config.network {
++        std::env::set_var("XCL_NETWORK", "0");
++    }
++    crate::hle::netoff::install_getnameinfo_guard();
+     crate::state::set_boot(boot.clone());
+     // `XCL_ACTIVITY=1`: every 2 s what the title did since (a timeline of where it stops)
+     if std::env::var_os("XCL_ACTIVITY").is_some() {
+-- 
+2.48.1.windows.1
+

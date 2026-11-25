@@ -1,0 +1,40 @@
+From 926e6e4dd2f28aded17b17ca9a0d9c17c4205220 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 07:55:20 +0100
+Subject: [PATCH 09/12] XNetworking: report ConnectivityLevelHint::None when
+ XCL_NETWORK=0
+
+---
+ crates/xcl/src/hle/xgameruntime/networking.rs | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/crates/xcl/src/hle/xgameruntime/networking.rs b/crates/xcl/src/hle/xgameruntime/networking.rs
+index 39e9078..e445b22 100644
+--- a/crates/xcl/src/hle/xgameruntime/networking.rs
++++ b/crates/xcl/src/hle/xgameruntime/networking.rs
+@@ -593,6 +593,22 @@ pub unsafe extern "system" fn XNetworkingGetConnectivityHint(out: *mut XNetworki
+     if out.is_null() {
+         return E_INVALIDARG;
+     }
++    if crate::hle::netoff::enabled() {
++        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++        if !LOGGED.swap(true, Ordering::Relaxed) {
++            crate::xlog_info!("XNetworkingGetConnectivityHint: XCL_NETWORK=0 → offline (ConnectivityLevelHint::None)");
++        }
++        *out = XNetworkingConnectivityHint {
++            connectivity_level: 1, // XNetworkingConnectivityLevelHint::None
++            connectivity_cost: 1,  // Unrestricted
++            iana_interface_type: 6,
++            network_initialized: true,
++            approaching_data_limit: false,
++            over_data_limit: false,
++            roaming: false,
++        };
++        return S_OK;
++    }
+     let host = host_connectivity_hint();
+     let level = match host.map(|h| h.connectivity_level) {
+         Some(l @ 1..=4) => l,
+-- 
+2.48.1.windows.1
+

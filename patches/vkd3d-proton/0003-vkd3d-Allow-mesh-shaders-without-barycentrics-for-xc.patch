@@ -1,0 +1,29 @@
+From 1bbe464e2b8342f9c99b1c11800c3c7ff9a28795 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 06:13:17 +0100
+Subject: [PATCH 3/3] vkd3d: Allow mesh shaders without barycentrics for
+ xcl.exe.
+
+The UE5 workaround turns mesh shaders off on devices without VK_KHR_fragment_shader_barycentric. XCL draws console NGG geometry through mesh shaders without SV_Barycentrics; RADV on the PS5 has VK_EXT_mesh_shader without fragment shader barycentrics. Opt xcl.exe in via vkd3d_proton_app_workarounds.json, matching AlanWake2.exe.
+---
+ libs/vkd3d/vkd3d_proton_app_workarounds.json | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/libs/vkd3d/vkd3d_proton_app_workarounds.json b/libs/vkd3d/vkd3d_proton_app_workarounds.json
+index 21fc637..016628a 100644
+--- a/libs/vkd3d/vkd3d_proton_app_workarounds.json
++++ b/libs/vkd3d/vkd3d_proton_app_workarounds.json
+@@ -132,6 +132,10 @@
+       "applicationFeatures" : [ "MESH_SHADER_WITHOUT_BARYCENTRICS" ],
+       "name" : "AlanWake2.exe"
+     },
++    {
++      "applicationFeatures" : [ "MESH_SHADER_WITHOUT_BARYCENTRICS" ],
++      "name" : "xcl.exe"
++    },
+     {
+       "configEnable" : [ "NO_UPLOAD_HVV", "SKIP_NULL_SPARSE_TILES" ],
+       "name" : "MonsterHunterWilds.exe"
+-- 
+2.56.1
+

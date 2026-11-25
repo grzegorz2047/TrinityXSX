@@ -1,8 +1,8 @@
-From 982dca12dc0386e6694089fb05eac83d682d440a Mon Sep 17 00:00:00 2001
+From df1a74d682210075d997b43c657ba2c48ae126e2 Mon Sep 17 00:00:00 2001
 From: Grzegorz <grzegorz2047@gmail.com>
 Date: Wed, 25 Nov 2026 02:51:53 +0100
-Subject: [PATCH 3/6] PE loader: sections sharing a host page get the union of
- their access
+Subject: [PATCH 03/12] PE loader: sections sharing a host page get the union
+ of their access
 
 Under Wine on the PS5 (prospero-win) the host has 16 KiB pages. The
 loader protected each section with VirtualProtect at 4 KiB granularity,
@@ -202,3 +202,6 @@ index 52c49af..492cca3 100644
      /// A PE32+ DLL of one section (.text at RVA 0x1000) holding `code`, its entry point at the
      /// start of it, preferred at `image_base` and relocatable (one empty block at RVA 0x1100);
      /// `import_dir`: (RVA, size) of the import directory, if any.
+-- 
+2.48.1.windows.1
+

@@ -1,0 +1,484 @@
+From 796f3e816fde16ea6decf40c005090190d92d270 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 08:36:16 +0100
+Subject: [PATCH 11/12] Debug: add xcl.toml-driven PS5 live diagnostics and
+ retour software call probes
+
+---
+ crates/xcl/src/config.rs                     |  18 ++
+ crates/xcl/src/debug_tools.rs                | 175 +++++++++++++++++++
+ crates/xcl/src/hle/gameinput.rs              |  24 ++-
+ crates/xcl/src/hle/netoff.rs                 |   9 +
+ crates/xcl/src/hle/xgameruntime/api.rs       |  10 +-
+ crates/xcl/src/hle/xgameruntime/mod.rs       |  37 +++-
+ crates/xcl/src/hle/xgameruntime/taskqueue.rs |  12 ++
+ crates/xcl/src/host.rs                       |   5 +
+ crates/xcl/src/lib.rs                        |   1 +
+ crates/xcl/src/log.rs                        |   2 +-
+ crates/xcl/src/vfs_hooks.rs                  |   5 +
+ 11 files changed, 293 insertions(+), 5 deletions(-)
+ create mode 100644 crates/xcl/src/debug_tools.rs
+
+diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
+index e00fdea..d366b12 100644
+--- a/crates/xcl/src/config.rs
++++ b/crates/xcl/src/config.rs
+@@ -81,6 +81,18 @@ pub struct Config {
+     pub direct_dxil: String,
+     /// Network access for the title (default true). False sets `XCL_NETWORK=0` when unset.
+     pub network: bool,
++    /// Periodic 2 s activity & memory log (`XCL_ACTIVITY=1`).
++    pub activity: bool,
++    /// Verbose GameInput / XUser / XTaskQueue diagnostic tracing.
++    pub trace_input: bool,
++    /// Log up to 128 unique blocked network targets under `network = false`.
++    pub trace_net: bool,
++    /// Comma-separated substrings for VFS file-open tracing (e.g. "minecraftWorlds,hbui,options").
++    pub trace_vfs: String,
++    /// Function-entry RVAs (hex strings) in the main executable to hook with software call probes.
++    pub sw_probes: Vec<String>,
++    /// Flush `xcl.log` on every INFO line (useful for live FTP tailing on PS5).
++    pub live_flush: bool,
+ }
+ 
+ impl Config {
+@@ -199,6 +211,12 @@ impl Default for Config {
+             mouse_sensitivity: 1.0,
+             direct_dxil: String::new(),
+             network: true,
++            activity: false,
++            trace_input: false,
++            trace_net: false,
++            trace_vfs: String::new(),
++            sw_probes: Vec::new(),
++            live_flush: false,
+         }
+     }
+ }
+diff --git a/crates/xcl/src/debug_tools.rs b/crates/xcl/src/debug_tools.rs
+new file mode 100644
+index 0000000..89a24d7
+--- /dev/null
++++ b/crates/xcl/src/debug_tools.rs
+@@ -0,0 +1,175 @@
++//! Runtime debugging & live diagnostics for titles (especially under runtimes like
++//! `prospero-win` on PS5 where interactive debuggers and custom `XCL_*` env vars are unavailable).
++//!
++//! Configured through `xcl.toml`:
++//! * `trace_input = true`: logs XUser device-association execution, XTaskQueue port modes,
++//!   XUser privilege/device queries, and GameInput button edges.
++//! * `trace_net = true`: logs up to 128 unique blocked network targets under `XCL_NETWORK=0`.
++//! * `trace_vfs = "minecraftWorlds,hbui,options"`: logs VFS file opens matching any substring.
++//! * `sw_probes = ["0x106b940", ...]`: installs `retour::RawDetour` software call probes on up to
++//!   8 function-entry RVAs in the main title module (works without hardware debug registers).
++//! * `live_flush = true`: flushes `xcl.log` on every INFO line for live FTP inspection.
++
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::sync::{Mutex, OnceLock};
++
++use retour::RawDetour;
++
++use crate::config::Config;
++
++static TRACE_INPUT: AtomicBool = AtomicBool::new(false);
++static TRACE_NET: AtomicBool = AtomicBool::new(false);
++static LIVE_FLUSH: AtomicBool = AtomicBool::new(false);
++static VFS_FILTERS: OnceLock<Vec<String>> = OnceLock::new();
++
++pub fn init(cfg: &Config) {
++    TRACE_INPUT.store(cfg.trace_input, Ordering::Release);
++    TRACE_NET.store(cfg.trace_net, Ordering::Release);
++    LIVE_FLUSH.store(cfg.live_flush, Ordering::Release);
++    let filters: Vec<String> = cfg
++        .trace_vfs
++        .split(',')
++        .map(|s| s.trim().to_ascii_lowercase())
++        .filter(|s| !s.is_empty())
++        .collect();
++    let _ = VFS_FILTERS.set(filters.clone());
++    if cfg.trace_input || cfg.trace_net || cfg.live_flush || !filters.is_empty() || !cfg.sw_probes.is_empty() || cfg.activity {
++        crate::xlog_info!(
++            "debug: active (activity={}, trace_input={}, trace_net={}, live_flush={}, trace_vfs={:?}, sw_probes={:?})",
++            cfg.activity,
++            cfg.trace_input,
++            cfg.trace_net,
++            cfg.live_flush,
++            filters,
++            cfg.sw_probes
++        );
++    }
++}
++
++pub fn trace_input() -> bool {
++    TRACE_INPUT.load(Ordering::Acquire)
++}
++
++pub fn trace_net() -> bool {
++    TRACE_NET.load(Ordering::Acquire)
++}
++
++pub fn live_flush() -> bool {
++    LIVE_FLUSH.load(Ordering::Acquire)
++}
++
++pub fn matches_vfs_filter(path: &str) -> bool {
++    let Some(filters) = VFS_FILTERS.get() else { return false };
++    if filters.is_empty() {
++        return false;
++    }
++    let lower = path.to_ascii_lowercase();
++    filters.iter().any(|f| lower.contains(f.as_str()))
++}
++
++// ---------------------------------------------------------------------------------------
++// Software function-entry call probes (up to 8 RVAs in main module via retour::RawDetour)
++// ---------------------------------------------------------------------------------------
++
++const MAX_SW_PROBES: usize = 8;
++
++static PROBE_ORIG: [AtomicUsize; MAX_SW_PROBES] = [const { AtomicUsize::new(0) }; MAX_SW_PROBES];
++static PROBE_ADDR: [AtomicUsize; MAX_SW_PROBES] = [const { AtomicUsize::new(0) }; MAX_SW_PROBES];
++static PROBE_HITS: [AtomicUsize; MAX_SW_PROBES] = [const { AtomicUsize::new(0) }; MAX_SW_PROBES];
++static PROBE_LINES: [AtomicUsize; MAX_SW_PROBES] = [const { AtomicUsize::new(0) }; MAX_SW_PROBES];
++static PROBE_LAST_SIG: Mutex<[(u64, u64, u64, u64); MAX_SW_PROBES]> = Mutex::new([(u64::MAX, u64::MAX, u64::MAX, u64::MAX); MAX_SW_PROBES]);
++
++type ProbeFn = unsafe extern "system" fn(u64, u64, u64, u64, u64, u64) -> u64;
++
++unsafe fn read_u64s(ptr: u64) -> Option<[u64; 3]> {
++    let p = ptr as usize;
++    if p < 0x10000 || !crate::gpu::shader::readable(p, 24) {
++        return None;
++    }
++    let s = p as *const u64;
++    Some([s.read_unaligned(), s.add(1).read_unaligned(), s.add(2).read_unaligned()])
++}
++
++unsafe fn probe_enter(idx: usize, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
++    let orig_addr = PROBE_ORIG[idx].load(Ordering::Acquire);
++    let orig: ProbeFn = std::mem::transmute(orig_addr);
++    let hit = PROBE_HITS[idx].fetch_add(1, Ordering::Relaxed) + 1;
++    let m1 = read_u64s(a1);
++    let m3 = read_u64s(a3);
++    let sig = (a4 & 0xFFFF_FFFF, a5 & 0xFF, a6 & 0xFF, m3.map_or(0, |v| v[0]));
++    let changed = {
++        let mut g = PROBE_LAST_SIG.lock().unwrap_or_else(|e| e.into_inner());
++        let diff = g[idx] != sig;
++        if diff {
++            g[idx] = sig;
++        }
++        diff
++    };
++    let should_log = hit <= 16 || (changed && PROBE_LINES[idx].load(Ordering::Relaxed) < 64) || hit % 256 == 0;
++    let ret = orig(a1, a2, a3, a4, a5, a6);
++    if should_log && PROBE_LINES[idx].fetch_add(1, Ordering::Relaxed) < 80 {
++        let addr = PROBE_ADDR[idx].load(Ordering::Relaxed);
++        let desc = crate::modules::describe_address(addr);
++        let m1_str = match m1 {
++            Some([q0, q1, q2]) => format!(" [rcx]={q0:#x},{q1:#x},{q2:#x}"),
++            None => String::new(),
++        };
++        let m3_str = match m3 {
++            Some([q0, q1, q2]) => format!(" [r8]={q0:#x},{q1:#x},{q2:#x}"),
++            None => String::new(),
++        };
++        crate::xlog_info!(
++            "[SW_PROBE #{idx}] {desc} hit #{hit}: rcx={a1:#x} rdx={a2:#x} r8={a3:#x} r9={a4:#x} s5={:#x} s6={:#x}{m1_str}{m3_str} → ret={ret:#x}",
++            a5 & 0xFFFF_FFFF,
++            a6 & 0xFFFF_FFFF
++        );
++    }
++    ret
++}
++
++unsafe extern "system" fn sw_probe_trampoline<const IDX: usize>(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
++    probe_enter(IDX, a1, a2, a3, a4, a5, a6)
++}
++
++const TRAMPOLINES: [ProbeFn; MAX_SW_PROBES] = [
++    sw_probe_trampoline::<0>,
++    sw_probe_trampoline::<1>,
++    sw_probe_trampoline::<2>,
++    sw_probe_trampoline::<3>,
++    sw_probe_trampoline::<4>,
++    sw_probe_trampoline::<5>,
++    sw_probe_trampoline::<6>,
++    sw_probe_trampoline::<7>,
++];
++
++/// Install software call probes on up to `MAX_SW_PROBES` function-entry RVAs of the main module.
++pub unsafe fn install_sw_probes(main_base: usize, rvas: &[String]) {
++    let mut slot = 0usize;
++    for raw in rvas {
++        if slot >= MAX_SW_PROBES {
++            crate::xlog_warn!("sw_probes: max {MAX_SW_PROBES} probes supported; ignoring {raw:?}");
++            break;
++        }
++        let cleaned = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
++        let Ok(rva) = usize::from_str_radix(cleaned, 16) else {
++            crate::xlog_warn!("sw_probes: invalid hex RVA {raw:?}");
++            continue;
++        };
++        let target = main_base + rva;
++        match RawDetour::new(target as *const (), TRAMPOLINES[slot] as *const ()) {
++            Ok(d) => {
++                PROBE_ADDR[slot].store(target, Ordering::Release);
++                PROBE_ORIG[slot].store(d.trampoline() as *const () as usize, Ordering::Release);
++                match d.enable() {
++                    Ok(()) => {
++                        Box::leak(Box::new(d));
++                        crate::xlog_info!("sw_probe #{slot} active at {} ({target:#x})", crate::modules::describe_address(target));
++                        slot += 1;
++                    }
++                    Err(e) => crate::xlog_warn!("sw_probe enable at +{rva:#x} failed: {e}"),
++                }
++            }
++            Err(e) => crate::xlog_warn!("sw_probe detour at +{rva:#x} failed: {e}"),
++        }
++    }
++}
+diff --git a/crates/xcl/src/hle/gameinput.rs b/crates/xcl/src/hle/gameinput.rs
+index b4506dd..7524662 100644
+--- a/crates/xcl/src/hle/gameinput.rs
++++ b/crates/xcl/src/hle/gameinput.rs
+@@ -320,6 +320,20 @@ pub fn poll() -> GamepadState {
+         if new != 0 {
+             crate::xlog_info!("GameInput: gamepad buttons {new:#x} pressed for the first time");
+         }
++        if crate::debug_tools::trace_input() {
++            static LAST_BTN: AtomicU32 = AtomicU32::new(0);
++            static LINES: AtomicU32 = AtomicU32::new(0);
++            let prev = LAST_BTN.swap(s.buttons, Ordering::Relaxed);
++            if prev != s.buttons && LINES.fetch_add(1, Ordering::Relaxed) < 64 {
++                crate::xlog_info!(
++                    "[INPUT] GameInput::poll buttons={:#x} (was {:#x}) lx={:.2} ly={:.2}",
++                    s.buttons,
++                    prev,
++                    s.left_x,
++                    s.left_y
++                );
++            }
++        }
+     }
+     s
+ }
+@@ -903,7 +917,15 @@ unsafe extern "system" fn find_device_from_id(_this: *mut Object, id: *const [u8
+     if out.is_null() {
+         return E_POINTER;
+     }
+-    if !id.is_null() && *id == DEVICE_ID {
++    let matched = !id.is_null() && *id == DEVICE_ID;
++    if crate::debug_tools::trace_input() {
++        static N: AtomicU32 = AtomicU32::new(0);
++        if N.fetch_add(1, Ordering::Relaxed) < 16 {
++            let s = if id.is_null() { "<null>" } else { std::str::from_utf8(&*id).unwrap_or("<bin>").trim_end() };
++            crate::xlog_info!("[INPUT] GameInput::FindDeviceFromId({s:?}) → matched={matched}");
++        }
++    }
++    if matched {
+         *out = device();
+         return S_OK;
+     }
+diff --git a/crates/xcl/src/hle/netoff.rs b/crates/xcl/src/hle/netoff.rs
+index 012792d..f3086c2 100644
+--- a/crates/xcl/src/hle/netoff.rs
++++ b/crates/xcl/src/hle/netoff.rs
+@@ -83,6 +83,15 @@ pub fn ordinals() -> Vec<(u16, &'static str)> {
+ }
+ 
+ fn note(what: &str) {
++    if crate::debug_tools::trace_net() {
++        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
++        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
++        if g.len() < 128 && !g.iter().any(|s| s == what) {
++            g.push(what.to_string());
++            crate::xlog_info!("[NET] XCL_NETWORK=0: {what} fails (no network)");
++        }
++        return;
++    }
+     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+     if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+         crate::xlog_info!("XCL_NETWORK=0: {what} fails (no network)");
+diff --git a/crates/xcl/src/hle/xgameruntime/api.rs b/crates/xcl/src/hle/xgameruntime/api.rs
+index b7a3881..436b1de 100644
+--- a/crates/xcl/src/hle/xgameruntime/api.rs
++++ b/crates/xcl/src/hle/xgameruntime/api.rs
+@@ -1296,7 +1296,7 @@ unsafe extern "system" fn find_user(id: u64, out: *mut *mut c_void) -> HRESULT {
+ }
+ 
+ /// The local user has every privilege (no Xbox Live to deny one).
+-unsafe extern "system" fn XUserCheckPrivilege(_user: *mut c_void, _options: u32, _privilege: u32, has: *mut bool, reasons: *mut u32) -> HRESULT {
++unsafe extern "system" fn XUserCheckPrivilege(_user: *mut c_void, options: u32, privilege: u32, has: *mut bool, reasons: *mut u32) -> HRESULT {
+     if has.is_null() {
+         return E_INVALIDARG;
+     }
+@@ -1304,6 +1304,14 @@ unsafe extern "system" fn XUserCheckPrivilege(_user: *mut c_void, _options: u32,
+     if !reasons.is_null() {
+         *reasons = 0;
+     }
++    if crate::debug_tools::trace_input() {
++        static SEEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
++        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
++        if g.len() < 32 && !g.contains(&privilege) {
++            g.push(privilege);
++            crate::xlog_info!("[INPUT] XUserCheckPrivilege(options={options:#x}, privilege={privilege}) → has=true");
++        }
++    }
+     S_OK
+ }
+ 
+diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
+index 30c616d..616b5d3 100644
+--- a/crates/xcl/src/hle/xgameruntime/mod.rs
++++ b/crates/xcl/src/hle/xgameruntime/mod.rs
+@@ -892,15 +892,36 @@ struct AssociationCall {
+     change: DeviceAssociationChange,
+ }
+ 
+-unsafe extern "system" fn association_call(rec: *mut c_void, _canceled: bool) {
++unsafe extern "system" fn association_call(rec: *mut c_void, canceled: bool) {
+     let r = Box::from_raw(rec as *mut AssociationCall);
++    let trace = crate::debug_tools::trace_input();
++    if trace {
++        crate::xlog_info!(
++            "[INPUT] XUser association_call ENTER: cb={} ctx={:#x} canceled={canceled} old_user={} new_user={} dev={:?}",
++            crate::modules::describe_address(r.cb),
++            r.ctx,
++            r.change.old_user,
++            r.change.new_user,
++            std::str::from_utf8(&r.change.device_id).unwrap_or("?").trim_end()
++        );
++    }
+     let f: unsafe extern "system" fn(*mut c_void, *const DeviceAssociationChange) = std::mem::transmute(r.cb);
+     f(r.ctx as *mut c_void, &r.change);
++    if trace {
++        crate::xlog_info!("[INPUT] XUser association_call RETURNED");
++    }
+ }
+ 
+ /// The title's association callback gets the gamepad → user association, on its queue's
+ /// completion port.
+ unsafe fn notify_association(queue: usize, ctx: usize, cb: usize) {
++    if crate::debug_tools::trace_input() {
++        let modes = taskqueue::queue_modes(queue as *mut c_void);
++        crate::xlog_info!(
++            "[INPUT] notify_association submitting to queue={queue:#x} (modes={modes:?}) cb={}",
++            crate::modules::describe_address(cb)
++        );
++    }
+     let rec = Box::into_raw(Box::new(AssociationCall { cb, ctx, change: gamepad_association() }));
+     let hr = xasync::submit_callback(queue as *mut c_void, PORT_COMPLETION, rec as *mut c_void, association_call as usize);
+     if hr < 0 {
+@@ -957,10 +978,22 @@ fn user_signed_in() {
+ }
+ 
+ /// Associate every input device with the local signed-in user.
+-pub unsafe extern "system" fn XUserFindForDevice(_device: *const c_void, out: *mut *mut c_void) -> HRESULT {
++pub unsafe extern "system" fn XUserFindForDevice(device: *const c_void, out: *mut *mut c_void) -> HRESULT {
+     if out.is_null() {
+         return E_INVALIDARG;
+     }
++    if crate::debug_tools::trace_input() {
++        let dev = if !device.is_null() && crate::gpu::shader::readable(device as usize, 32) {
++            let b = std::slice::from_raw_parts(device as *const u8, 32);
++            std::str::from_utf8(b).unwrap_or("<bin>").trim_end().to_string()
++        } else {
++            "<null>".to_string()
++        };
++        static N: AtomicU64 = AtomicU64::new(0);
++        if N.fetch_add(1, Ordering::Relaxed) < 16 {
++            crate::xlog_info!("[INPUT] XUserFindForDevice({dev:?}) → local user");
++        }
++    }
+     USER.refs.fetch_add(1, Ordering::AcqRel);
+     *out = user_ptr();
+     S_OK
+diff --git a/crates/xcl/src/hle/xgameruntime/taskqueue.rs b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
+index e5565ad..4811b39 100644
+--- a/crates/xcl/src/hle/xgameruntime/taskqueue.rs
++++ b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
+@@ -100,6 +100,18 @@ pub struct QueueHandle {
+ 
+ const MAGIC: u64 = 0x5843_4C51_5545_5545; // "XCLQUEUE"
+ 
++/// Diagnostic helper: return `(work_mode, completion_mode)` for an XCL-owned `XTaskQueueHandle`.
++pub unsafe fn queue_modes(h: *mut c_void) -> Option<(u32, u32)> {
++    if h.is_null() || !crate::gpu::shader::readable(h as usize, std::mem::size_of::<QueueHandle>()) {
++        return None;
++    }
++    let qh = &*(h as *const QueueHandle);
++    if qh.magic != MAGIC {
++        return None;
++    }
++    Some((qh.queue.ports[0].mode, qh.queue.ports[1].mode))
++}
++
+ // ---------------------------------------------------------------------------------------
+ // shared worker pool + timer
+ // ---------------------------------------------------------------------------------------
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index d34dcfe..9dde1cd 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -43,6 +43,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     if std::env::var_os("XCL_NETWORK").is_none() && !boot.config.network {
+         std::env::set_var("XCL_NETWORK", "0");
+     }
++    if std::env::var_os("XCL_ACTIVITY").is_none() && boot.config.activity {
++        std::env::set_var("XCL_ACTIVITY", "1");
++    }
++    crate::debug_tools::init(&boot.config);
+     crate::hle::netoff::install_getnameinfo_guard();
+     crate::state::set_boot(boot.clone());
+     // `XCL_ACTIVITY=1`: every 2 s what the title did since (a timeline of where it stops)
+@@ -155,6 +159,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+         }
+     };
+     unsafe { crate::hle::kernelx::adopt_title_hooks(&main) };
++    unsafe { crate::debug_tools::install_sw_probes(main.base, &boot.config.sw_probes) };
+     crate::report::write_final(None);
+     let code = crate::loader::run_main(&main);
+     crate::xlog_info!("game entry point returned code {code}");
+diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
+index 4229043..f6e5a61 100644
+--- a/crates/xcl/src/lib.rs
++++ b/crates/xcl/src/lib.rs
+@@ -9,6 +9,7 @@
+ pub mod log;
+ pub mod manifest;
+ pub mod config;
++pub mod debug_tools;
+ pub mod disasm;
+ pub mod eh;
+ pub mod gpu;
+diff --git a/crates/xcl/src/log.rs b/crates/xcl/src/log.rs
+index 76b51b7..cd7a3b5 100644
+--- a/crates/xcl/src/log.rs
++++ b/crates/xcl/src/log.rs
+@@ -79,7 +79,7 @@ pub fn write(level: Level, args: std::fmt::Arguments<'_>) {
+     if let Ok(mut g) = FILE.try_lock().or_else(|_| FILE.lock()) {
+         if let Some(f) = g.as_mut() {
+             let _ = f.write_all(line.as_bytes());
+-            if level <= Level::Warn {
++            if level <= Level::Warn || (level == Level::Info && crate::debug_tools::live_flush()) {
+                 let _ = f.flush();
+             }
+         }
+diff --git a/crates/xcl/src/vfs_hooks.rs b/crates/xcl/src/vfs_hooks.rs
+index 0767cf1..7e9b570 100644
+--- a/crates/xcl/src/vfs_hooks.rs
++++ b/crates/xcl/src/vfs_hooks.rs
+@@ -68,6 +68,11 @@ static O_CREATE_FILE_2: AtomicUsize = AtomicUsize::new(0);
+ /// memory without the CPU – write-watch does not see it).
+ fn log_open(api: &str, path: &str, flags: u32) {
+     static N: AtomicUsize = AtomicUsize::new(0);
++    static FILTERED_N: AtomicUsize = AtomicUsize::new(0);
++    if crate::debug_tools::matches_vfs_filter(path) && FILTERED_N.fetch_add(1, Ordering::Relaxed) < 128 {
++        crate::xlog_info!("[VFS_TRACE] {api}({path}) flags {flags:#x}");
++        return;
++    }
+     // the title's own data, not drivers' caches, system files or DLLs
+     let lower = path.to_ascii_lowercase();
+     if lower.ends_with(".dll") || lower.ends_with(".exe") || lower.contains(r"\appdata\") || lower.contains(r"\windows\") || lower.starts_with(r"\\") {
+-- 
+2.48.1.windows.1
+

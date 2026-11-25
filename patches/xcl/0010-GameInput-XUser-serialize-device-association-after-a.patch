@@ -1,0 +1,166 @@
+From 8b56458c16087e5b9830a6d0e10409bb39ff1546 Mon Sep 17 00:00:00 2001
+From: Grzegorz <grzegorz2047@gmail.com>
+Date: Wed, 25 Nov 2026 08:22:17 +0100
+Subject: [PATCH 10/12] GameInput/XUser: serialize device association after
+ async GameInput device arrival
+
+---
+ crates/xcl/src/hle/gameinput.rs        | 18 +++++++++
+ crates/xcl/src/hle/xgameruntime/api.rs |  4 +-
+ crates/xcl/src/hle/xgameruntime/mod.rs | 56 +++++++++++++++++++++-----
+ 3 files changed, 66 insertions(+), 12 deletions(-)
+
+diff --git a/crates/xcl/src/hle/gameinput.rs b/crates/xcl/src/hle/gameinput.rs
+index e7983a8..b4506dd 100644
+--- a/crates/xcl/src/hle/gameinput.rs
++++ b/crates/xcl/src/hle/gameinput.rs
+@@ -810,6 +810,16 @@ fn start_poller() {
+     });
+ }
+ 
++/// Number of async `RegisterDeviceCallback` enumerations currently in flight (spawned but not
++/// yet finished calling the title's callback). `XUserRegisterForDeviceAssociationChanged` waits
++/// until this drops to 0 so the title always sees GameInput device arrival before the device is
++/// associated with the user (otherwise Minecraft's Ore UI drops gamepad input).
++static DEVICE_ENUM_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++
++pub fn device_enum_pending() -> bool {
++    DEVICE_ENUM_PENDING.load(Ordering::Acquire) > 0
++}
++
+ /// RegisterDeviceCallback(device, kind, status filter, enumeration kind, context, callback,
+ /// &token): the gamepad, connected – at once for a blocking enumeration, from another
+ /// thread for an asynchronous one, not at all without enumeration (it never comes or goes)
+@@ -826,17 +836,25 @@ unsafe extern "system" fn register_device_callback(_this: *mut Object, dev: *mut
+         let entry = Arc::new(CallbackEntry::new(t, CallbackKind::Device));
+         CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::clone(&entry));
+         let ctx = context as usize;
++        DEVICE_ENUM_PENDING.fetch_add(1, Ordering::AcqRel);
+         let spawned = std::thread::Builder::new().name("xcl-gameinput-enum".into()).spawn(move || {
+             crate::eh::arm_current_thread();
+             if let Some(_guard) = entry.try_enter() {
+                 // SAFETY: `cb` and `ctx` were registered by the caller; `_guard` keeps
+                 // `UnregisterCallback` blocked until `cb` returns so `ctx` stays valid.
+                 unsafe { cb(t, ctx as *mut c_void, device(), now_us(), STATUS, 0) };
++                crate::xlog_info!("GameInput: async device callback delivered");
+             }
+             CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| c.token != t);
++            if DEVICE_ENUM_PENDING.fetch_sub(1, Ordering::AcqRel) == 1 {
++                crate::hle::xgameruntime::on_gamepad_announced();
++            }
+         });
+         if spawned.is_err() {
+             CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|c| c.token != t);
++            if DEVICE_ENUM_PENDING.fetch_sub(1, Ordering::AcqRel) == 1 {
++                crate::hle::xgameruntime::on_gamepad_announced();
++            }
+         }
+     }
+     S_OK
+diff --git a/crates/xcl/src/hle/xgameruntime/api.rs b/crates/xcl/src/hle/xgameruntime/api.rs
+index 5e56995..b7a3881 100644
+--- a/crates/xcl/src/hle/xgameruntime/api.rs
++++ b/crates/xcl/src/hle/xgameruntime/api.rs
+@@ -964,11 +964,13 @@ unsafe extern "system" fn empty_result(b: *mut XAsyncBlock) -> HRESULT {
+     XAsyncGetStatus(b, false)
+ }
+ 
+-unsafe extern "system" fn resolve_privilege_async(_user: usize, _options: u32, _privilege: u32, b: *mut XAsyncBlock) -> HRESULT {
++unsafe extern "system" fn resolve_privilege_async(_user: usize, options: u32, privilege: u32, b: *mut XAsyncBlock) -> HRESULT {
++    crate::xlog_info!("XUserResolvePrivilegeWithUiAsync(options={options:#x}, privilege={privilege}) → S_OK");
+     completed(b)
+ }
+ 
+ unsafe extern "system" fn resolve_issue_async(_user: usize, _url: usize, b: *mut XAsyncBlock) -> HRESULT {
++    crate::xlog_info!("XUserResolveIssueWithUiAsync → S_OK");
+     completed(b)
+ }
+ 
+diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
+index a521773..30c616d 100644
+--- a/crates/xcl/src/hle/xgameruntime/mod.rs
++++ b/crates/xcl/src/hle/xgameruntime/mod.rs
+@@ -847,12 +847,40 @@ pub struct DeviceAssociationChange {
+     pub new_user: u64,
+ }
+ 
+-/// device association callbacks the title registered: (token, queue, context, callback)
+-static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize)>> = std::sync::Mutex::new(Vec::new());
++/// device association callbacks the title registered: (token, queue, context, callback, notified)
++static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize, bool)>> = std::sync::Mutex::new(Vec::new());
+ /// the local user was handed to the title (XUserAddResult): the input devices are associated
+ /// with it from then on
+ static USER_SIGNED_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+ 
++/// Fire every registered device association callback that has not been notified yet, once both
++/// the user is signed in and no async GameInput device enumeration is still pending.
++fn flush_association_callbacks() {
++    if !USER_SIGNED_IN.load(Ordering::Acquire) || crate::hle::gameinput::device_enum_pending() {
++        return;
++    }
++    let pending: Vec<(usize, usize, usize)> = {
++        let mut g = ASSOCIATION_CALLBACKS.lock().unwrap();
++        let mut out = Vec::new();
++        for entry in g.iter_mut() {
++            if !entry.4 {
++                entry.4 = true;
++                out.push((entry.1, entry.2, entry.3));
++            }
++        }
++        out
++    };
++    for (q, ctx, cb) in pending {
++        unsafe { notify_association(q, ctx, cb) };
++    }
++}
++
++/// Called by GameInput once its async device arrival enumeration finishes delivering the
++/// gamepad to the title.
++pub fn on_gamepad_announced() {
++    flush_association_callbacks();
++}
++
+ /// The association a device gets when it becomes the signed-in user's: none → the user.
+ pub fn gamepad_association() -> DeviceAssociationChange {
+     DeviceAssociationChange { device_id: crate::hle::gameinput::gamepad_device_id(), old_user: 0, new_user: LOCAL_ID }
+@@ -894,11 +922,20 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
+     }
+     let t = NEXT_ASSOCIATION_TOKEN.fetch_add(1, Ordering::Relaxed);
+     *token = t;
+-    ASSOCIATION_CALLBACKS.lock().unwrap().push((t, queue as usize, ctx as usize, cb));
+-    crate::xlog_info!("XUser: device association callback #{t:#x} registered (queue {queue:?}){}", if USER_SIGNED_IN.load(Ordering::Acquire) { "" } else { " – before the user is signed in" });
+-    if USER_SIGNED_IN.load(Ordering::Acquire) {
+-        notify_association(queue as usize, ctx as usize, cb);
+-    }
++    ASSOCIATION_CALLBACKS.lock().unwrap().push((t, queue as usize, ctx as usize, cb, false));
++    let signed_in = USER_SIGNED_IN.load(Ordering::Acquire);
++    let enum_pending = crate::hle::gameinput::device_enum_pending();
++    crate::xlog_info!(
++        "XUser: device association callback #{t:#x} registered (queue {queue:?}){}",
++        if !signed_in {
++            " – before the user is signed in"
++        } else if enum_pending {
++            " – waiting for GameInput device arrival"
++        } else {
++            ""
++        }
++    );
++    flush_association_callbacks();
+     S_OK
+ }
+ 
+@@ -916,10 +953,7 @@ fn user_signed_in() {
+         return;
+     }
+     crate::xlog_info!("XUser: the local user reached the title (XUserAddResult); {} device association callback(s)", ASSOCIATION_CALLBACKS.lock().unwrap().len());
+-    let calls: Vec<_> = ASSOCIATION_CALLBACKS.lock().unwrap().clone();
+-    for (_, q, ctx, cb) in calls {
+-        unsafe { notify_association(q, ctx, cb) };
+-    }
++    flush_association_callbacks();
+ }
+ 
+ /// Associate every input device with the local signed-in user.
+-- 
+2.48.1.windows.1
+

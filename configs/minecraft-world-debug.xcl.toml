@@ -1,0 +1,83 @@
+# XCL – konfiguracja PS5 dla Minecraft Preview (Microsoft.MinecraftBeta 1.18.3064.0)
+# Docelowa ścieżka w prefixie prospero-win:
+#   /data/prospero-win/prefix/drive_c/users/prospero/AppData/Local/XCL/Microsoft.MinecraftBeta/xcl.toml
+# Dopasowane 1:1 do pól struct Config w D:\TrinityXSX\xcl\crates\xcl\src\config.rs
+
+# "lockhart" (Series S) zamiast "anaconda" (Series X): bezpieczniejszy profil pamięci i LOD na PS5
+device_type = "lockhart"
+console_type_raw = 5
+
+gamertag = "PS5Player"
+user_id = 2533274790395905
+sandbox_id = "RETAIL"
+
+# PS5 prospero-win ma 12 288 MiB direct memory łącznie z Wine + RADV (8 160 MiB VRAM).
+# 6144 MiB daje duży zapas na V8, Cohtml, RenderDragon i cache shaderów bez OOM.
+# Jeśli pojawią się błędy pamięci, obniż do 4096.
+title_memory_mb = 6144
+title_memory = "standard"
+
+# Kwota Persistent Local Storage (raportowana grze; nie prealokuje pliku fizycznie)
+pls_mb = 2048
+
+# Unified (GPU-visible) memory window (MiB)
+uma_mb = 2048
+# Coherent UMA window (MiB) dla teksturowych zasobów CreateCommittedResource + Map().
+# Domyślne 512 MiB (-128 MiB rezerwy -64 MiB puli = 320 MiB) kończy się po załadowaniu menu (t=24s).
+# Minecraft sięgał ~442 MiB, więc 1024 MiB daje >450 MiB zapasu przy mniejszym zużyciu dmem PS5.
+coherent_mb = 1024
+
+log_level = "info"
+log_to_stderr = true
+
+exe = "Minecraft.Windows.exe"
+title_id = "639AA8DD"
+
+graphics = "d3d12"
+d3d12_adapter = "auto"
+d3d12_debug = false
+present = "auto"
+
+# Na pierwszy stabilny boot na PS5 wyłączamy DXR; po uruchomieniu świata można przetestować "tier1_1"
+raytracing = "off"
+
+# Dopasowane do desktop = 1920x1080 w profilu prospero-win
+window_width = 1920
+window_height = 1080
+window_pos = "0,0"
+
+# KRYTYCZNE dla Minecrafta: false powoduje szybkie przejście w tryb offline (z true Minecraft zapętla login!)
+xbox_live_tokens = false
+
+# Na PS5 gramy na DualSense przez XInput (wyłączamy przechwytywanie myszy/klawiatury jako pada)
+keyboard_mouse = false
+mouse_sensitivity = 1.0
+
+# Direct DXIL (717/717 = 100% shaderów Minecrafta @ ~3 ms, bez 12 ciężkich wątków DXC na CPU PS5)
+direct_dxil = "all"
+# Tryb offline (XCL_NETWORK=0) – bezpieczny start bez zewnętrznych gniazd / TLS na PS5
+network = false
+
+# Narzędzia debuggerskie PS5 (Patch 0011) – wyłącz po zakończeniu diagnozy (ustaw false / "")
+activity = true
+trace_input = true
+trace_net = true
+trace_vfs = "minecraftWorlds"
+live_flush = true
+# Software probes for the documented Minecraft.Windows.exe hash:
+# NetworkHandler::connect, LocalNetworkPeer::connect (inferred), getLocalNetworkId,
+# NetworkIdentifier::getRakNetGUID, NetworkHandler::registerServerInstance.
+sw_probes = ["0x1be7740", "0x1be43b0", "0x1bead90", "0x1a79960", "0x237c2a0"]
+
+[mounts]
+"GAME:" = "{game}"
+"G:" = "{game}"
+"D:" = "{game}"
+"T:" = "{data}\\temp"
+"S:" = "{data}\\pls"
+
+[aliases]
+# Jeśli nvngx_dlss.dll sprawiałaby problemy na AMD RDNA2 PS5, odkomentuj poniższą linię:
+# "nvngx_dlss.dll" = "@stub"
+
+[stub_returns]
