@@ -315,10 +315,11 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **ProsperoStore app-folder package (`PPSA83601.zip`):** Extract directly to `/data/homebrew/PPSA83601` (or install via ProsperoStore / ShadowMountPlus).
-          - **Frame Generation toggle (MihawkGen):** Switch `Off / 2x / 3x / 4x` in the `OPTIONS` menu for Vulkan, DXVK and D3D12 titles.
-          - **Win64 Vulkan titles & Touchpad HUD:** Launch standalone Win64 Vulkan games alongside Xbox Series GDK titles, with Touchpad Quick Menu pause and live FPS telemetry.
-          - **D3D12.X PC DXBC 3D replay:** Full root CBV/SRV descriptor table replay for PC-compiled DXBC shaders on PS5 RADV.
+          - **Safe automatic runtime updates:** ProsperoStore / `.ffpkg` updates automatically refresh `prefix/drive_c/XCL/` binaries via `runtime-stamp.txt` without touching saves, profiles, `game_paths.txt`, or installed games.
+          - **~1 GiB RAM freed for Win64/Vulkan titles:** Non-console Win64/Vulkan PEs (e.g. Godot) skip the unused `1024 MiB` coherent UMA window and `12 GiB` sparse VA reservation.
+          - **1-button Restart & Touchpad `RESTART GAME`:** Restart TrinityXSX straight from `OPTIONS` (or Web Companion) to apply MihawkGen Frame Generation (`Off / 2x / 3x / 4x`), and restart the current game directly from the DualSense Touchpad Quick Menu.
+          - **Per-game D3D12 Feature Level & Clear Shader Cache:** Set `VKD3D_FEATURE_LEVEL` (`Auto / 12_0 / 12_1`) and clear compiled DXIL + vkd3d shader caches from `R1` Game Settings or Web Companion.
+          - **Library polish & Web Companion Live Logs:** Active `FG 2x/3x/4x` header badge, `★` Favorites (`L2`) and `A-Z / Recent / Favorites` sorting (`R2`), plus Frame Generation toggle and live log viewer in the Phone/PC Web Companion (`L1`).
 
           ### Included CI-built assets
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
