@@ -75,7 +75,8 @@ old_target = "add_executable(innoextract ${INNOEXTRACT_SOURCES})\ntarget_link_li
 new_target = (
     "add_library(innoextract SHARED ${INNOEXTRACT_SOURCES})\n"
     "set_target_properties(innoextract PROPERTIES PREFIX \"\" OUTPUT_NAME \"trinity_innoextract\")\n"
-    "target_link_libraries(innoextract ${LIBRARIES} -static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)"
+    "target_link_options(innoextract PRIVATE -static-libgcc -static-libstdc++)\n"
+    "target_link_libraries(innoextract ${LIBRARIES} -Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic)"
 )
 assert old_target in ct, "innoextract CMake target not found"
 ct = ct.replace(old_target, new_target, 1)
