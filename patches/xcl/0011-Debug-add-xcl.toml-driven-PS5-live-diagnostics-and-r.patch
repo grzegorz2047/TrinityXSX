@@ -1,22 +1,21 @@
-From 12b0d3d932d12df0fd8af9933e458390e016fc6a Mon Sep 17 00:00:00 2001
+From cfb110fb83e96bb06db68d3fb629930fef7b2a70 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:35 +0100
-Subject: [PATCH 11/12] Debug: add xcl.toml-driven PS5 live
- diagnostics and
+Subject: [PATCH] Debug: add xcl.toml-driven PS5 live diagnostics and
 
 ---
  crates/xcl/src/config.rs                     |  18 ++
- crates/xcl/src/debug_tools.rs                | 175 +++++++++++++++++++
+ crates/xcl/src/debug_tools.rs                | 179 +++++++++++++++++++
  crates/xcl/src/hle/gameinput.rs              |  24 ++-
  crates/xcl/src/hle/netoff.rs                 |   9 +
  crates/xcl/src/hle/xgameruntime/api.rs       |  10 +-
- crates/xcl/src/hle/xgameruntime/mod.rs       |  37 +++-
- crates/xcl/src/hle/xgameruntime/taskqueue.rs |  12 ++
+ crates/xcl/src/hle/xgameruntime/mod.rs       |  41 ++++-
+ crates/xcl/src/hle/xgameruntime/taskqueue.rs |  16 ++
  crates/xcl/src/host.rs                       |   5 +
  crates/xcl/src/lib.rs                        |   1 +
  crates/xcl/src/log.rs                        |   2 +-
  crates/xcl/src/vfs_hooks.rs                  |   5 +
- 11 files changed, 293 insertions(+), 5 deletions(-)
+ 11 files changed, 305 insertions(+), 5 deletions(-)
  create mode 100644 crates/xcl/src/debug_tools.rs
 
 diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
@@ -57,10 +56,10 @@ index a4666bb..7bdaa21 100644
  }
 diff --git a/crates/xcl/src/debug_tools.rs b/crates/xcl/src/debug_tools.rs
 new file mode 100644
-index 0000000..89a24d7
+index 0000000..29568f8
 --- /dev/null
 +++ b/crates/xcl/src/debug_tools.rs
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,179 @@
 +//! Runtime debugging & live diagnostics for titles (especially under runtimes like
 +//! `prospero-win` on PS5 where interactive debuggers and custom `XCL_*` env vars are unavailable).
 +//!
@@ -168,7 +167,7 @@ index 0000000..89a24d7
 +        }
 +        diff
 +    };
-+    let should_log = hit <= 16 || (changed && PROBE_LINES[idx].load(Ordering::Relaxed) < 64) || hit % 256 == 0;
++    let should_log = hit <= 16 || (changed && PROBE_LINES[idx].load(Ordering::Relaxed) < 64) || hit.is_multiple_of(256);
 +    let ret = orig(a1, a2, a3, a4, a5, a6);
 +    if should_log && PROBE_LINES[idx].fetch_add(1, Ordering::Relaxed) < 80 {
 +        let addr = PROBE_ADDR[idx].load(Ordering::Relaxed);
@@ -206,6 +205,10 @@ index 0000000..89a24d7
 +];
 +
 +/// Install software call probes on up to `MAX_SW_PROBES` function-entry RVAs of the main module.
++///
++/// # Safety
++/// `main_base` must be the base of the mapped main module and each RVA the entry of a function in
++/// it: the probes patch the code there and stay installed for the life of the process.
 +pub unsafe fn install_sw_probes(main_base: usize, rvas: &[String]) {
 +    let mut slot = 0usize;
 +    for raw in rvas {
@@ -327,10 +330,10 @@ index b7a3881..436b1de 100644
  }
  
 diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
-index 30c616d..616b5d3 100644
+index 04ffe80..68e4ce7 100644
 --- a/crates/xcl/src/hle/xgameruntime/mod.rs
 +++ b/crates/xcl/src/hle/xgameruntime/mod.rs
-@@ -892,15 +892,36 @@ struct AssociationCall {
+@@ -894,15 +894,36 @@ struct AssociationCall {
      change: DeviceAssociationChange,
  }
  
@@ -368,11 +371,15 @@ index 30c616d..616b5d3 100644
      let rec = Box::into_raw(Box::new(AssociationCall { cb, ctx, change: gamepad_association() }));
      let hr = xasync::submit_callback(queue as *mut c_void, PORT_COMPLETION, rec as *mut c_void, association_call as usize);
      if hr < 0 {
-@@ -957,10 +978,22 @@ fn user_signed_in() {
+@@ -959,10 +980,26 @@ fn user_signed_in() {
  }
  
  /// Associate every input device with the local signed-in user.
 -pub unsafe extern "system" fn XUserFindForDevice(_device: *const c_void, out: *mut *mut c_void) -> HRESULT {
++///
++/// # Safety
++/// `out` must be null or point to writable storage for one pointer; `device` is only read after
++/// `readable` confirms it.
 +pub unsafe extern "system" fn XUserFindForDevice(device: *const c_void, out: *mut *mut c_void) -> HRESULT {
      if out.is_null() {
          return E_INVALIDARG;
@@ -393,14 +400,18 @@ index 30c616d..616b5d3 100644
      *out = user_ptr();
      S_OK
 diff --git a/crates/xcl/src/hle/xgameruntime/taskqueue.rs b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
-index e5565ad..4811b39 100644
+index e5565ad..1267ae3 100644
 --- a/crates/xcl/src/hle/xgameruntime/taskqueue.rs
 +++ b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
-@@ -100,6 +100,18 @@ pub struct QueueHandle {
+@@ -100,6 +100,22 @@ pub struct QueueHandle {
  
  const MAGIC: u64 = 0x5843_4C51_5545_5545; // "XCLQUEUE"
  
 +/// Diagnostic helper: return `(work_mode, completion_mode)` for an XCL-owned `XTaskQueueHandle`.
++///
++/// # Safety
++/// `h` is read only after `readable` and the magic check; the queue must not be freed while this
++/// runs.
 +pub unsafe fn queue_modes(h: *mut c_void) -> Option<(u32, u32)> {
 +    if h.is_null() || !crate::gpu::shader::readable(h as usize, std::mem::size_of::<QueueHandle>()) {
 +        return None;

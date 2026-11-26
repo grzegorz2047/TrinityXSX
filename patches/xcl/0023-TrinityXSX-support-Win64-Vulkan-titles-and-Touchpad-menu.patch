@@ -1,8 +1,7 @@
-From 555c14535634cda8ed8e355374242a289beef649 Mon Sep 17 00:00:00 2001
+From 1e3baed3aac9527b0a094b366a98f156c3bb6048 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:40 +0100
 Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad quick
-
 
 The library part of this change (crates/xcl/src/library*.rs) now lives
 in TrinityXSX's library/ folder; see the last TrinityXSX patch.
@@ -13,7 +12,7 @@ in TrinityXSX's library/ folder; see the last TrinityXSX patch.
  3 files changed, 144 insertions(+), 1 deletion(-)
 
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
-index c682d93..39409fb 100644
+index e56ddc9..45902b5 100644
 --- a/crates/xcl/src/hle/d3d12x/present.rs
 +++ b/crates/xcl/src/hle/d3d12x/present.rs
 @@ -115,6 +115,125 @@ fn wait_while_title_menu_open() {
@@ -40,7 +39,7 @@ index c682d93..39409fb 100644
 +    let res = real(queue, info);
 +    let frames = PRESENTS.fetch_add(1, Ordering::Relaxed) + 1;
 +    // Update PS5 Touchpad Quick Menu HUD telemetry every ~1s for native Vulkan titles.
-+    if frames == 1 || frames % 15 == 0 {
++    if frames == 1 || frames.is_multiple_of(15) {
 +        let ps5_root = std::path::Path::new("Z:\\data\\homebrew\\PPSA83601");
 +        if ps5_root.is_dir() {
 +            if let Ok(mut guard) = VK_HUD_STATE.try_lock() {
@@ -143,7 +142,7 @@ index c682d93..39409fb 100644
  /// the frame; S_OK always (a console present does not fail for the title).
  pub unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes: *const u8, _params: *const u8) -> i32 {
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index b213e61..4684d31 100644
+index 825d4ae..25f4c39 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
 @@ -47,6 +47,21 @@ pub fn host_main(boot_path: &Path) -> i32 {

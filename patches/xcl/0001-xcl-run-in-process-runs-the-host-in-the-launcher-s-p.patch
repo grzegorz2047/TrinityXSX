@@ -1,18 +1,17 @@
-From be2530c5e64dcb34a0110bcd3daf31d03c3ff4e4 Mon Sep 17 00:00:00 2001
+From 19d183870147b3682d2dfc4020139cbb69f0bce1 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:31 +0100
-Subject: [PATCH 01/12] xcl run: --in-process runs the host in
- the launcher's
+Subject: [PATCH] xcl run: --in-process runs the host in the launcher's
 
 ---
- crates/xcl/src/hle/kernelx.rs | 48 +++++++++++++++++++++++++++++++++++
- crates/xcl/src/launcher.rs    | 19 +++++++++++++-
- crates/xcl/src/main.rs        | 11 +++++---
- crates/xcl/tests/e2e.rs       | 38 +++++++++++++++++++++++++++
- 4 files changed, 112 insertions(+), 4 deletions(-)
+ crates/xcl/src/hle/kernelx.rs | 54 +++++++++++++++++++++++++++++++++++
+ crates/xcl/src/launcher.rs    | 19 +++++++++++-
+ crates/xcl/src/main.rs        | 11 +++++--
+ crates/xcl/tests/e2e.rs       | 38 ++++++++++++++++++++++++
+ 4 files changed, 118 insertions(+), 4 deletions(-)
 
 diff --git a/crates/xcl/src/hle/kernelx.rs b/crates/xcl/src/hle/kernelx.rs
-index 4144a11..07ada10 100644
+index 4144a11..e308003 100644
 --- a/crates/xcl/src/hle/kernelx.rs
 +++ b/crates/xcl/src/hle/kernelx.rs
 @@ -96,6 +96,9 @@ pub fn exports() -> Vec<(&'static str, usize)> {
@@ -25,13 +24,15 @@ index 4144a11..07ada10 100644
          FreeLibrary,
          FreeLibraryWhenCallbackReturns,
          DisableThreadLibraryCalls,
-@@ -2056,6 +2059,51 @@ pub unsafe extern "system" fn GetModuleFileNameA(h: usize, buf: *mut u8, size: u
+@@ -2056,6 +2059,57 @@ pub unsafe extern "system" fn GetModuleFileNameA(h: usize, buf: *mut u8, size: u
      }
  }
  
 +/// The title's command line when the host runs in the launcher's process (`xcl run
 +/// --in-process`): NUL-terminated wide and ANSI copies, kept for the process's lifetime.
-+static COMMAND_LINE: std::sync::OnceLock<(Box<[u16]>, Box<[u8]>)> = std::sync::OnceLock::new();
++static COMMAND_LINE: std::sync::OnceLock<CommandLines> = std::sync::OnceLock::new();
++/// The wide and the ANSI command line, each NUL-terminated.
++type CommandLines = (Box<[u16]>, Box<[u8]>);
 +
 +/// `xcl run --in-process`: the command line GetCommandLineW / GetCommandLineA hand the title,
 +/// also written to the UCRT's cached copies (`_wcmdln` / `_acmdln`), which a title's CRT
@@ -52,14 +53,16 @@ index 4144a11..07ada10 100644
 +    }
 +    type Wide = unsafe extern "C" fn() -> *mut *const u16;
 +    type Ansi = unsafe extern "C" fn() -> *mut *const u8;
-+    if let Some(f) = ll::GetProcAddress(ucrt, b"__p__wcmdln\0".as_ptr()) {
++    if let Some(f) = ll::GetProcAddress(ucrt, c"__p__wcmdln".as_ptr().cast()) {
 +        *std::mem::transmute::<unsafe extern "system" fn() -> isize, Wide>(f)() = w;
 +    }
-+    if let Some(f) = ll::GetProcAddress(ucrt, b"__p__acmdln\0".as_ptr()) {
++    if let Some(f) = ll::GetProcAddress(ucrt, c"__p__acmdln".as_ptr().cast()) {
 +        *std::mem::transmute::<unsafe extern "system" fn() -> isize, Ansi>(f)() = a;
 +    }
 +}
 +
++/// # Safety
++/// No preconditions: it is `unsafe` only as the `kernel32` export the title calls.
 +pub unsafe extern "system" fn GetCommandLineW() -> *const u16 {
 +    match COMMAND_LINE.get() {
 +        Some((w, _)) => w.as_ptr(),
@@ -67,6 +70,8 @@ index 4144a11..07ada10 100644
 +    }
 +}
 +
++/// # Safety
++/// No preconditions: it is `unsafe` only as the `kernel32` export the title calls.
 +pub unsafe extern "system" fn GetCommandLineA() -> *const u8 {
 +    match COMMAND_LINE.get() {
 +        Some((_, a)) => a.as_ptr(),

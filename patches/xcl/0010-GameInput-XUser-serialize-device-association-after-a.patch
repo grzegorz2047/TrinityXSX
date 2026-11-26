@@ -1,14 +1,13 @@
-From 46fddcc1d0777c1d4477023286a5f95e974259a8 Mon Sep 17 00:00:00 2001
+From 1f8e71e75756c9cc7857990922b61c8a484f7d5e Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:35 +0100
-Subject: [PATCH 10/12] GameInput/XUser: serialize device
- association after
+Subject: [PATCH] GameInput/XUser: serialize device association after
 
 ---
- crates/xcl/src/hle/gameinput.rs        | 18 +++++++++
+ crates/xcl/src/hle/gameinput.rs        | 18 ++++++++
  crates/xcl/src/hle/xgameruntime/api.rs |  4 +-
- crates/xcl/src/hle/xgameruntime/mod.rs | 56 +++++++++++++++++++++-----
- 3 files changed, 66 insertions(+), 12 deletions(-)
+ crates/xcl/src/hle/xgameruntime/mod.rs | 58 +++++++++++++++++++++-----
+ 3 files changed, 68 insertions(+), 12 deletions(-)
 
 diff --git a/crates/xcl/src/hle/gameinput.rs b/crates/xcl/src/hle/gameinput.rs
 index e7983a8..b4506dd 100644
@@ -77,17 +76,19 @@ index 5e56995..b7a3881 100644
  }
  
 diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
-index a521773..30c616d 100644
+index a521773..04ffe80 100644
 --- a/crates/xcl/src/hle/xgameruntime/mod.rs
 +++ b/crates/xcl/src/hle/xgameruntime/mod.rs
-@@ -847,12 +847,40 @@ pub struct DeviceAssociationChange {
+@@ -847,12 +847,42 @@ pub struct DeviceAssociationChange {
      pub new_user: u64,
  }
  
 -/// device association callbacks the title registered: (token, queue, context, callback)
 -static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize)>> = std::sync::Mutex::new(Vec::new());
 +/// device association callbacks the title registered: (token, queue, context, callback, notified)
-+static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize, bool)>> = std::sync::Mutex::new(Vec::new());
++static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<AssociationCallback>> = std::sync::Mutex::new(Vec::new());
++/// (token, queue, context, callback, notified)
++type AssociationCallback = (u64, usize, usize, usize, bool);
  /// the local user was handed to the title (XUserAddResult): the input devices are associated
  /// with it from then on
  static USER_SIGNED_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -123,7 +124,7 @@ index a521773..30c616d 100644
  /// The association a device gets when it becomes the signed-in user's: none → the user.
  pub fn gamepad_association() -> DeviceAssociationChange {
      DeviceAssociationChange { device_id: crate::hle::gameinput::gamepad_device_id(), old_user: 0, new_user: LOCAL_ID }
-@@ -894,11 +922,20 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
+@@ -894,11 +924,20 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
      }
      let t = NEXT_ASSOCIATION_TOKEN.fetch_add(1, Ordering::Relaxed);
      *token = t;
@@ -149,7 +150,7 @@ index a521773..30c616d 100644
      S_OK
  }
  
-@@ -916,10 +953,7 @@ fn user_signed_in() {
+@@ -916,10 +955,7 @@ fn user_signed_in() {
          return;
      }
      crate::xlog_info!("XUser: the local user reached the title (XUserAddResult); {} device association callback(s)", ASSOCIATION_CALLBACKS.lock().unwrap().len());

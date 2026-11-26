@@ -1,8 +1,7 @@
-From da8d48c67e8a70c5727235d43e3b05b9c055e85d Mon Sep 17 00:00:00 2001
+From 20e4f6ed290ea0451efa5f5e1d0ea483bf4cb1be Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:39 +0100
 Subject: [PATCH] TrinityXSX: add save backup/restore ZIP, compatibility
-
 
 The library part of this change (crates/xcl/src/library*.rs) now lives
 in TrinityXSX's library/ folder; see the last TrinityXSX patch.
@@ -11,7 +10,7 @@ in TrinityXSX's library/ folder; see the last TrinityXSX patch.
  1 file changed, 73 insertions(+), 29 deletions(-)
 
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 80920ae..b213e61 100644
+index 80920ae..825d4ae 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
 @@ -123,16 +123,83 @@ pub fn host_main(boot_path: &Path) -> i32 {
@@ -71,7 +70,7 @@ index 80920ae..b213e61 100644
 +                let (presents, _) = crate::hle::d3d12x::present::activity();
 +
 +                // Update compact 1-line HUD telemetry every ~1s while game is running (not paused in menu)
-+                if !menu_open && tick % 2 == 0 && ps5_root.is_dir() {
++                if !menu_open && tick.is_multiple_of(2) && ps5_root.is_dir() {
 +                    let dt = last_fps_at.elapsed().as_secs_f64();
 +                    if dt >= 0.9 {
 +                        let df = presents.saturating_sub(last_fps_presents) as f64;
