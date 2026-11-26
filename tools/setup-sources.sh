@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fetch XCL and vkd3d-proton at the revisions in pins.env and apply patches/ on top (git am).
 #   tools/setup-sources.sh [--only xcl|vkd3d] [DEST]     (DEST defaults to the repo root)
-# Creates DEST/xcl and DEST/vkd3d-proton; an existing folder is left alone.
+# Creates DEST/xcl and DEST/vkd3d-proton; an existing folder is left alone. xcl.exe builds the
+# TrinityXSX library from library/ next to xcl/ (linked there when DEST is not the repo root).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=../pins.env
@@ -22,6 +23,28 @@ if [ -z "$only" ] || [ "$only" = xcl ]; then
   if fetch "$XCL_REPO" "$XCL_REV" "$dest/xcl"; then
     git -C "$dest/xcl" am -q "$root"/patches/xcl/*.patch
     git -C "$dest/xcl" log --oneline -n "$(ls "$root"/patches/xcl/*.patch | wc -l)"
+  fi
+  # An xcl/ made before the library moved to library/ (patch 0032) still has its own
+  # crates/xcl/src/library*.rs and would build those, ignoring library/. Refuse it loudly.
+  if [ -e "$dest/xcl/crates/xcl/src/lib.rs" ] &&
+     ! grep -q '#\[path = "../../../../library/library.rs"\]' "$dest/xcl/crates/xcl/src/lib.rs"; then
+    cat >&2 <<EOF2
+error: $dest/xcl predates the library/ move (no patch 0032): it would build its own
+       crates/xcl/src/library*.rs and ignore $root/library/. Nothing was changed. To update it:
+         1. keep any XCL-side work (git -C "$dest/xcl" format-patch / stash) and copy library
+            edits from xcl/crates/xcl/src/library*.rs into $root/library/;
+         2. move $dest/xcl aside and rerun tools/setup-sources.sh --only xcl.
+EOF2
+    exit 1
+  fi
+  # The library sources stay in $root/library/; the last xcl patch reads them from the xcl
+  # checkout's parent folder (DEST/library). Outside the repo root, link DEST/library to them.
+  if [ "$(cd "$dest" && pwd -P)" != "$(cd "$root" && pwd -P)" ] && [ ! -e "$dest/library" ]; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*) # a junction: no admin rights or Developer Mode needed
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$dest/library")" "$(cygpath -w "$root/library")" >/dev/null ;;
+      *) ln -s "$root/library" "$dest/library" ;;
+    esac
   fi
 fi
 

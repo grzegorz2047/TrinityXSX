@@ -51,21 +51,24 @@ All external dependencies are pinned in [`pins.env`](pins.env) and tracked autom
 
 ---
 
-Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md) · [standalone/README.md](standalone/README.md) · Upstream drafts (not sent): [docs/upstream/](docs/upstream/).
+Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/PERFORMANCE.md](docs/PERFORMANCE.md) · [docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md) · [standalone/README.md](standalone/README.md) · Upstream drafts (not sent): [docs/upstream/](docs/upstream/).
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `pins.env` | Pinned upstream revisions, release tags, and verified SHA-256 checksums |
-| `patches/xcl/` | XCL patches (`0001`..`0024`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor & presets, Web Companion QR + save backup/restore, stall watchdog, profiles & i18n, Touchpad Quick Menu telemetry & `PresentX`/`vkQueuePresentKHR` pause, PC DXBC 3D replay, Win64 Vulkan support, and MihawkGen Frame Generation toggle |
+| `library/` | TrinityXSX library source (GPL-2.0-only, compiled into `xcl.exe`): game catalog & folder browser, DualSense menu, covers & QR, `xcl.toml` editor & presets, Web Companion (PIN-limited, session cookie) with save backup/restore, GOG importer, profiles & i18n. See [library/README.md](library/README.md) |
+| `patches/xcl/` | XCL patches (`0001`..`0032`, gaps where a patch was only library code): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, stall watchdog, Touchpad Quick Menu telemetry & `PresentX`/`vkQueuePresentKHR` pause, PC DXBC 3D replay, Win64 Vulkan support, and (last) the hook that builds `library/` into `xcl.exe` |
 | `patches/vkd3d-proton/` | vkd3d-proton patches: extended D3D12 vtables (`VKD3D_VTBL_IS`), predicated buffer copies, mesh shaders without barycentrics |
-| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0007`) |
+| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0010`) |
 | `standalone/` | MIT-licensed native PS5 launcher (`eboot.bin`), catalog/staging/UFS2 `.ffpkg` image builder, unit tests |
 | `configs/` | Clean example `game.example.xcl.toml`, tested Minecraft preset, and `trinityxsx-library.profile` |
-| `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`) |
+| `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`); `xcl/` builds `library/` next to it |
 | `tools/fetch-deps.sh` | Download DXVK and DXC releases (SHA-256 verified) |
 | `tools/sync_upstream.py` | Check upstream repos/releases, test patch series (`git am --3way`), auto-drop upstreamed patches, and update `pins.env` |
+| `tools/compat.py` | Game compatibility database (`library/compat.toml`): validate it, regenerate `docs/COMPATIBILITY.md`, turn a verified report into an entry |
+| `tools/ps5_bench.py` | Automatic PS5 performance runs (FPS, frame times, stalls, memory) compared with `perf/baseline.json`; see [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | `tools/collect_ps5_logs.py` | One-command FTP log collector creating a shareable `trinityxsx-logs-*.zip` for bug reports |
 | `tools/make-ps5-package.sh` | Assemble `dist/prospero-win/` runtime bundle with third-party licenses |
 | `tools/ftp_put_tree.py` | Upload a local folder tree to the PS5 in one FTP session |
@@ -86,13 +89,13 @@ For full standalone `PPSA83601.ffpkg` packaging steps, see [standalone/README.md
 
 ## CI, Releases & Upstream Sync
 
-- **`.github/workflows/ci.yml`** runs on `push`, `pull_request`, and `workflow_dispatch`: applies `patches/xcl/` and builds + tests XCL (`windows-2025`), applies `patches/vkd3d-proton/` and builds vkd3d-proton (MSYS2 UCRT64), runs `standalone` unit tests and verifies `patches/prospero-win/` on `ubuntu-24.04`, and assembles the PS5 package plus standalone `xcl-library.exe` artifacts. Each build is cached by its inputs.
+- **`.github/workflows/ci.yml`** runs on `push`, `pull_request`, and `workflow_dispatch`: applies `patches/xcl/` and builds + tests XCL (`windows-2025`), applies `patches/vkd3d-proton/` and builds vkd3d-proton (MSYS2 UCRT64), runs `standalone` unit tests and verifies `patches/prospero-win/` on `ubuntu-24.04`, and assembles the PS5 package plus standalone `xcl-library.exe` artifacts. `library/` must pass `rustfmt --check` (with `library/rustfmt.toml`) and have no `clippy` findings; XCL's own tree is not formatted or linted. Each build is cached by its inputs (for XCL: `pins.env`, `patches/xcl/`, `library/`).
 - **`.github/workflows/release.yml`** runs on `v*` tags (or manually via `workflow_dispatch`): builds XCL, vkd3d-proton, and the complete `fsck_ufs`-verified standalone **`PPSA83601-<tag>.ffpkg.zip`** (via [`tools/build-standalone-ffpkg.sh`](tools/build-standalone-ffpkg.sh)) and publishes a GitHub Release with `PPSA83601-<tag>.ffpkg.zip`, `xcl-library-<tag>.exe`, `TrinityXSX-prospero-win-<tag>.zip`, and `SHA256SUMS-<tag>.txt`.
 - **`.github/workflows/upstream-sync.yml`** + **`tools/sync_upstream.py`** keep dependencies current without breaking reproducible builds: every Monday (or locally via `python tools/sync_upstream.py --check` / `--apply`), it checks `xcl-dev/xcl`, `HansKristian-Work/vkd3d-proton` (+ `dxil-spirv`), `doitsujin/dxvk`, `microsoft/DirectXShaderCompiler`, `mpereiraesaa/prospero-win`, and `mpereiraesaa/PS5-Lapy-JB-Daemon`, tests our patch series against upstream `HEAD`, detects upstreamed patches, and opens/updates a `chore/upstream-sync` PR so CI verifies the updated `pins.env` before merging.
 
 ## Licences
 
 - Scripts and docs here: GPL-2.0-only ([LICENSE](LICENSE)), as XCL. The independent `standalone/` launcher (`crt0.c`, `launcher.c`, `prefix_seed.c`, `launcher.ld`), packaging tools, and documentation use the [MIT License](standalone/LICENSE).
-- `patches/xcl/`: GPL-2.0-only (XCL). `patches/vkd3d-proton/`: LGPL-2.1-or-later (vkd3d-proton). `patches/prospero-win/`: LGPL-2.1 / upstream terms.
+- `patches/xcl/` and `library/`: GPL-2.0-only (XCL). `patches/vkd3d-proton/`: LGPL-2.1-or-later (vkd3d-proton). `patches/prospero-win/`: LGPL-2.1 / upstream terms.
 - The runtime bundles DXVK (zlib) and DXC (LLVM / Microsoft licences); all licence files are included in `licenses/`.
 - No console SDK files, no game data, no keys, and nothing for getting around DRM. Nothing from TrinityX360's GPL-3.0 code is used.

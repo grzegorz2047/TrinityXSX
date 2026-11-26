@@ -1,0 +1,136 @@
+From b95f402f4dec26e4fe2e10a33700d1853032fb27 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 15:20:36 +0100
+Subject: [PATCH] DXC: identify the toolchain by DLL contents, not modification
+ times
+
+toolchain_identity() is part of the DXIL cache key and of the
+translated-shader cache identity. It hashed the names, lengths and
+modification times of dxcompiler.dll and dxil.dll, so any copy of the
+same DLLs that did not keep the mtime (an installer, `cp` without -p,
+the PS5 runtime sync that copies C:\XCL through a temp file on every
+update) gave a new identity and silently invalidated every cached
+shader, even on the same machine.
+
+Hash the names, lengths and contents instead (FNV-1a over 64-bit
+words): a copy of the same compiler keeps the caches, and any rebuilt
+or swapped DLL, even with the same version resource, still gets a new
+identity. The ~24 MiB are read once per process, at the first shader.
+Existing caches miss once after this change.
+---
+ crates/xcl/src/gpu/recomp/dxc.rs | 90 +++++++++++++++++++++++---------
+ 1 file changed, 65 insertions(+), 25 deletions(-)
+
+diff --git a/crates/xcl/src/gpu/recomp/dxc.rs b/crates/xcl/src/gpu/recomp/dxc.rs
+index 379bd85..d7e99d2 100644
+--- a/crates/xcl/src/gpu/recomp/dxc.rs
++++ b/crates/xcl/src/gpu/recomp/dxc.rs
+@@ -650,33 +650,43 @@ fn compile_whole(src: &str, entry: &str, profile: &str, extra: &[&str]) -> Resul
+ 
+ pub(super) fn toolchain_identity() -> &'static str {
+     static IDENTITY: OnceLock<String> = OnceLock::new();
+-    IDENTITY.get_or_init(|| {
+-        let Ok(dir) = location() else {
+-            return "unavailable".into();
++    IDENTITY.get_or_init(|| match location() {
++        Ok(dir) => identity_of(dir),
++        Err(_) => "unavailable".into(),
++    })
++}
++
++/// Identity of the DXC in `dir`: the names, lengths and contents of `dxcompiler.dll` and `dxil.dll`.
++/// The contents, not the modification times: a copy of the same DLLs (an installer, a runtime sync
++/// on another machine, `cp` without `-p`) is the same compiler and must keep the caches valid, while
++/// any rebuilt or swapped DLL, even one with the same version resource, gets a new identity. Read
++/// once per process (about 24 MiB for DXC 1.9).
++fn identity_of(dir: &Path) -> String {
++    const PRIME: u64 = 0x100_0000_01b3;
++    let mut h = 0xcbf2_9ce4_8422_2325u64;
++    let mix = |h: &mut u64, word: u64| {
++        *h ^= word;
++        *h = h.wrapping_mul(PRIME);
++    };
++    for name in ["dxcompiler.dll", "dxil.dll"] {
++        for byte in name.bytes().chain([0]) {
++            mix(&mut h, byte as u64);
++        }
++        let Ok(bytes) = std::fs::read(dir.join(name)) else {
++            mix(&mut h, 0xff);
++            continue;
+         };
+-        let mut h = 0xcbf2_9ce4_8422_2325u64;
+-        for name in ["dxcompiler.dll", "dxil.dll"] {
+-            for byte in name.bytes().chain([0]) {
+-                h ^= byte as u64;
+-                h = h.wrapping_mul(0x100_0000_01b3);
+-            }
+-            let Ok(metadata) = std::fs::metadata(dir.join(name)) else {
+-                h ^= 0xff;
+-                h = h.wrapping_mul(0x100_0000_01b3);
+-                continue;
+-            };
+-            let modified = metadata
+-                .modified()
+-                .ok()
+-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+-                .map_or(0, |duration| duration.as_nanos());
+-            for byte in metadata.len().to_le_bytes().into_iter().chain(modified.to_le_bytes()) {
+-                h ^= byte as u64;
+-                h = h.wrapping_mul(0x100_0000_01b3);
+-            }
++        mix(&mut h, bytes.len() as u64);
++        // FNV-1a over little-endian 64-bit words, then the tail bytes: fast enough for the DLL sizes
++        let (words, tail) = bytes.as_chunks::<8>();
++        for word in words {
++            mix(&mut h, u64::from_le_bytes(*word));
+         }
+-        format!("{h:016x}")
+-    })
++        for &byte in tail {
++            mix(&mut h, byte as u64);
++        }
++    }
++    format!("{h:016x}")
+ }
+ 
+ /// FNV-1a 64 of the inputs that determine the DXIL.
+@@ -1221,6 +1231,36 @@ mod cache_tests {
+         assert_ne!(a, cache_key_for_toolchain("source", "main", "cs_6_6", "compiler-a/signer-b"));
+     }
+ 
++    #[test]
++    fn toolchain_identity_follows_dll_contents_not_modification_times() {
++        let root = std::env::temp_dir().join(format!("xcl_dxc_identity_{}", std::process::id()));
++        let (a, b) = (root.join("a"), root.join("b"));
++        for dir in [&a, &b] {
++            std::fs::create_dir_all(dir).unwrap();
++            std::fs::write(dir.join("dxcompiler.dll"), b"MZ compiler bytes 0123456789").unwrap();
++            std::fs::write(dir.join("dxil.dll"), b"MZ signer").unwrap();
++        }
++        // the same DLLs copied at another time (another install, a runtime sync): the same identity
++        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
++        for name in ["dxcompiler.dll", "dxil.dll"] {
++            std::fs::File::options().write(true).open(b.join(name)).unwrap().set_modified(old).unwrap();
++        }
++        assert_eq!(identity_of(&a), identity_of(&b));
++        // another compiler of the same length, or another signer: another identity
++        std::fs::write(b.join("dxcompiler.dll"), b"MZ compiler bytes 0123456788").unwrap();
++        assert_ne!(identity_of(&a), identity_of(&b));
++        std::fs::write(b.join("dxcompiler.dll"), b"MZ compiler bytes 0123456789").unwrap();
++        assert_eq!(identity_of(&a), identity_of(&b));
++        std::fs::write(b.join("dxil.dll"), b"MZ signer 2").unwrap();
++        assert_ne!(identity_of(&a), identity_of(&b));
++        // a missing signer is not the same as an empty one
++        std::fs::remove_file(b.join("dxil.dll")).unwrap();
++        let missing = identity_of(&b);
++        std::fs::write(b.join("dxil.dll"), b"").unwrap();
++        assert_ne!(missing, identity_of(&b));
++        let _ = std::fs::remove_dir_all(&root);
++    }
++
+     #[test]
+     fn validates_dxil_cache_structure_and_rebuilds_corruption() {
+         let valid = synthetic_dxil(7);
+-- 
+2.48.1.windows.1
+

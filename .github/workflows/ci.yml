@@ -10,6 +10,7 @@ on:
     paths:
       - pins.env
       - patches/**
+      - library/**
       - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
@@ -19,11 +20,17 @@ on:
       - tools/build-innoextract.sh
       - tools/innoextract/**
       - tools/sync_upstream.py
+      - tools/compat.py
+      - tools/test_compat.py
+      - tools/ps5_bench.py
+      - tools/test_ps5_bench.py
+      - docs/COMPATIBILITY.md
       - .github/workflows/ci.yml
   pull_request:
     paths:
       - pins.env
       - patches/**
+      - library/**
       - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
@@ -33,6 +40,11 @@ on:
       - tools/build-innoextract.sh
       - tools/innoextract/**
       - tools/sync_upstream.py
+      - tools/compat.py
+      - tools/test_compat.py
+      - tools/ps5_bench.py
+      - tools/test_ps5_bench.py
+      - docs/COMPATIBILITY.md
       - .github/workflows/ci.yml
   workflow_dispatch:
     inputs:
@@ -59,6 +71,12 @@ jobs:
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
 
+      - name: Compatibility database (library/compat.toml), its table, and the benchmark tool
+        run: |
+          python3 -m unittest tools.test_compat -v
+          python3 -m unittest tools.test_ps5_bench -v
+          python3 tools/compat.py --check
+
       - name: Verify sce_sys ProsperoStore metadata
         run: |
           python3 - <<'PY'
@@ -79,6 +97,15 @@ jobs:
         run: |
           python3 -m py_compile tools/sync_upstream.py standalone/native/build_launcher.py standalone/native/build_prefix_seed.py
           bash -n tools/build-standalone-ffpkg.sh
+          bash -n tools/setup-sources.sh
+
+      # library/ is TrinityXSX's own code, formatted with library/rustfmt.toml. XCL's own tree is
+      # not rustfmt-clean (see its CONTRIBUTING.md), so only library/ is checked.
+      - name: rustfmt library/
+        run: |
+          rustup component add rustfmt
+          rustfmt --version
+          rustfmt --check library/*.rs
 
       - name: Verify patches/prospero-win apply cleanly to pinned prospero-win
         run: |
@@ -112,7 +139,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: out
-          key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
+          key: xcl-out-v3-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**', 'library/**') }}
 
       - name: Fetch XCL and apply patches/xcl
         if: steps.out.outputs.cache-hit != 'true'
@@ -140,6 +167,20 @@ jobs:
         if: steps.out.outputs.cache-hit != 'true'
         working-directory: xcl
         run: cargo test --workspace --release -- --test-threads=4 --skip test_title_runs_
+
+      # library/ is TrinityXSX's own code: no clippy findings there. XCL's own tree has many (and
+      # a few deny-by-default ones), so lints are capped to warnings and only library/ is gated.
+      - name: Clippy (library/ only)
+        if: steps.out.outputs.cache-hit != 'true'
+        working-directory: xcl
+        shell: bash
+        run: |
+          rustup component add clippy
+          cargo clippy -p xcl --release --all-targets --message-format=short -- --cap-lints warn 2>&1 | tee ../clippy.txt
+          if grep -E 'library[\\/]library[a-z_]*\.rs:[0-9]+:[0-9]+: (warning|error)' ../clippy.txt; then
+            echo "::error::clippy found the problems above in library/"
+            exit 1
+          fi
 
       - name: Collect outputs
         if: steps.out.outputs.cache-hit != 'true'

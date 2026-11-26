@@ -1,0 +1,91 @@
+# A "Game compatibility report" a maintainer labels compat-verified becomes a pull request that adds
+# or updates the game in library/compat.toml and the table in docs/COMPATIBILITY.md.
+#
+# The issue body is untrusted: it reaches tools/compat.py only through an environment variable, is
+# parsed there (never run by the shell), and only allowlisted xcl.toml keys are taken from it. The
+# result is a PR that a maintainer reviews before anything reaches users.
+name: Compatibility report to PR
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: compat-report-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  pr:
+    if: github.event.label.name == 'compat-verified' && contains(github.event.issue.labels.*.name, 'game-compatibility')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add the report to library/compat.toml
+        id: add
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          python3 tools/compat.py --from-issue 2> error.txt || { echo "failed=1" >> "$GITHUB_OUTPUT"; exit 0; }
+          python3 tools/compat.py --check
+          git diff --quiet -- library/compat.toml docs/COMPATIBILITY.md && echo "unchanged=1" >> "$GITHUB_OUTPUT" || true
+
+      - name: Explain why the report could not be added
+        if: steps.add.outputs.failed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          {
+            echo "The compatibility database could not take this report automatically:"
+            echo
+            echo '```'
+            head -c 1000 error.txt
+            echo '```'
+            echo
+            echo "Please check the Identity Name, Package version, TitleId, state and release fields, then relabel."
+          } > comment.md
+          gh issue comment "$ISSUE_NUMBER" --body-file comment.md
+          exit 1
+
+      - name: Open the pull request
+        if: steps.add.outputs.failed != '1' && steps.add.outputs.unchanged != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # "<Identity> (<TitleId>): <status>", made by tools/compat.py from validated fields
+          TARGET: ${{ steps.add.outputs.target }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          branch="compat/issue-${ISSUE_NUMBER}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add library/compat.toml docs/COMPATIBILITY.md
+          git commit -m "compat: ${TARGET} (report #${ISSUE_NUMBER})"
+          git push --force -u origin "$branch"
+          {
+            echo "Adds the verified compatibility report #${ISSUE_NUMBER} to \`library/compat.toml\` and \`docs/COMPATIBILITY.md\`: **${TARGET}**."
+            echo
+            echo "Check before merging: that this is the game of the report, the status, the notes (taken from the report), and any \`[title.xcl]\` preset (only values that differ from the PS5 defaults are taken)."
+            echo
+            echo "CI does not start on its own for a pull request made by GitHub Actions: close and reopen this PR to run it."
+            echo
+            echo "Closes #${ISSUE_NUMBER}"
+          } > body.md
+          if ! gh pr create --base "$BASE" --head "$branch" --title "compat: ${TARGET} (report #${ISSUE_NUMBER})" --body-file body.md; then
+            # an open PR from an earlier label: update it
+            gh pr edit "$branch" --title "compat: ${TARGET} (report #${ISSUE_NUMBER})" --body-file body.md || {
+              echo "::error::Could not open the pull request. The repository must allow it: Settings > Actions > General > Allow GitHub Actions to create and approve pull requests. The branch $branch was pushed."
+              exit 1
+            }
+          fi

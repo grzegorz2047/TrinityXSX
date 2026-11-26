@@ -37,14 +37,40 @@ body:
     validations:
       required: true
 
+  # The labels below are read by tools/compat.py (compat-verified reports become entries in
+  # library/compat.toml): keep them in step with it.
   - type: input
-    id: game
+    id: game_name
     attributes:
-      label: Game name, Identity Name, Version, and TitleId
-      description: Found inside the game's MicrosoftGame.config (Identity Name / Version / TitleId).
-      placeholder: e.g. Example Game — Publisher.ExampleGame 1.2.3.0 (TitleId 1234ABCD)
+      label: Game name
+      placeholder: e.g. Example Game
     validations:
       required: true
+
+  - type: input
+    id: identity
+    attributes:
+      label: Identity Name
+      description: From the game's MicrosoftGame.config, `<Identity Name="...">` (also shown in the TrinityXSX library).
+      placeholder: e.g. Publisher.ExampleGame
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: From MicrosoftGame.config, `<Identity Version="...">`.
+      placeholder: e.g. 1.2.3.0
+    validations:
+      required: true
+
+  - type: input
+    id: title_id
+    attributes:
+      label: TitleId
+      description: From MicrosoftGame.config, `<TitleId>` (8 hex digits). Leave empty if there is none.
+      placeholder: e.g. 1234ABCD
 
   - type: dropdown
     id: status

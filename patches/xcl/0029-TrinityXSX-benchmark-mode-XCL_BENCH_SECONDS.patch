@@ -1,0 +1,282 @@
+From eb8074f73f6748a93344cf286133907f5ca4e9cd Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 16:04:43 +0100
+Subject: [PATCH] TrinityXSX: benchmark mode (XCL_BENCH_SECONDS)
+
+With XCL_BENCH_SECONDS=N the host waits for the first presented frame,
+lets the title run XCL_BENCH_WARMUP seconds (default 15), records N
+seconds of present times (PresentX and the vkQueuePresentKHR hook),
+writes a JSON summary to XCL_BENCH_OUT (default <logs>/bench.json) and
+ends the process: frames, average FPS, p50/p95/p99/max frame time,
+1% low FPS, frames over 100 ms, time to the first frame and the peak
+commit. A title that shows no frame within 600 s gets "no-frames".
+The result's folder is one of XCL's own folders for the VFS, so the
+title's write redirection does not move it into the overlay.
+
+The TrinityXSX library's benchmark queue and tools/ps5_bench.py drive
+it. Recording costs one atomic load per present when it is off.
+---
+ crates/xcl/src/hle/d3d12x/present.rs |  18 +++
+ crates/xcl/src/host.rs               | 185 ++++++++++++++++++++++++++-
+ 2 files changed, 202 insertions(+), 1 deletion(-)
+
+diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
+index 879d0bb..cacd6ba 100644
+--- a/crates/xcl/src/hle/d3d12x/present.rs
++++ b/crates/xcl/src/hle/d3d12x/present.rs
+@@ -41,6 +41,22 @@ static RTVS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
+ static LISTS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
+ static CANDIDATE: Mutex<Option<(usize, usize)>> = Mutex::new(None); // (queue, resource) – resource AddRef'd
+ static PRESENTS: AtomicU64 = AtomicU64::new(0);
++/// Present times while a benchmark measures (`host::bench`, `XCL_BENCH_SECONDS`); off otherwise.
++static BENCH_RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static BENCH_FRAMES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
++
++/// Start (`true`) or stop (`false`) recording present times; stopping returns them.
++pub fn bench_record(on: bool) -> Vec<Instant> {
++    let mut frames = BENCH_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
++    BENCH_RECORDING.store(on, Ordering::Release);
++    std::mem::take(&mut *frames)
++}
++
++fn bench_frame() {
++    if BENCH_RECORDING.load(Ordering::Acquire) {
++        BENCH_FRAMES.lock().unwrap_or_else(|e| e.into_inner()).push(Instant::now());
++    }
++}
+ static LAST_FRAME_DUMP: Mutex<Option<FrameDumpSample>> = Mutex::new(None);
+ static BOUNDARIES: AtomicU64 = AtomicU64::new(0);
+ static LAST_BOUNDARY_MS: AtomicU64 = AtomicU64::new(0);
+@@ -134,6 +150,7 @@ unsafe extern "system" fn xcl_vk_queue_present_khr(queue: usize, info: *const c_
+     let real: VkQueuePresentKhrFn = std::mem::transmute(f);
+     let res = real(queue, info);
+     let frames = PRESENTS.fetch_add(1, Ordering::Relaxed) + 1;
++    bench_frame();
+     // Update PS5 Touchpad Quick Menu HUD telemetry every ~1s for native Vulkan titles.
+     if frames == 1 || frames.is_multiple_of(15) {
+         let ps5_root = std::path::Path::new("Z:\\data\\homebrew\\PPSA83601");
+@@ -1421,6 +1438,7 @@ unsafe fn present_now(min_interval: Duration, frame: Option<(usize, Vec<(usize,
+         }
+     }
+     let n = PRESENTS.fetch_add(1, Ordering::Relaxed);
++    bench_frame();
+     if n == 0 {
+         crate::xlog_info!("present: first game frame shown ({w}x{h})");
+     }
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index 85f1d2b..ef7a37d 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -29,6 +29,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+         crate::log::Level::parse(&boot.config.log_level),
+         boot.config.log_to_stderr,
+     );
++    bench::start(&boot.title, &boot.logs_dir());
+     crate::log::log_panics();
+     crate::xlog_info!("XCL {} – host for '{}'", env!("CARGO_PKG_VERSION"), boot.title);
+     crate::xlog_info!("game: {} (read-only folder: {})", boot.exe_path.display(), boot.game_root.display());
+@@ -276,7 +277,12 @@ pub fn host_main(boot_path: &Path) -> i32 {
+ 
+     let mounts: Vec<(String, String)> = boot.config.mounts.iter().map(|(k, v)| (k.clone(), boot.expand(v))).collect();
+     // (the shader cache is XCL's too: on a drive a console mount names it must stay where it is)
+-    crate::vfs::init(crate::vfs::Vfs::new(&boot.game_root, &boot.data_dir, mounts).own_folder(&crate::gpu::recomp::dxc::cache_dir()));
++    let mut vfs = crate::vfs::Vfs::new(&boot.game_root, &boot.data_dir, mounts).own_folder(&crate::gpu::recomp::dxc::cache_dir());
++    // so is a benchmark's result: the title's write redirection must not move it into the overlay
++    if let Some(dir) = bench::out_path(&boot.logs_dir()).as_deref().and_then(Path::parent) {
++        vfs = vfs.own_folder(dir);
++    }
++    crate::vfs::init(vfs);
+     let _ = std::fs::create_dir_all(boot.data_dir.join("temp"));
+ 
+     if let Err(e) = crate::vfs_hooks::install() {
+@@ -307,10 +313,187 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     code as i32
+ }
+ 
++/// Benchmark mode (TrinityXSX): with `XCL_BENCH_SECONDS=N`, wait for the first frame, let the
++/// title run `XCL_BENCH_WARMUP` seconds (default 15), record N seconds of presented frames, write
++/// a JSON summary to `XCL_BENCH_OUT` (default `<logs>/bench.json`) and end the process. The
++/// library's benchmark queue and `tools/ps5_bench.py` drive it; `XCL_BENCH_ID` names the title in
++/// the result (default: the title's folder name).
++pub mod bench {
++    use std::path::{Path, PathBuf};
++    use std::time::{Duration, Instant};
++
++    /// Longest wait for the first frame before the run counts as "no-frames".
++    const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(600);
++    /// A frame that took longer than this is a visible stall.
++    const STALL_MS: f64 = 100.0;
++
++    #[derive(Debug, Default, PartialEq, serde::Serialize)]
++    pub struct Summary {
++        pub version: u32,
++        pub identity: String,
++        /// "ok" or "no-frames"
++        pub status: String,
++        pub seconds: f64,
++        pub frames: u64,
++        pub avg_fps: f64,
++        pub p50_ms: f64,
++        pub p95_ms: f64,
++        pub p99_ms: f64,
++        pub max_ms: f64,
++        /// average frame rate of the slowest 1 % of frames
++        pub low1_fps: f64,
++        pub stalls_100ms: u64,
++        /// seconds from the start of the host to the first presented frame
++        pub first_frame_s: f64,
++        pub peak_commit_mb: u64,
++    }
++
++    /// Frame statistics from the times between presents (ms), measured over `seconds`.
++    pub fn summarize(intervals_ms: &[f64], frames: u64, seconds: f64) -> Summary {
++        let mut sorted: Vec<f64> = intervals_ms.iter().copied().filter(|v| v.is_finite()).collect();
++        sorted.sort_by(f64::total_cmp);
++        let pct = |p: f64| -> f64 {
++            if sorted.is_empty() {
++                return 0.0;
++            }
++            let rank = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
++            sorted[rank - 1]
++        };
++        let worst = sorted.len().div_ceil(100);
++        let low1 = if worst == 0 {
++            0.0
++        } else {
++            let mean = sorted[sorted.len() - worst..].iter().sum::<f64>() / worst as f64;
++            if mean > 0.0 { 1000.0 / mean } else { 0.0 }
++        };
++        let round = |v: f64| (v * 100.0).round() / 100.0;
++        Summary {
++            version: 1,
++            status: if frames >= 2 { "ok" } else { "no-frames" }.into(),
++            seconds: round(seconds),
++            frames,
++            avg_fps: if seconds > 0.0 { round(frames as f64 / seconds) } else { 0.0 },
++            p50_ms: round(pct(0.50)),
++            p95_ms: round(pct(0.95)),
++            p99_ms: round(pct(0.99)),
++            max_ms: round(sorted.last().copied().unwrap_or(0.0)),
++            low1_fps: round(low1),
++            stalls_100ms: sorted.iter().filter(|&&v| v > STALL_MS).count() as u64,
++            ..Summary::default()
++        }
++    }
++
++    fn intervals_ms(times: &[Instant]) -> Vec<f64> {
++        times.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0).collect()
++    }
++
++    fn env_secs(name: &str) -> Option<u64> {
++        std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
++    }
++
++    fn peak_commit_mb() -> u64 {
++        unsafe {
++            use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
++            let mut c: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
++            c.cb = std::mem::size_of_val(&c) as u32;
++            K32GetProcessMemoryInfo(windows_sys::Win32::System::Threading::GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb);
++            (c.PeakPagefileUsage >> 20) as u64
++        }
++    }
++
++    fn write(out: &Path, summary: &Summary) {
++        if let Some(parent) = out.parent() {
++            let _ = std::fs::create_dir_all(parent);
++        }
++        let tmp = out.with_extension("json.tmp");
++        let text = serde_json::to_string_pretty(summary).unwrap_or_default() + "\n";
++        if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, out).is_err() {
++            let _ = std::fs::remove_file(out);
++            let _ = std::fs::rename(&tmp, out);
++        }
++    }
++
++    fn seconds() -> Option<u64> {
++        env_secs("XCL_BENCH_SECONDS").filter(|s| (1..=3600).contains(s))
++    }
++
++    /// Where the result goes when a benchmark runs (`XCL_BENCH_OUT`, else `<logs>/bench.json`).
++    pub fn out_path(logs_dir: &Path) -> Option<PathBuf> {
++        seconds()?;
++        Some(std::env::var_os("XCL_BENCH_OUT").map(PathBuf::from).unwrap_or_else(|| logs_dir.join("bench.json")))
++    }
++
++    /// Start the benchmark thread when `XCL_BENCH_SECONDS` asks for one.
++    pub fn start(title: &str, logs_dir: &Path) {
++        let (Some(seconds), Some(out)) = (seconds(), out_path(logs_dir)) else { return };
++        let warmup = env_secs("XCL_BENCH_WARMUP").unwrap_or(15).min(600);
++        let identity = std::env::var("XCL_BENCH_ID").unwrap_or_else(|_| title.to_owned());
++        crate::xlog_info!("bench: {seconds} s after the first frame and {warmup} s of warm-up -> {}", out.display());
++        let started = Instant::now();
++        let _ = std::thread::Builder::new().name("xcl-bench".into()).spawn(move || {
++            let presents = || crate::hle::d3d12x::present::activity().0;
++            while presents() == 0 {
++                if started.elapsed() > FIRST_FRAME_TIMEOUT {
++                    let summary = Summary { version: 1, identity, status: "no-frames".into(), ..Summary::default() };
++                    write(&out, &summary);
++                    crate::xlog_warn!("bench: no frame in {} s", FIRST_FRAME_TIMEOUT.as_secs());
++                    crate::log::flush();
++                    std::process::exit(3);
++                }
++                std::thread::sleep(Duration::from_millis(50));
++            }
++            let first_frame_s = started.elapsed().as_secs_f64();
++            std::thread::sleep(Duration::from_secs(warmup));
++            crate::hle::d3d12x::present::bench_record(true);
++            let measured = Instant::now();
++            std::thread::sleep(Duration::from_secs(seconds));
++            let times = crate::hle::d3d12x::present::bench_record(false);
++            let mut summary = summarize(&intervals_ms(&times), times.len() as u64, measured.elapsed().as_secs_f64());
++            summary.identity = identity;
++            summary.first_frame_s = (first_frame_s * 100.0).round() / 100.0;
++            summary.peak_commit_mb = peak_commit_mb();
++            write(&out, &summary);
++            crate::xlog_info!(
++                "bench: {} frames, {} FPS, p99 {} ms, 1% low {} FPS, {} stalls -> {}",
++                summary.frames,
++                summary.avg_fps,
++                summary.p99_ms,
++                summary.low1_fps,
++                summary.stalls_100ms,
++                out.display()
++            );
++            crate::log::flush();
++            std::process::exit(0);
++        });
++    }
++}
++
+ #[cfg(test)]
+ mod trinityxsx_tests {
+     use super::*;
+ 
++    #[test]
++    fn bench_summary_of_a_steady_run_with_one_stall() {
++        // 600 frames at 16.67 ms and one 150 ms hitch, over 10.15 s
++        let mut ms = vec![1000.0 / 60.0; 599];
++        ms.push(150.0);
++        let s = bench::summarize(&ms, 600, 10.15);
++        assert_eq!(s.status, "ok");
++        assert_eq!(s.avg_fps, 59.11);
++        assert_eq!((s.p50_ms, s.p99_ms, s.max_ms), (16.67, 16.67, 150.0));
++        assert_eq!(s.stalls_100ms, 1);
++        // the slowest 1 %: 6 frames, one of them the hitch
++        assert_eq!(s.low1_fps, ((1000.0 / ((150.0 + 5.0 * 1000.0 / 60.0) / 6.0)) * 100.0_f64).round() / 100.0);
++    }
++
++    #[test]
++    fn bench_summary_without_frames_is_no_frames() {
++        let s = bench::summarize(&[], 0, 30.0);
++        assert_eq!((s.status.as_str(), s.frames, s.avg_fps, s.p99_ms, s.low1_fps), ("no-frames", 0, 0.0, 0.0, 0.0));
++        let s = bench::summarize(&[], 1, 30.0);
++        assert_eq!(s.status, "no-frames");
++    }
++
+     #[test]
+     fn non_console_executables_leave_the_d3d12x_paths_and_keep_other_choices() {
+         for d3d12x in ["", "d3d12", "D3D12", "real", "Real"] {
+-- 
+2.48.1.windows.1
+

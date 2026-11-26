@@ -1,8 +1,7 @@
-From 19797f9421ccdb4520b226a058f33e71e16d5564 Mon Sep 17 00:00:00 2001
+From 18616c96a55bc3f06df8aecb8ff198df3445abab Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:39 +0100
-Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV
- descriptor
+Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV descriptor
 
 ---
  crates/xcl/src/hle/d3d12x/bind.rs         | 115 +++++++++++++++++++---

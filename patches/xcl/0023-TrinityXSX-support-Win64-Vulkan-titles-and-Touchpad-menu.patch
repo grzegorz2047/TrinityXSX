@@ -1,18 +1,18 @@
-From db8a87f6d880a68461e6fb617a0b91f1c3a18a4c Mon Sep 17 00:00:00 2001
+From dc0a3e39d1fad064533a32fb26faf5774c70405d Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:40 +0100
-Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad
- quick
+Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad quick
 
+The library part of this change (crates/xcl/src/library*.rs) now lives
+in TrinityXSX's library/ folder; see the last TrinityXSX patch.
 ---
  crates/xcl/src/hle/d3d12x/present.rs | 119 +++++++++++++++++++++++++++
- crates/xcl/src/host.rs               |  17 +++-
- crates/xcl/src/library.rs            |   4 +-
+ crates/xcl/src/host.rs               |  22 ++++-
  crates/xcl/src/resolver.rs           |   9 ++
- 4 files changed, 146 insertions(+), 3 deletions(-)
+ 3 files changed, 149 insertions(+), 1 deletion(-)
 
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
-index c682d93..39409fb 100644
+index e56ddc9..45902b5 100644
 --- a/crates/xcl/src/hle/d3d12x/present.rs
 +++ b/crates/xcl/src/hle/d3d12x/present.rs
 @@ -115,6 +115,125 @@ fn wait_while_title_menu_open() {
@@ -39,7 +39,7 @@ index c682d93..39409fb 100644
 +    let res = real(queue, info);
 +    let frames = PRESENTS.fetch_add(1, Ordering::Relaxed) + 1;
 +    // Update PS5 Touchpad Quick Menu HUD telemetry every ~1s for native Vulkan titles.
-+    if frames == 1 || frames % 15 == 0 {
++    if frames == 1 || frames.is_multiple_of(15) {
 +        let ps5_root = std::path::Path::new("Z:\\data\\homebrew\\PPSA83601");
 +        if ps5_root.is_dir() {
 +            if let Ok(mut guard) = VK_HUD_STATE.try_lock() {
@@ -142,10 +142,25 @@ index c682d93..39409fb 100644
  /// the frame; S_OK always (a console present does not fail for the title).
  pub unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes: *const u8, _params: *const u8) -> i32 {
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index b213e61..4684d31 100644
+index 825d4ae..a2e5e20 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -47,6 +47,21 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -8,6 +8,14 @@ use crate::config::Boot;
+ 
+ pub static HOST_MODE: AtomicBool = AtomicBool::new(false);
+ 
++/// The graphics mode for an executable without console imports (a standalone Win64 / native
++/// Vulkan title): XCL's own D3D12.X paths (the default, `d3d12`, `real`) are turned off; any other
++/// explicit choice is kept (`None`).
++fn non_console_graphics(graphics: &str) -> Option<&'static str> {
++    let d3d12x = graphics.is_empty() || graphics.eq_ignore_ascii_case("d3d12") || graphics.eq_ignore_ascii_case("real");
++    d3d12x.then_some("null")
++}
++
+ pub fn host_main(boot_path: &Path) -> i32 {
+     let boot: Boot = match std::fs::read_to_string(boot_path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
+         Ok(b) => b,
+@@ -47,6 +55,18 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_ACTIVITY").is_none() && boot.config.activity {
          std::env::set_var("XCL_ACTIVITY", "1");
      }
@@ -156,18 +171,15 @@ index b213e61..4684d31 100644
 +        // Standalone Win64 / native Vulkan executables (e.g. Godot) do not import d3d12_xs.dll.
 +        // Skip D3D12.X / vkd3d-proton / 1024 MiB coherent UMA initialization and the PresentX
 +        // stall watchdog (which would falsely fire at 30s and SuspendThread active Vulkan threads).
-+        if boot.config.graphics.is_empty()
-+            || boot.config.graphics.eq_ignore_ascii_case("d3d12")
-+            || boot.config.graphics.eq_ignore_ascii_case("real")
-+        {
-+            boot.config.graphics = "null".into();
++        if let Some(graphics) = non_console_graphics(&boot.config.graphics) {
++            boot.config.graphics = graphics.into();
 +        }
 +        crate::xlog_info!("non-console Win64 PE detected: disabling unused D3D12.X UMA and PresentX stall watchdog");
 +    }
      crate::debug_tools::init(&boot.config);
      crate::hle::netoff::install_getnameinfo_guard();
      crate::state::set_boot(boot.clone());
-@@ -119,7 +134,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -119,7 +139,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
      // Automatic 0-FPS loading / rendering stall watchdog (disable with XCL_NO_STALL_WATCH=1).
      // Captures GPU/DirectStorage/VRAM counters + thread dump once per stall so black-screen
      // bug reports always contain actionable diagnostics.
@@ -176,21 +188,6 @@ index b213e61..4684d31 100644
          let _ = std::thread::Builder::new().name("xcl-stall-watch".into()).spawn(|| {
              const INITIAL_STALL_SECS: u64 = 30;
              const RUNTIME_STALL_SECS: u64 = 15;
-diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
-index 637ce16..08255e1 100644
---- a/crates/xcl/src/library.rs
-+++ b/crates/xcl/src/library.rs
-@@ -835,8 +835,8 @@ pub fn prepare(game: &Game) -> Result<(), String> {
- 
- pub fn prepare_with_profile(game: &Game, profile: &Profile) -> Result<(), String> {
-     let (_, _, title) = launcher::resolve_target(&game.executable)?;
--    if !crate::inspect::console_imports(&game.executable).is_some_and(|imports| !imports.is_empty()) {
--        return Err("the selected executable is not an Xbox Series PE program".into());
-+    if crate::inspect::console_imports(&game.executable).is_none() {
-+        return Err("the selected executable is not a valid 64-bit Windows PE program".into());
-     }
-     let dir = launcher::data_root().join(title);
-     let cfg_path = dir.join("xcl.toml");
 diff --git a/crates/xcl/src/resolver.rs b/crates/xcl/src/resolver.rs
 index 7882042..4819cd5 100644
 --- a/crates/xcl/src/resolver.rs

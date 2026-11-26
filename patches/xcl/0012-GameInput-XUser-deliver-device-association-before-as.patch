@@ -1,8 +1,7 @@
-From f84fa61fdefa81a663529263fb42a4d56c322f53 Mon Sep 17 00:00:00 2001
+From 922c1503287542b91264ac26de694af99ee1f731 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:35 +0100
-Subject: [PATCH 12/12] GameInput/XUser: deliver device
- association before
+Subject: [PATCH] GameInput/XUser: deliver device association before
 
 ---
  crates/xcl/src/hle/gameinput.rs        | 33 ++++++-----
@@ -73,10 +72,10 @@ index 7524662..cade957 100644
      }
      S_OK
 diff --git a/crates/xcl/src/hle/xgameruntime/mod.rs b/crates/xcl/src/hle/xgameruntime/mod.rs
-index 616b5d3..669d45a 100644
+index 68e4ce7..56efe9a 100644
 --- a/crates/xcl/src/hle/xgameruntime/mod.rs
 +++ b/crates/xcl/src/hle/xgameruntime/mod.rs
-@@ -852,11 +852,51 @@ static ASSOCIATION_CALLBACKS: std::sync::Mutex<Vec<(u64, usize, usize, usize, bo
+@@ -854,11 +854,51 @@ type AssociationCallback = (u64, usize, usize, usize, bool);
  /// the local user was handed to the title (XUserAddResult): the input devices are associated
  /// with it from then on
  static USER_SIGNED_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -131,7 +130,7 @@ index 616b5d3..669d45a 100644
          return;
      }
      let pending: Vec<(usize, usize, usize)> = {
-@@ -875,12 +915,6 @@ fn flush_association_callbacks() {
+@@ -877,12 +917,6 @@ fn flush_association_callbacks() {
      }
  }
  
@@ -144,7 +143,7 @@ index 616b5d3..669d45a 100644
  /// The association a device gets when it becomes the signed-in user's: none → the user.
  pub fn gamepad_association() -> DeviceAssociationChange {
      DeviceAssociationChange { device_id: crate::hle::gameinput::gamepad_device_id(), old_user: 0, new_user: LOCAL_ID }
-@@ -905,11 +939,14 @@ unsafe extern "system" fn association_call(rec: *mut c_void, canceled: bool) {
+@@ -907,11 +941,14 @@ unsafe extern "system" fn association_call(rec: *mut c_void, canceled: bool) {
              std::str::from_utf8(&r.change.device_id).unwrap_or("?").trim_end()
          );
      }
@@ -161,7 +160,7 @@ index 616b5d3..669d45a 100644
  }
  
  /// The title's association callback gets the gamepad → user association, on its queue's
-@@ -945,13 +982,10 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
+@@ -947,13 +984,10 @@ pub unsafe extern "system" fn XUserRegisterForDeviceAssociationChanged(queue: *m
      *token = t;
      ASSOCIATION_CALLBACKS.lock().unwrap().push((t, queue as usize, ctx as usize, cb, false));
      let signed_in = USER_SIGNED_IN.load(Ordering::Acquire);
@@ -175,7 +174,7 @@ index 616b5d3..669d45a 100644
          } else {
              ""
          }
-@@ -1233,4 +1267,22 @@ mod tests {
+@@ -1239,4 +1273,22 @@ mod tests {
              let _ = std::fs::remove_file(&probe);
          }
      }
