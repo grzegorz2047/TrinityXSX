@@ -41,3 +41,13 @@ status = "playable"
 release = "v0.2.7"
 notes = "Passes 51/51: full D3D12.X + vkd3d-proton + RADV verification suite, 60 FPS fullscreen."
 reports = []
+
+[[title]]
+title_id = "34320054"
+identity = "GOG.1558393671"
+name = "Hollow Knight: Silksong"
+versions = ["1.0.30000"]
+status = "playable"
+release = "v0.2.9"
+notes = "Smooth 1080p gameplay, DualSense XInput and audio via GOG PC handoff; press Options to skip opening video cutscene."
+reports = []

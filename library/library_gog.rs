@@ -644,32 +644,7 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
         }
     }
 
-    let profile_text = format!(
-        "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
-         [application]\n\
-         id = {PC_PROFILE_ID}\n\
-         name = {safe_name}\n\
-         executable = {clean_exe}\n\
-         working_directory = {work_dir}\n\
-         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b\n\
-         prefix = default\n\
-         runtime = wine-wow64\n\
-         architecture = {arch}\n\
-         graphics = {gfx}\n\
-         \n\
-         [display]\n\
-         desktop = 1920x1080\n\
-         framegen = {fg_val}\n\
-         show_fps = {fps_val}\n\
-         \n\
-         [input]\n\
-         mode = xinput\n\
-         \n\
-         [debug]\n\
-         winedebug = err+all\n\
-         env = VKD3D_SHADER_CACHE_PATH=C:/XCL/cache/pc-game\n\
-         env = DXVK_LOG_PATH=C:/XCL\n"
-    );
+    let profile_text = format_pc_handoff_profile(safe_name, &clean_exe, &work_dir, arch, gfx, fg_val, fps_val);
 
     let profile_file = format!("{PC_PROFILE_ID}.profile");
     fs::write(profiles_dir.join(&profile_file), profile_text)
@@ -678,6 +653,52 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
     fs::write(root.join("pc_launch.flag"), format!("{PC_PROFILE_ID}\n"))
         .map_err(|e| format!("Cannot write pc_launch.flag: {e}"))?;
     Ok(())
+}
+
+/// Format the dynamic `prospero-win` `.profile` for PC/GOG titles:
+/// - `windows.gaming.input=d` disables Wine's unimplemented WGI semi-stub so Unity 6 and
+///   modern Input System games immediately fall back to DualSense XInput.
+/// - `thread_scheduling = true` enables `SCHED_RR` so Wine/DXVK worker threads do not starve.
+/// - `menu = true` enables `DXVK_HUD=fps,menu` so the Touchpad Quick Menu renders live over DXVK.
+fn format_pc_handoff_profile(
+    safe_name: &str,
+    clean_exe: &str,
+    work_dir: &str,
+    arch: &str,
+    gfx: &str,
+    fg_val: &str,
+    fps_val: &str,
+) -> String {
+    format!(
+        "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
+         [application]\n\
+         id = {PC_PROFILE_ID}\n\
+         name = {safe_name}\n\
+         executable = {clean_exe}\n\
+         working_directory = {work_dir}\n\
+         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;windows.gaming.input=d\n\
+         prefix = default\n\
+         runtime = wine-wow64\n\
+         architecture = {arch}\n\
+         graphics = {gfx}\n\
+         \n\
+         [runtime]\n\
+         thread_scheduling = true\n\
+         \n\
+         [display]\n\
+         desktop = 1920x1080\n\
+         framegen = {fg_val}\n\
+         show_fps = {fps_val}\n\
+         menu = true\n\
+         \n\
+         [input]\n\
+         mode = xinput\n\
+         \n\
+         [debug]\n\
+         winedebug = err+all\n\
+         env = VKD3D_SHADER_CACHE_PATH=C:/XCL/cache/pc-game\n\
+         env = DXVK_LOG_PATH=C:/XCL\n"
+    )
 }
 
 /// Ensure `profile_file` is present in `profiles.lst` so `pw_wine_library_load` (indexed mode)
@@ -771,5 +792,24 @@ mod tests {
         let text = fs::read_to_string(tmp.join("profiles.lst")).unwrap();
         assert_eq!(text, "trinityxsx-library.profile\ntrinityxsx-pc-game.profile\n");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pc_handoff_profile_enables_xinput_fallback_sched_and_menu() {
+        let profile = format_pc_handoff_profile(
+            "Hollow Knight: Silksong",
+            "Z:\\mnt\\ext1\\xboxseries\\silksong\\Hollow Knight Silksong.exe",
+            "Z:\\mnt\\ext1\\xboxseries\\silksong",
+            "pe64",
+            "dxvk",
+            "off",
+            "true",
+        );
+        assert!(
+            profile.contains("dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;windows.gaming.input=d")
+        );
+        assert!(profile.contains("[runtime]\nthread_scheduling = true"));
+        assert!(profile.contains("show_fps = true\nmenu = true"));
+        assert!(profile.contains("[input]\nmode = xinput"));
     }
 }
