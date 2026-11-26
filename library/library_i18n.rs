@@ -106,6 +106,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Otwórz na komputerze adres widoczny tutaj lub w menu Touchpada"
         }
+        (Lang::Pl, "On the PC, open") => "Na komputerze otwórz",
+        (Lang::Pl, "PS5 address for txin-sender") => "Adres PS5 dla txin-sender",
         (Lang::Pt, "PC keyboard & mouse") => "Teclado e mouse do PC",
         (Lang::Pt, "Off (USB on the PS5 only)") => "Desligado (só USB no PS5)",
         (Lang::Pt, "txin-sender program") => "Programa txin-sender",
@@ -115,6 +117,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pt, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Abra no PC o endereço mostrado aqui ou no menu do Touchpad"
         }
+        (Lang::Pt, "On the PC, open") => "No PC, abra",
+        (Lang::Pt, "PS5 address for txin-sender") => "Endereço do PS5 para o txin-sender",
         (Lang::Es, "PC keyboard & mouse") => "Teclado y ratón del PC",
         (Lang::Es, "Off (USB on the PS5 only)") => "Desactivado (solo USB en la PS5)",
         (Lang::Es, "txin-sender program") => "Programa txin-sender",
@@ -124,6 +128,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Es, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Abre en el PC la dirección que se ve aquí o en el menú del Touchpad"
         }
+        (Lang::Es, "On the PC, open") => "En el PC, abre",
+        (Lang::Es, "PS5 address for txin-sender") => "Dirección de la PS5 para txin-sender",
         (Lang::Pl, "Frame Generation creates smoother motion (requires restarting TrinityXSX).") => {
             "Generowanie klatek poprawia płynność obrazu (wymaga restartu aplikacji)."
         }

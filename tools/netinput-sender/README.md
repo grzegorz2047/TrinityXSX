@@ -15,8 +15,10 @@ A USB keyboard and mouse plugged into the PS5 work in every mode.
 ## Web browser: nothing to install
 
 1. In TrinityXSX, set **PC keyboard & mouse** to **Web browser**. The setting row, and the Touchpad menu in a game,
-   show the address and a PIN (for example `http://192.168.1.170:8361  PIN 4821`). The PIN changes each time
-   TrinityXSX starts.
+   show the address and a PIN (for example `http://192.168.1.170:8361  PIN 4821`). The setting is the console's:
+   the library and every game started from it follow it. The PIN is kept on the console
+   (`/data/homebrew/PPSA83601/netinput.pin`; delete it for a new one), so when a game starts and the PS5's side
+   restarts, the page reconnects by itself for up to a minute; click **Full screen** again to carry on.
 2. On the PC, open that address, enter the PIN and click **Full screen**.
 3. Press **Ctrl+Alt+F12** to start capturing, and again to stop.
 4. **Esc** stops at once and leaves full screen. In the game, `` ` `` is Esc.

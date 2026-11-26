@@ -1626,15 +1626,17 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             } else {
                 format!("{} {}  [X]", menu.installers.len(), t("ready"))
             };
+            // The row shows the mode; what the PC needs (address, PIN) gets its own line below the rows.
+            let remote_val = t(menu.remote.label_key()).to_owned();
             let remote_status = library::read_remote_input_status().unwrap_or_default();
-            let remote_val = match menu.remote {
+            let remote_line = match menu.remote {
                 library::RemoteInput::Browser if remote_status.mode == "browser" => {
-                    format!("{}  PIN {}", remote_status.url, remote_status.pin)
+                    Some(format!("{}  {}     PIN {}", t("On the PC, open"), remote_status.url, remote_status.pin))
                 }
                 library::RemoteInput::Sender if remote_status.mode == "sender" => {
-                    format!("{}  ·  {}", t(menu.remote.label_key()), remote_status.address)
+                    Some(format!("{}:  {}", t("PS5 address for txin-sender"), remote_status.address))
                 }
-                other => t(other.label_key()).to_owned(),
+                _ => None,
             };
             let rows = [
                 (t("Install GOG Games"), gog_val),
@@ -1692,6 +1694,9 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 400,
                 muted,
             );
+            if let Some(line) = &remote_line {
+                text(dc, line, region(left, 810, right, 50), scale(30), 700, mint);
+            }
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
             draw_button_hints(
                 dc,

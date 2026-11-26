@@ -1,19 +1,22 @@
-From 27b9052faa100a562a1c4a0bc96b8c5756cab731 Mon Sep 17 00:00:00 2001
+From 989cc19c96f30e7af0f1d9dc2507424fb9485349 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 21:04:14 +0100
 Subject: [PATCH] Serve a keyboard and mouse page, and pick the PC input in the
  profile
 
 [input] remote = off | sender | browser chooses how a PC's keyboard and
-mouse reach the game (off by default: no port is open). The title reads
-the profile again every two seconds, so TrinityXSX's settings switch it
-while it runs, and writes <data>/netinput.txt (the mode, and the page's
-address and PIN) for the library to show.
+mouse reach the game (off by default: no port is open). It is the
+console's setting, read from the library's profile (trinityxsx-library)
+by the library and by every game it starts. The title reads it again
+every two seconds, so TrinityXSX's settings switch it while it runs, and
+writes <data>/netinput.txt (the mode, and the page's address and PIN) for
+the library to show.
 
 browser: src/pw_webinput.c serves the capture page (src/pw_webinput_page.c,
 generated from TrinityXSX's tools/netinput-sender/src/web/index.html) and
 a WebSocket on TCP 8361 to private addresses only. The WebSocket wants
-the PIN the in-game menu shows (fresh each start), an IPv4 Host and the
+the PIN the in-game menu shows (kept in <data>/netinput.pin, so a page
+carries on from the library into a game), an IPv4 Host and the
 page's own Origin; wrong PINs lock it out for a while. Its text commands
 (on, off, h, k, b, m, w) become input through pw_netinput_set, which
 folds and diffs as the other sources do; a stop, a closed page or a
@@ -30,19 +33,19 @@ mode (pw_netinput_ps5_close releases what was held).
  native/pw_netinput_ps5.h     |   3 +
  native/pw_webinput_ps5.c     | 139 ++++++++++
  native/pw_webinput_ps5.h     |  21 ++
- native/wine64_main.c         | 140 +++++++++-
+ native/wine64_main.c         | 169 +++++++++++-
  src/pw_game_profile.c        |  11 +-
  src/pw_game_profile.h        |   9 +
  src/pw_netinput.c            |  14 +
  src/pw_netinput.h            |   5 +
  src/pw_webinput.c            | 499 +++++++++++++++++++++++++++++++++++
  src/pw_webinput.h            | 102 +++++++
- src/pw_webinput_page.c       | 400 ++++++++++++++++++++++++++++
+ src/pw_webinput_page.c       | 423 +++++++++++++++++++++++++++++
  tests/test_pw_game_profile.c |   9 +
  tests/test_pw_netinput_ps5.c |  12 +-
  tests/test_pw_webinput.c     | 300 +++++++++++++++++++++
  tools/build_native.sh        |   4 +-
- 18 files changed, 1675 insertions(+), 17 deletions(-)
+ 18 files changed, 1727 insertions(+), 17 deletions(-)
  create mode 100644 native/pw_webinput_ps5.c
  create mode 100644 native/pw_webinput_ps5.h
  create mode 100644 src/pw_webinput.c
@@ -322,7 +325,7 @@ index 0000000..4a1be31
 +void pw_webinput_ps5_pin(uint64_t seed, char out[8]);
 +#endif
 diff --git a/native/wine64_main.c b/native/wine64_main.c
-index f21ea81..d849862 100644
+index f21ea81..cbc1fc8 100644
 --- a/native/wine64_main.c
 +++ b/native/wine64_main.c
 @@ -41,6 +41,7 @@
@@ -333,19 +336,23 @@ index f21ea81..d849862 100644
  #include "pw_osk_ps5.h"
  #include "pw_videoout_ps5.h"
  #include "pw_wine_library.h"
-@@ -1080,6 +1081,112 @@ static void post_netinput(int (*post_input)(const PwWineInput *), const PwNetInp
+@@ -1080,6 +1081,137 @@ static void post_netinput(int (*post_input)(const PwWineInput *), const PwNetInp
      }
  }
  
 +/* A PC's keyboard and mouse ([input] remote in the game's profile): the
 + * txin-sender datagrams, the title's own web page, or neither. The profile
 + * is read again every few seconds, so TrinityXSX's settings switch it while
-+ * the title runs. What the mode is, and the page's address and PIN, go to
-+ * <data>/netinput.txt for the library to show and to the in-game menu. */
++ * the title runs. The setting is the console's, not a game's: it lives in the
++ * library's profile, which a game started from the library reads too. What the
++ * mode is, and the page's address and PIN, go to <data>/netinput.txt for the
++ * library to show and to the in-game menu. The PIN is kept in
++ * <data>/netinput.pin, so the library and the games it starts share it and a
++ * page carries on across them. */
++#define REMOTE_SETTINGS_PROFILE "trinityxsx-library"
 +static struct {
 +    int mode;                   /* PW_GAME_REMOTE_* in use */
 +    int status;                 /* the source's open result */
-+    char profile[PW_APP_ID_CAPACITY];
 +    PwNetInputPs5 udp;
 +    PwWebInput web;
 +    PwNetInputPoll poll;
@@ -393,6 +400,28 @@ index f21ea81..d849862 100644
 +}
 +
 +/* Closes the source in use and opens mode's; what was held is posted as released. */
++/* The page's PIN: the one in <data>/netinput.pin, or a new one written there. */
++static void remote_pin(uint64_t seed)
++{
++    char text[8] = { 0 };
++    int fd = open(PW_WINE64_ROOT_DATA "/netinput.pin", O_RDONLY);
++    if (fd >= 0) {
++        ssize_t n = read(fd, text, 4);
++        close(fd);
++        if (n == 4 && text[0] >= '0' && text[0] <= '9' && text[1] >= '0' && text[1] <= '9' &&
++            text[2] >= '0' && text[2] <= '9' && text[3] >= '0' && text[3] <= '9') {
++            memcpy(remote_input.pin, text, 5);
++            return;
++        }
++    }
++    pw_webinput_ps5_pin(seed, remote_input.pin);
++    fd = open(PW_WINE64_ROOT_DATA "/netinput.pin", O_WRONLY | O_CREAT | O_TRUNC, 0600);
++    if (fd >= 0) {
++        if (write(fd, remote_input.pin, 4) != 4) PS5LOG_LOG("PW_WINE64 webinput pin not saved errno=%d", errno);
++        close(fd);
++    }
++}
++
 +static void remote_switch(int mode, uint64_t now, int (*post_input)(const PwWineInput *), uint64_t *posted,
 +                          uint64_t *refused)
 +{
@@ -412,7 +441,7 @@ index f21ea81..d849862 100644
 +                                                   PW_NETINPUT_PORT);
 +    } else if (mode == PW_GAME_REMOTE_BROWSER) {
 +        int listener = pw_webinput_ps5_listen(PW_WEBINPUT_PORT);
-+        pw_webinput_ps5_pin(now ^ (uint64_t)listener << 32, remote_input.pin);
++        remote_pin(now ^ (uint64_t)listener << 32);
 +        remote_input.status = listener < 0 ? PW_ERR_NOT_FOUND :
 +            pw_webinput_open(&remote_input.web, pw_webinput_ps5_system_ops(webinput_log), listener, remote_input.pin);
 +        PS5LOG_LOG("PW_WINE64 webinput listen tcp port=%u socket=%d status=%s address=%s",
@@ -424,7 +453,7 @@ index f21ea81..d849862 100644
 +    remote_note();
 +}
 +
-+/* [input] remote as the profile says now, or -1 when it cannot be read. */
++/* [input] remote as the library's profile says now, or -1 when it cannot be read. */
 +static int remote_profile_mode(void)
 +{
 +    static uint8_t text[REMOTE_PROFILE_MAX];
@@ -433,8 +462,7 @@ index f21ea81..d849862 100644
 +    ssize_t n;
 +    int fd;
 +
-+    if (!remote_input.profile[0]) return -1;
-+    snprintf(path, sizeof(path), "%s/profiles/%s.profile", PW_WINE64_ROOT_DATA, remote_input.profile);
++    snprintf(path, sizeof(path), "%s/profiles/%s.profile", PW_WINE64_ROOT_DATA, REMOTE_SETTINGS_PROFILE);
 +    fd = open(path, O_RDONLY);
 +    if (fd < 0) return -1;
 +    n = read(fd, text, sizeof(text));
@@ -446,7 +474,7 @@ index f21ea81..d849862 100644
  /* The process's CPU time, user and system, in milliseconds: a stall that
   * waits shows no growth, one that spins grows by a core a second. */
  static unsigned long long cpu_ms(void)
-@@ -1335,10 +1442,6 @@ int main(int argc, char **argv)
+@@ -1335,10 +1467,6 @@ int main(int argc, char **argv)
      static PwVideoOutPs5 video;
      static PwPadPs5 pad;
      static PwHidPs5 hid;
@@ -457,19 +485,23 @@ index f21ea81..d849862 100644
      static PwGameInput game_input;
      /* [input] player2: a second signed-in user's DualSense as more keys. */
      static PwPadPs5 pad2;
-@@ -1628,8 +1731,9 @@ int main(int argc, char **argv)
+@@ -1628,8 +1756,13 @@ int main(int argc, char **argv)
               * dialog over the game and the title types what comes back. */
              osk_status = pw_osk_ps5_open(&osk_ps5, pw_osk_ps5_system_ops(osk_log), user);
              game_menu.keyboard = osk_status == PW_OK;
 -            netinput_status = pw_netinput_ps5_open(&netinput, pw_netinput_ps5_system_ops(netinput_log),
 -                                                   PW_NETINPUT_PORT);
-+            /* A PC's keyboard and mouse over the LAN, as the profile says (remote_input). */
-+            if (game) snprintf(remote_input.profile, sizeof(remote_input.profile), "%s", game->app.id);
-+            remote_switch(game ? (int)game->input.remote : PW_GAME_REMOTE_OFF, now_ns(), NULL, NULL, NULL);
++            /* A PC's keyboard and mouse over the LAN, as the library's settings say
++             * (remote_input); without them, as this program's own profile says. */
++            {
++                int mode = remote_profile_mode();
++                if (mode < 0) mode = game ? (int)game->input.remote : PW_GAME_REMOTE_OFF;
++                remote_switch(mode, now_ns(), NULL, NULL, NULL);
++            }
          }
          {
              uint8_t *storage = mmap(NULL, 2u * PW_WINE64_MAX_FRAME, PROT_READ | PROT_WRITE,
-@@ -1646,11 +1750,11 @@ int main(int argc, char **argv)
+@@ -1646,11 +1779,11 @@ int main(int argc, char **argv)
              if (set_release) set_release(wine_release_display, NULL);
          }
          PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d video=%s "
@@ -483,7 +515,7 @@ index f21ea81..d849862 100644
          if (player2)
              PS5LOG_LOG("PW_WINE64 pad2 status=%s user=%d", pw_result_name(pad2_status),
                         (int)pad2.user_id);
-@@ -1733,10 +1837,21 @@ int main(int argc, char **argv)
+@@ -1733,10 +1866,21 @@ int main(int argc, char **argv)
                  else refused++;
              }
          }
@@ -509,7 +541,7 @@ index f21ea81..d849862 100644
          }
  #if PW_WINE64_SCRIPT
          while (post_input && script_key_next < script_key_count &&
-@@ -1815,6 +1930,7 @@ int main(int argc, char **argv)
+@@ -1815,6 +1959,7 @@ int main(int argc, char **argv)
                      /* Refresh compact FPS/VRAM telemetry snapshot when opening menu. */
                      menu_telemetry[0] = '\0';
                      menu_notice[0] = '\0';
@@ -1234,10 +1266,10 @@ index 0000000..1903cbf
 +#endif
 diff --git a/src/pw_webinput_page.c b/src/pw_webinput_page.c
 new file mode 100644
-index 0000000..f0374d8
+index 0000000..1a3286c
 --- /dev/null
 +++ b/src/pw_webinput_page.c
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,423 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/* Generated by TrinityXSX's tools/netinput-sender/make_page_c.py from its src/web/index.html;
 + * do not edit: change the page there and run the script again. */
@@ -1364,6 +1396,8 @@ index 0000000..f0374d8
 +    "  helperGone: \042Pomocnik txin-sender nie dzia\305\202a. Uruchom go ponownie i od\305\233wie\305\274 stron\304\231.\042,\012"
 +    "  badPin: \042PS5 nie przyj\304\205\305\202 po\305\202\304\205czenia: z\305\202y PIN, zbyt wiele pr\303\263b albo w ustawieniach TrinityXSX nie wybrano trybu Przegl\304\205darka.\042,\012"
 +    "  ps5Gone: \042Po\305\202\304\205czenie z PS5 przerwane.\042,\012"
++    "  ps5Retry: \042Po\305\202\304\205czenie z PS5 przerwane (mo\305\274e uruchamia si\304\231 gra). \305\201\304\205cz\304\231 ponownie\342\200\246\042,\012"
++    "  ps5Back: \042Zn\303\263w po\305\202\304\205czono z PS5. Kliknij Pe\305\202ny ekran, \305\274eby gra\304\207 dalej.\042,\012"
 +    "  lastKey: (k) => `Ostatni odebrany klawisz: ${k}`,\012"
 +    "  target: (a) => `Cel: ${a}`, sent: (n) => `Wys\305\202ano ${n} pakiet\303\263w`, err: (e) => `B\305\202\304\205d: ${e}`,\012"
 +    "  ps5: (a) => `Po\305\202\304\205czono z PS5 (${a})`,\012"
@@ -1396,6 +1430,8 @@ index 0000000..f0374d8
 +    "  helperGone: \042The txin-sender helper is not running. Start it again and reload this page.\042,\012"
 +    "  badPin: \042The PS5 refused: wrong PIN, too many tries, or TrinityXSX's settings do not have Browser selected.\042,\012"
 +    "  ps5Gone: \042The connection to the PS5 was lost.\042,\012"
++    "  ps5Retry: \042The connection to the PS5 dropped (a game starting\077). Reconnecting\342\200\246\042,\012"
++    "  ps5Back: \042Connected to the PS5 again. Click Full screen to carry on.\042,\012"
 +    "  lastKey: (k) => `Last key received: ${k}`,\012"
 +    "  target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,\012"
 +    "  ps5: (a) => `Connected to the PS5 (${a})`,\012"
@@ -1423,6 +1459,10 @@ index 0000000..f0374d8
 +    "const $ = (id) => document.getElementById(id);\012"
 +    "const field = $(\042field\042), go = $(\042go\042), status = $(\042status\042), notice = $(\042notice\042);\012"
 +    "let ws = null, state = \042setup\042, escTimer = null, wheel = 0, connected = false, full = false, opened = false;\012"
++    "// From the console: a page that was connected tries again for a minute, as starting a game\012"
++    "// from the library restarts the PS5's side (the PIN stays the same).\012"
++    "const RETRY_MS = 2000, RETRIES = 30;\012"
++    "let retryTimer = null, retries = 0;\012"
 +    "// Physical keys held now, by KeyboardEvent.code: the shortcut is recognised from these, not from the\012"
 +    "// event's ctrlKey/altKey, which Right Alt (AltGr) and some keyboards report differently.\012"
 +    "const held = new Set();\012"
@@ -1468,18 +1508,32 @@ index 0000000..f0374d8
 +    "function setStatus(text, kind) { status.textContent = text; status.className = kind || \042\042; }\012"
 +    "function send(text) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); }\012"
 +    "\012"
++    "function stopRetry() { if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; } retries = 0; }\012"
++    "\012"
 +    "function connect(pin) {\012"
 +    "  if (HELPER) setStatus(T.connecting);\012"
 +    "  opened = false;\012"
 +    "  ws = new WebSocket(`ws://${location.host}/ws` + (pin \077 `\077pin=${encodeURIComponent(pin)}` : \042\042));\012"
-+    "  ws.onopen = () => { connected = opened = true; if (HELPER) setStatus(T.helper, \042good\042); };\012"
++    "  ws.onopen = () => {\012"
++    "    connected = opened = true;\012"
++    "    if (HELPER) setStatus(T.helper, \042good\042);\012"
++    "    else if (retries) { retries = 0; showNotice(T.ps5Back, \042info\042); }\012"
++    "  };\012"
 +    "  ws.onclose = () => {\012"
 +    "    const wasOpen = opened;\012"
 +    "    connected = false;\012"
 +    "    ws = null;\012"
 +    "    leave();\012"
-+    "    if (HELPER) { showNotice(T.helperGone, \042bad\042); setStatus(\042\042); go.disabled = true; }\012"
-+    "    else { showNotice(wasOpen \077 T.ps5Gone : T.badPin, \042bad\042); setStatus(\042\042); }\012"
++    "    if (HELPER) { showNotice(T.helperGone, \042bad\042); setStatus(\042\042); go.disabled = true; return; }\012"
++    "    setStatus(\042\042);\012"
++    "    if ((wasOpen || retries) && retries < RETRIES) {\012"
++    "      retries++;\012"
++    "      showNotice(T.ps5Retry, \042warn\042);\012"
++    "      retryTimer = setTimeout(() => { retryTimer = null; connect(pin); }, RETRY_MS);\012"
++    "    } else {\012"
++    "      showNotice(wasOpen || retries \077 T.ps5Gone : T.badPin, \042bad\042);\012"
++    "      retries = 0;\012"
++    "    }\012"
 +    "  };\012"
 +    "  ws.onmessage = (e) => {\012"
 +    "    const [verb, ...rest] = String(e.data).split(\042 \042);\012"
@@ -1517,7 +1571,8 @@ index 0000000..f0374d8
 +    "  } else {\012"
 +    "    sessionStorage.setItem(\042txin-pin\042, value);\012"
 +    "    showNotice(T.ps5Note, \042info\042);\012"
-+    "    if (ws) ws.close();\012"
++    "    stopRetry();\012"
++    "    if (ws) { ws.onclose = null; ws.close(); ws = null; connected = false; }\012"
 +    "    connect(value);\012"
 +    "  }\012"
 +    "  // Some embedded browsers never answer a full-screen request: carry on in the window after a moment.\012"
@@ -1637,7 +1692,7 @@ index 0000000..f0374d8
 +    "</script>\012"
 +    "</body>\012"
 +    "</html>\012";
-+const size_t pw_webinput_page_length = 19924;
++const size_t pw_webinput_page_length = 20991;
 diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
 index 663682d..5dd99cd 100644
 --- a/tests/test_pw_game_profile.c

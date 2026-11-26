@@ -118,6 +118,8 @@ const T = pl ? {
   helperGone: "Pomocnik txin-sender nie działa. Uruchom go ponownie i odśwież stronę.",
   badPin: "PS5 nie przyjął połączenia: zły PIN, zbyt wiele prób albo w ustawieniach TrinityXSX nie wybrano trybu Przeglądarka.",
   ps5Gone: "Połączenie z PS5 przerwane.",
+  ps5Retry: "Połączenie z PS5 przerwane (może uruchamia się gra). Łączę ponownie…",
+  ps5Back: "Znów połączono z PS5. Kliknij Pełny ekran, żeby grać dalej.",
   lastKey: (k) => `Ostatni odebrany klawisz: ${k}`,
   target: (a) => `Cel: ${a}`, sent: (n) => `Wysłano ${n} pakietów`, err: (e) => `Błąd: ${e}`,
   ps5: (a) => `Połączono z PS5 (${a})`,
@@ -150,6 +152,8 @@ const T = pl ? {
   helperGone: "The txin-sender helper is not running. Start it again and reload this page.",
   badPin: "The PS5 refused: wrong PIN, too many tries, or TrinityXSX's settings do not have Browser selected.",
   ps5Gone: "The connection to the PS5 was lost.",
+  ps5Retry: "The connection to the PS5 dropped (a game starting?). Reconnecting…",
+  ps5Back: "Connected to the PS5 again. Click Full screen to carry on.",
   lastKey: (k) => `Last key received: ${k}`,
   target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,
   ps5: (a) => `Connected to the PS5 (${a})`,
@@ -177,6 +181,10 @@ if (!HELPER) VK.Backquote = 0x1b;
 const $ = (id) => document.getElementById(id);
 const field = $("field"), go = $("go"), status = $("status"), notice = $("notice");
 let ws = null, state = "setup", escTimer = null, wheel = 0, connected = false, full = false, opened = false;
+// From the console: a page that was connected tries again for a minute, as starting a game
+// from the library restarts the PS5's side (the PIN stays the same).
+const RETRY_MS = 2000, RETRIES = 30;
+let retryTimer = null, retries = 0;
 // Physical keys held now, by KeyboardEvent.code: the shortcut is recognised from these, not from the
 // event's ctrlKey/altKey, which Right Alt (AltGr) and some keyboards report differently.
 const held = new Set();
@@ -222,18 +230,32 @@ function showNotice(text, kind) { notice.textContent = text; notice.className = 
 function setStatus(text, kind) { status.textContent = text; status.className = kind || ""; }
 function send(text) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); }
 
+function stopRetry() { if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; } retries = 0; }
+
 function connect(pin) {
   if (HELPER) setStatus(T.connecting);
   opened = false;
   ws = new WebSocket(`ws://${location.host}/ws` + (pin ? `?pin=${encodeURIComponent(pin)}` : ""));
-  ws.onopen = () => { connected = opened = true; if (HELPER) setStatus(T.helper, "good"); };
+  ws.onopen = () => {
+    connected = opened = true;
+    if (HELPER) setStatus(T.helper, "good");
+    else if (retries) { retries = 0; showNotice(T.ps5Back, "info"); }
+  };
   ws.onclose = () => {
     const wasOpen = opened;
     connected = false;
     ws = null;
     leave();
-    if (HELPER) { showNotice(T.helperGone, "bad"); setStatus(""); go.disabled = true; }
-    else { showNotice(wasOpen ? T.ps5Gone : T.badPin, "bad"); setStatus(""); }
+    if (HELPER) { showNotice(T.helperGone, "bad"); setStatus(""); go.disabled = true; return; }
+    setStatus("");
+    if ((wasOpen || retries) && retries < RETRIES) {
+      retries++;
+      showNotice(T.ps5Retry, "warn");
+      retryTimer = setTimeout(() => { retryTimer = null; connect(pin); }, RETRY_MS);
+    } else {
+      showNotice(wasOpen || retries ? T.ps5Gone : T.badPin, "bad");
+      retries = 0;
+    }
   };
   ws.onmessage = (e) => {
     const [verb, ...rest] = String(e.data).split(" ");
@@ -271,7 +293,8 @@ go.addEventListener("click", async () => {
   } else {
     sessionStorage.setItem("txin-pin", value);
     showNotice(T.ps5Note, "info");
-    if (ws) ws.close();
+    stopRetry();
+    if (ws) { ws.onclose = null; ws.close(); ws = null; connected = false; }
     connect(value);
   }
   // Some embedded browsers never answer a full-screen request: carry on in the window after a moment.
