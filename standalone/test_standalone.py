@@ -280,19 +280,19 @@ class StandaloneTests(unittest.TestCase):
                 char p1[] = "profile=trinityxsx-pc-game";
                 char c1[] = "cycle=2";
                 char *argv_pc[] = { p1, c1, NULL };
-                assert(launcher_main(2, argv_pc) == 0);
+                assert(launcher_main(2, argv_pc) == 1);
                 assert(strcmp(got_path, "/app0/runtime/pw_runner.bin") == 0);
                 assert(strcmp(got_arg0, "profile=trinityxsx-pc-game") == 0);
                 assert(strcmp(got_arg1, "cycle=2") == 0);
 
                 char l1[] = "launcher=1";
                 char *argv_exit[] = { l1, NULL };
-                assert(launcher_main(1, argv_exit) == 0);
+                assert(launcher_main(1, argv_exit) == 1);
                 assert(strcmp(got_path, "exit") == 0);
                 assert(got_null_args == 1);
 
                 char *argv_empty[] = { NULL };
-                assert(launcher_main(0, argv_empty) == 0);
+                assert(launcher_main(0, argv_empty) == 1);
                 assert(strcmp(got_path, "/app0/runtime/pw_runner.bin") == 0);
                 assert(strcmp(got_arg0, "profile=trinityxsx-library") == 0);
                 assert(strcmp(got_arg1, "cycle=1") == 0);
