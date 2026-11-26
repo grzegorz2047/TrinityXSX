@@ -10,7 +10,11 @@ into the PS5. Pick how in the library: **Settings → PC keyboard & mouse**. The
 | **Web browser** | open the address the Touchpad menu (and the setting) shows, e.g. `http://192.168.1.170:8361`, and enter the PIN | everything except Esc, Alt+Tab and the Windows key, which the browser keeps; the `` ` `` key (below Esc) sends Esc to the game |
 | **txin-sender program** | run `txin-sender.exe` (every release ships `txin-sender-<tag>.exe`) | everything, Esc, Alt+Tab and the Windows key included |
 
-A USB keyboard and mouse plugged into the PS5 work in every mode.
+A USB keyboard and mouse plugged into the PS5 work in every mode, and so does the pad: they all add up.
+
+**F9** on the PC is the Touchpad in every mode: it opens and closes TrinityXSX's quick menu in a game. While the
+menu is open, the ↑ and ↓ arrows choose, **Enter** confirms and **Backspace** (or Esc, `` ` `` from the page)
+closes it; those keys and the mouse do not reach the game then. F9 itself never reaches the game.
 
 ## Web browser: nothing to install
 

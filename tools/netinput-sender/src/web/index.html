@@ -69,6 +69,7 @@
     <ul>
       <li><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>F12</kbd><span id="t-toggle"></span></li>
       <li><kbd id="t-esc-key"></kbd><span id="t-esc"></span></li>
+      <li><kbd>F9</kbd><span id="t-menu"></span></li>
     </ul>
     <div id="notice" role="alert"></div>
     <div id="status" aria-live="polite"></div>
@@ -104,10 +105,11 @@ const T = pl ? {
   escKeyPs5: "Esc", escPs5: "zatrzymuje wszystko i wychodzi z pełnego ekranu; do gry Esc wysyła klawisz ` (pod Esc)",
   ready: "Naciśnij Ctrl+Alt+F12, aby zacząć przechwytywanie",
   readySmall: "Przytrzymaj Esc, aby wyjść",
-  readySmallPs5: "Esc wychodzi · w grze Esc to klawisz `",
+  menu: "menu Touchpada TrinityXSX: strzałki ↑↓ wybierają, Enter zatwierdza, Backspace lub F9 zamyka",
+  readySmallPs5: "Esc wychodzi · w grze Esc to klawisz ` · F9 to menu Touchpada",
   capturing: "Przechwytywanie · Ctrl+Alt+F12 zatrzymuje",
-  capturingSmall: "przytrzymaj Esc, aby wyjść",
-  capturingSmallPs5: "Esc wychodzi · w grze Esc to klawisz `",
+  capturingSmall: "przytrzymaj Esc, aby wyjść · F9 to menu Touchpada",
+  capturingSmallPs5: "Esc wychodzi · w grze Esc to klawisz ` · F9 to menu Touchpada",
   interrupted: "Przechwytywanie przerwane. Naciśnij Ctrl+Alt+F12, aby wrócić",
   noLock: "Ta przeglądarka nie blokuje klawiatury: Esc, Alt+Tab i klawisz Windows nie trafią do gry. Najlepiej działa Chrome lub Edge.",
   ps5Note: "Strona z konsoli nie może przejąć Esc, Alt+Tab ani klawisza Windows. Pełne przechwytywanie daje program txin-sender.exe.",
@@ -138,10 +140,11 @@ const T = pl ? {
   escKeyPs5: "Esc", escPs5: "stops everything and leaves full screen; the ` key (below Esc) sends Esc to the game",
   ready: "Press Ctrl+Alt+F12 to start capturing",
   readySmall: "Hold Esc to leave",
-  readySmallPs5: "Esc leaves · in the game, ` is Esc",
+  menu: "TrinityXSX's Touchpad menu: the ↑↓ arrows choose, Enter confirms, Backspace or F9 closes it",
+  readySmallPs5: "Esc leaves · in the game, ` is Esc · F9 is the Touchpad menu",
   capturing: "Capturing · Ctrl+Alt+F12 stops",
-  capturingSmall: "hold Esc to leave",
-  capturingSmallPs5: "Esc leaves · in the game, ` is Esc",
+  capturingSmall: "hold Esc to leave · F9 is the Touchpad menu",
+  capturingSmallPs5: "Esc leaves · in the game, ` is Esc · F9 is the Touchpad menu",
   interrupted: "Capture interrupted. Press Ctrl+Alt+F12 to resume",
   noLock: "This browser cannot lock the keyboard: Esc, Alt+Tab and the Windows key will not reach the game. Chrome or Edge work best.",
   ps5Note: "A page from the console cannot take Esc, Alt+Tab or the Windows key. txin-sender.exe captures everything.",
@@ -208,7 +211,7 @@ function describe(e) {
 
 const texts = [["t-title", "title"], ["t-sub", "sub"], ["go", "go"], ["t-step2", "step2"], ["t-toggle", "toggle"],
                ["t-field", HELPER ? "addr" : "pin"], ["t-step1", HELPER ? "step1" : "step1Ps5"],
-               ["t-esc-key", HELPER ? "escKey" : "escKeyPs5"], ["t-esc", HELPER ? "esc" : "escPs5"]];
+               ["t-esc-key", HELPER ? "escKey" : "escKeyPs5"], ["t-esc", HELPER ? "esc" : "escPs5"], ["t-menu", "menu"]];
 for (const [id, key] of texts) $(id).textContent = T[key];
 document.title = T.title;
 document.documentElement.lang = pl ? "pl" : "en";
