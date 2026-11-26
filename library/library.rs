@@ -1365,10 +1365,10 @@ pub fn save_framegen_setting(profile_path: &Path, factor: u8) -> io::Result<()> 
 
 /// Read `[display] show_fps` from a prospero-win `.profile` file (defaults to `true`).
 pub fn read_show_fps_setting(profile_path: &Path) -> bool {
-    match read_display_profile_value(profile_path, "show_fps").as_deref().map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("false") | Some("0") | Some("off") => false,
-        _ => true,
-    }
+    !matches!(
+        read_display_profile_value(profile_path, "show_fps").as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("false" | "0" | "off")
+    )
 }
 
 /// Update `[display] show_fps = true | false` inside a prospero-win `.profile` file.

@@ -357,7 +357,7 @@ fn handle_connection(
             if !is_safe_title_id(title) {
                 send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", b"Invalid title", None);
             } else {
-                match restore_saves_zip(title, &body) {
+                match restore_saves_zip(title, body) {
                     Ok(count) => {
                         dirty.store(true, Ordering::Release);
                         let msg = format!("Restored {count} save file(s) for {title} (previous saves backed up to pls.before-restore).");
@@ -786,7 +786,7 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
     if !notice.is_empty() {
         html.push_str(&format!("<div class=notice>{}</div>", html_escape(notice)));
     }
-    html.push_str(&format!(
+    html.push_str(
         "<div class=card><h2>Diagnostic Logs &amp; Live Viewer</h2><p class=muted>Downloads only logs and <code>xcl.toml</code> configs (never game files or saves).</p><a class=btn href='/logs.zip'>Download trinityxsx-logs.zip</a>\
          <div style='margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>\
          <select id=logsel onchange='loadLog()' style='padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>\
@@ -799,7 +799,7 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
          <label class=muted><input type=checkbox id=logauto onchange='toggleAutoLog()'> Auto-refresh (3s)</label>\
          </div>\
          <pre id=logbox style='margin:10px 0 0;padding:12px;background:#0e171d;border:1px solid #35505b;border-radius:6px;max-height:280px;overflow:auto;font-size:0.8rem;white-space:pre-wrap;word-break:break-word'>Click Refresh to view recent log lines...</pre></div>"
-    ));
+    );
 
     // Offline Profile, Language & Frame Generation card
     let ui = library::load_ui_settings(&library::ui_settings_file());
@@ -894,9 +894,9 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
             ));
         }
     }
-    html.push_str(&format!(
-        "<script>let logTimer=null;async function loadLog(){{const sel=document.getElementById('logsel');const box=document.getElementById('logbox');if(!sel||!box)return;try{{const r=await fetch('/logs/tail?file='+encodeURIComponent(sel.value));if(r.status===401||r.status===403||r.status===429){{if(logTimer){{clearInterval(logTimer);logTimer=null;}}const cb=document.getElementById('logauto');if(cb)cb.checked=false;box.textContent='TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.';return;}}box.textContent=await r.text();box.scrollTop=box.scrollHeight;}}catch(e){{box.textContent='Error loading log: '+e;}}}}function toggleAutoLog(){{const cb=document.getElementById('logauto');if(logTimer){{clearInterval(logTimer);logTimer=null;}}if(cb&&cb.checked){{loadLog();logTimer=setInterval(loadLog,3000);}}}}async function restoreSave(t){{const inp=document.getElementById('zf-'+t);if(!inp||!inp.files||!inp.files[0]){{alert('Choose a .zip backup file first.');return;}}if(!confirm('Restore saves for '+decodeURIComponent(t)+'? Existing saves will be backed up to pls.before-restore.'))return;const r=await fetch('/saves/restore?title='+t,{{method:'POST',body:await inp.files[0].arrayBuffer()}});if(r.status===401||r.status===403||r.status===429){{alert('TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.');return;}}const txt=await r.text();window.location='/?msg='+encodeURIComponent(txt);}}</script></body></html>"
-    ));
+    html.push_str(
+        "<script>let logTimer=null;async function loadLog(){const sel=document.getElementById('logsel');const box=document.getElementById('logbox');if(!sel||!box)return;try{const r=await fetch('/logs/tail?file='+encodeURIComponent(sel.value));if(r.status===401||r.status===403||r.status===429){if(logTimer){clearInterval(logTimer);logTimer=null;}const cb=document.getElementById('logauto');if(cb)cb.checked=false;box.textContent='TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.';return;}box.textContent=await r.text();box.scrollTop=box.scrollHeight;}catch(e){box.textContent='Error loading log: '+e;}}function toggleAutoLog(){const cb=document.getElementById('logauto');if(logTimer){clearInterval(logTimer);logTimer=null;}if(cb&&cb.checked){loadLog();logTimer=setInterval(loadLog,3000);}}async function restoreSave(t){const inp=document.getElementById('zf-'+t);if(!inp||!inp.files||!inp.files[0]){alert('Choose a .zip backup file first.');return;}if(!confirm('Restore saves for '+decodeURIComponent(t)+'? Existing saves will be backed up to pls.before-restore.'))return;const r=await fetch('/saves/restore?title='+t,{method:'POST',body:await inp.files[0].arrayBuffer()});if(r.status===401||r.status===403||r.status===429){alert('TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.');return;}const txt=await r.text();window.location='/?msg='+encodeURIComponent(txt);}</script></body></html>"
+    );
     html
 }
 

@@ -85,10 +85,10 @@ pub fn decode_png(bytes: &[u8], bg_rgb: (u8, u8, u8)) -> Result<DibImage, &'stat
                 saw_ihdr = true;
             }
             b"PLTE" => {
-                if len % 3 != 0 {
+                if !len.is_multiple_of(3) {
                     return Err("invalid PLTE");
                 }
-                palette = data.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                palette = data.as_chunks::<3>().0.to_vec();
             }
             b"tRNS" => {
                 trns = data.to_vec();
@@ -365,14 +365,14 @@ fn write_format(modules: &mut [bool], is_func: &mut [bool], size: usize, mask: u
 
 fn mask_condition(mask: u32, x: usize, y: usize) -> bool {
     match mask {
-        0 => (x + y) % 2 == 0,
-        1 => y % 2 == 0,
-        2 => x % 3 == 0,
-        3 => (x + y) % 3 == 0,
-        4 => ((y / 2) + (x / 3)) % 2 == 0,
+        0 => (x + y).is_multiple_of(2),
+        1 => y.is_multiple_of(2),
+        2 => x.is_multiple_of(3),
+        3 => (x + y).is_multiple_of(3),
+        4 => ((y / 2) + (x / 3)).is_multiple_of(2),
         5 => ((x * y) % 2) + ((x * y) % 3) == 0,
-        6 => (((x * y) % 2) + ((x * y) % 3)) % 2 == 0,
-        _ => (((x + y) % 2) + ((x * y) % 3)) % 2 == 0,
+        6 => (((x * y) % 2) + ((x * y) % 3)).is_multiple_of(2),
+        _ => (((x + y) % 2) + ((x * y) % 3)).is_multiple_of(2),
     }
 }
 
@@ -446,7 +446,7 @@ pub fn encode_qr(text: &str) -> Option<QrCode> {
         bits.push(false);
     }
     let mut data = Vec::with_capacity(spec.total_data_bytes);
-    for chunk in bits.chunks_exact(8) {
+    for chunk in bits.as_chunks::<8>().0 {
         let mut byte = 0u8;
         for &b in chunk {
             byte = (byte << 1) | (b as u8);

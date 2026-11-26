@@ -554,7 +554,7 @@ pub fn extract_gog_installer_in_process(
         if module.is_null() {
             return Err(format!("Cannot load {}: {}", dll_path.display(), io::Error::last_os_error()));
         }
-        let sym = GetProcAddress(module, b"trinity_inno_extract_utf8\0".as_ptr());
+        let sym = GetProcAddress(module, c"trinity_inno_extract_utf8".as_ptr().cast());
         let Some(sym) = sym else {
             FreeLibrary(module);
             return Err("trinity_innoextract.dll missing export trinity_inno_extract_utf8".into());

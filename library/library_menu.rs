@@ -360,7 +360,7 @@ impl Menu {
                 let label = if self.settings_preset == 0 {
                     if let Some(game) = self.catalog.games.get(self.selected) {
                         if let Some(known) = library::lookup_tested_preset_label(&game.title_id, &game.identity) {
-                            format!("{known}")
+                            known.to_string()
                         } else {
                             preset.label.into()
                         }
@@ -961,7 +961,7 @@ impl Menu {
             if dir == self.hold_dir {
                 self.hold_ticks = self.hold_ticks.saturating_add(1);
                 if self.hold_ticks >= REPEAT_DELAY_TICKS
-                    && (self.hold_ticks - REPEAT_DELAY_TICKS) % REPEAT_INTERVAL_TICKS == 0
+                    && (self.hold_ticks - REPEAT_DELAY_TICKS).is_multiple_of(REPEAT_INTERVAL_TICKS)
                 {
                     pressed |= dir;
                 }
@@ -1026,7 +1026,7 @@ unsafe fn draw_dib(dc: HDC, img: &DibImage, box_x: i32, box_y: i32, box_w: i32, 
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    SetStretchBltMode(dc, COLORONCOLOR as i32);
+    SetStretchBltMode(dc, COLORONCOLOR);
     StretchDIBits(
         dc,
         dst_x,
@@ -1442,9 +1442,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 text(dc, label, region(left + scale(26), top + 16, right - scale(500), 36), scale(26), 600, snow);
                 let val_color = if idx == 5 && any_pending {
                     amber
-                } else if idx == 4 && !menu.installers.is_empty() {
-                    mint
-                } else if selected {
+                } else if (idx == 4 && !menu.installers.is_empty()) || selected {
                     mint
                 } else {
                     muted
