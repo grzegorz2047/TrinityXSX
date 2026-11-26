@@ -367,10 +367,11 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **On-Console GOG Offline Installer Importer (100% Open Source):** Drop DRM-free GOG offline installers (\`setup_*.exe\` + \`.bin\` slices) into \`/mnt/ext1/xboxseries/installers/\` and install them right from \`OPTIONS -> Install GOG offline games\` with a live progress bar via bundled \`trinity_innoextract.dll\` (zlib), automatic \`goggame-*.info\` parsing, \`Cover.png\` extraction from \`.ico\`, and \`MicrosoftGame.config\` generation.
-          - **Seamless PC/GOG Game Handoff (\`prospero-win\`):** Automatically detects \`[XSX]\` vs \`[PC64]\`/\`[PC32]\` executables — Xbox Series titles run in-process through XCL, while standard 64-bit & 32-bit PC/GOG games hand off directly to \`pw_runner.bin\` (\`DXVK\` / \`vkd3d-proton\` / \`Zink\` + WoW64) with Touchpad Return-to-Library support and zero XCL UMA overhead.
-          - **Flicker-free double-buffered Library UI:** Offscreen GDI memory DC + atomic \`BitBlt\` + \`WM_ERASEBKGND\` suppression eliminates list-scroll flicker on PS5 VideoOut.
-          - **Stability base:** Elevated \`UID 0\` runtime auto-sync, \`vkd3d-proton 71cae091\` + \`dxil-spirv b540c8a2\` crash fix, and \`MESA_SHADER_CACHE_MAX_SIZE=4G\`.
+          - **PC/GOG Game Launch Fix (`eboot.bin` + `profiles.lst` + DXVK/vkd3d-proton sync):** Fixed PS5 `sceSystemServiceLoadExec` argument parsing (`argv[0]`), automatic `profiles.lst` registration for dynamic PC/GOG profiles, and automatic replacement of Wine's built-in DirectX stubs in `system32` so installed GOG games (like *Hollow Knight: Silksong*) launch cleanly straight from the library.
+          - **Live Speed & ETA on GOG Installer Screen:** The on-console open-source `innoextract` installer now displays real-time throughput (`MiB/s`) and estimated time remaining (`~mm:ss left`) alongside the progress bar.
+          - **Reliable In-App Restarts & PS5 Benchmark Runner:** Added `restart.flag` handling inside `pw_runner.bin` (`on_exit_report`), enabling seamless multi-title PS5 performance benchmarks (`XCL_BENCH_SECONDS` + `tools/ps5_bench.py`), Web Companion restarts, and Frame Generation restarts.
+          - **Persistent Shader Caches Across Updates:** DXC toolchain identity now hashes `dxcompiler.dll` + `dxil.dll` contents instead of `mtime`, and the `vkd3d-proton` shader cache directory is created and staged automatically so updating TrinityXSX no longer invalidates compiled shaders.
+          - **Web Companion Security & Built-in Compatibility DB:** Added brute-force PIN lockout + `HttpOnly` session cookies (removing the PIN from URLs), plus `library/compat.toml` single-source-of-truth compatibility tracking and clean `library/` Rust modules (`rustfmt` + `clippy` gated in CI).
 
           ### Included CI-built assets
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.

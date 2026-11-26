@@ -254,6 +254,60 @@ class StandaloneTests(unittest.TestCase):
         r2 = subprocess.run([str(binary), "sync", str(seed), str(dest)], capture_output=True, text=True, check=True)
         self.assertEqual(r2.stdout.strip(), "0")
 
+        # Verify launcher.c parses profile=/cycle=/launcher=1 starting at argv[0] (PS5 LoadExec ABI)
+        launcher_test = self.root / "test_launcher.c"
+        launcher_bin = self.root / "test_launcher"
+        launcher_test.write_text(
+            """
+            #include <assert.h>
+            #include <string.h>
+            static char got_path[128];
+            static char got_arg0[128];
+            static char got_arg1[128];
+            static int got_null_args;
+            int sceSystemServiceLoadExec(const char *path, char *const arguments[]) {
+                strncpy(got_path, path ? path : "", sizeof(got_path) - 1);
+                got_null_args = (arguments == NULL);
+                got_arg0[0] = got_arg1[0] = '\\0';
+                if (arguments && arguments[0]) strncpy(got_arg0, arguments[0], sizeof(got_arg0) - 1);
+                if (arguments && arguments[0] && arguments[1]) strncpy(got_arg1, arguments[1], sizeof(got_arg1) - 1);
+                return 0;
+            }
+            #define main launcher_main
+            #include "launcher.c"
+            #undef main
+            int main(void) {
+                char p1[] = "profile=trinityxsx-pc-game";
+                char c1[] = "cycle=2";
+                char *argv_pc[] = { p1, c1, NULL };
+                assert(launcher_main(2, argv_pc) == 0);
+                assert(strcmp(got_path, "/app0/runtime/pw_runner.bin") == 0);
+                assert(strcmp(got_arg0, "profile=trinityxsx-pc-game") == 0);
+                assert(strcmp(got_arg1, "cycle=2") == 0);
+
+                char l1[] = "launcher=1";
+                char *argv_exit[] = { l1, NULL };
+                assert(launcher_main(1, argv_exit) == 0);
+                assert(strcmp(got_path, "exit") == 0);
+                assert(got_null_args == 1);
+
+                char *argv_empty[] = { NULL };
+                assert(launcher_main(0, argv_empty) == 0);
+                assert(strcmp(got_path, "/app0/runtime/pw_runner.bin") == 0);
+                assert(strcmp(got_arg0, "profile=trinityxsx-library") == 0);
+                assert(strcmp(got_arg1, "cycle=1") == 0);
+                return 0;
+            }
+            """,
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O2", "-Wall", "-Wextra", "-Werror",
+             f"-I{native_dir}", str(launcher_test), "-o", str(launcher_bin)],
+            check=True,
+        )
+        subprocess.run([str(launcher_bin)], check=True)
+
     def test_sce_sys_prosperostore_metadata_is_valid(self):
         repo_root = Path(__file__).resolve().parent.parent
         param = json.loads((repo_root / "sce_sys/param.json").read_text(encoding="utf-8-sig"))

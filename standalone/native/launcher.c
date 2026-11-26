@@ -64,7 +64,9 @@ int main(int argc, char **argv)
     const char *target = targets[0];
     char *const *target_arguments = arguments;
 
-    for (int i = 1; i < argc; ++i) {
+    /* On PS5, sceSystemServiceLoadExec(path, argv) passes arguments starting at
+     * argv[0] without prepending an executable name, matching pw_wine_launch_parse. */
+    for (int i = 0; i < argc; ++i) {
         if (!argv[i]) continue;
         if (strcmp(argv[i], "launcher=1") == 0) {
 #ifdef TRINITYXSX_WITH_SEED

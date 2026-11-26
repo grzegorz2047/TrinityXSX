@@ -623,8 +623,8 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
     let arch = if is_64bit { "pe64" } else { "pe32" };
     let gfx = if prefer_opengl { "zink" } else { "dxvk" };
 
-    // Ensure 64-bit DXVK / vkd3d-proton DLLs from C:\XCL are available in system32 for PC games
-    // launched outside C:\XCL (only copy if missing so we never overwrite newer user DLLs).
+    // Ensure 64-bit DXVK / vkd3d-proton DLLs from C:\XCL are installed in system32 for PC games
+    // launched outside C:\XCL (replace Wine's built-in stubs whenever sizes differ).
     if is_64bit {
         let sys32 = root.join("prefix").join("drive_c").join("windows").join("system32");
         let xcl_dir = root.join("prefix").join("drive_c").join("XCL");
@@ -632,8 +632,11 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
             for dll in ["d3d12.dll", "d3d12core.dll", "dxgi.dll", "d3d11.dll"] {
                 let src = xcl_dir.join(dll);
                 let dst = sys32.join(dll);
-                if src.is_file() && !dst.is_file() {
-                    let _ = fs::copy(&src, &dst);
+                if let Ok(src_meta) = fs::metadata(&src) {
+                    let dst_matches = fs::metadata(&dst).is_ok_and(|m| m.len() == src_meta.len());
+                    if src_meta.is_file() && !dst_matches {
+                        let _ = fs::copy(&src, &dst);
+                    }
                 }
             }
         }
@@ -666,10 +669,32 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
          env = DXVK_LOG_PATH=C:/XCL\n"
     );
 
-    fs::write(profiles_dir.join(format!("{PC_PROFILE_ID}.profile")), profile_text)
+    let profile_file = format!("{PC_PROFILE_ID}.profile");
+    fs::write(profiles_dir.join(&profile_file), profile_text)
         .map_err(|e| format!("Cannot write PC game profile: {e}"))?;
+    ensure_profile_listed(&profiles_dir, &profile_file).map_err(|e| format!("Cannot update profiles.lst: {e}"))?;
     fs::write(root.join("pc_launch.flag"), format!("{PC_PROFILE_ID}\n"))
         .map_err(|e| format!("Cannot write pc_launch.flag: {e}"))?;
+    Ok(())
+}
+
+/// Ensure `profile_file` is present in `profiles.lst` so `pw_wine_library_load` (indexed mode)
+/// discovers dynamic PC/GOG handoff profiles.
+fn ensure_profile_listed(profiles_dir: &Path, profile_file: &str) -> io::Result<()> {
+    let lst = profiles_dir.join("profiles.lst");
+    let mut lines: Vec<String> = fs::read_to_string(&lst)
+        .unwrap_or_else(|_| "trinityxsx-library.profile\n".to_owned())
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if !lines.iter().any(|l| l.eq_ignore_ascii_case(profile_file)) {
+        lines.push(profile_file.to_owned());
+        let mut out = lines.join("\n");
+        out.push('\n');
+        fs::write(&lst, out)?;
+    }
     Ok(())
 }
 
@@ -730,6 +755,19 @@ mod tests {
         let xml = fs::read_to_string(tmp.join("MicrosoftGame.config")).unwrap();
         assert!(xml.contains("Test &amp; Demo"));
         assert!(xml.contains("Game.exe"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ensure_profile_listed_appends_once() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-lst-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("profiles.lst"), "trinityxsx-library.profile\n").unwrap();
+        ensure_profile_listed(&tmp, "trinityxsx-pc-game.profile").unwrap();
+        ensure_profile_listed(&tmp, "trinityxsx-pc-game.profile").unwrap();
+        let text = fs::read_to_string(tmp.join("profiles.lst")).unwrap();
+        assert_eq!(text, "trinityxsx-library.profile\ntrinityxsx-pc-game.profile\n");
         let _ = fs::remove_dir_all(&tmp);
     }
 }

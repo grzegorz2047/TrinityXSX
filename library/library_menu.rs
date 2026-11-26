@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -70,7 +71,28 @@ struct InstallJob {
     game_name: String,
     done: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
+    started: Instant,
     result: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+fn format_install_eta(done: u64, total: u64, elapsed_secs: f64) -> String {
+    if elapsed_secs < 2.0 || done < 4 * 1024 * 1024 || total <= done {
+        return "estimating time...".to_owned();
+    }
+    let bytes_per_sec = done as f64 / elapsed_secs;
+    if bytes_per_sec <= 1.0 {
+        return "estimating time...".to_owned();
+    }
+    let mib_s = bytes_per_sec / (1024.0 * 1024.0);
+    let rem_secs = ((total - done) as f64 / bytes_per_sec).ceil() as u64;
+    let eta = if rem_secs >= 3600 {
+        format!("~{}h {:02}m left", rem_secs / 3600, (rem_secs % 3600) / 60)
+    } else if rem_secs >= 60 {
+        format!("~{}m {:02}s left", rem_secs / 60, rem_secs % 60)
+    } else {
+        format!("~{rem_secs}s left")
+    };
+    format!("{mib_s:.1} MiB/s   ·   {eta}")
 }
 
 struct Menu {
@@ -540,7 +562,8 @@ impl Menu {
         });
 
         self.status = format!("Installing {}...", inst.display_name);
-        self.install_job = Some(InstallJob { game_name: inst.display_name, done, total, result });
+        self.install_job =
+            Some(InstallJob { game_name: inst.display_name, done, total, started: Instant::now(), result });
     }
 
     fn poll_install_job(&mut self) -> bool {
@@ -1527,10 +1550,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 if fill_w > 0 {
                     fill(dc, region(bar_l, 370, bar_l + fill_w, 38), mint);
                 }
+                let eta_line = format_install_eta(done, total, job.started.elapsed().as_secs_f64());
                 text(
                     dc,
                     &format!(
-                        "{pct}%   ·   {:.1} / {:.1} MiB   (please keep PS5 awake)",
+                        "{pct}%   ·   {:.1} / {:.1} MiB   ·   {eta_line}",
                         (done as f64) / (1024.0 * 1024.0),
                         (total as f64) / (1024.0 * 1024.0)
                     ),
@@ -1538,6 +1562,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     scale(24),
                     600,
                     mint,
+                );
+                text(
+                    dc,
+                    "Please keep your PS5 awake until extraction finishes",
+                    region(bar_l, 476, bar_r, 30),
+                    scale(20),
+                    400,
+                    muted,
                 );
             } else if menu.installers.is_empty() {
                 fill(dc, region(left, 230, right, 240), panel_bg);

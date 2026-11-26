@@ -1,17 +1,17 @@
-From b5a04c8d1083eb8f33c6aa78bae81b4f31c683d1 Mon Sep 17 00:00:00 2001
+From 697c9b6b81206c13170f6c5cb50a1098f00aea4b Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Thu, 26 Nov 2026 11:16:42 +0100
-Subject: [PATCH] Support TrinityXSX PC/GOG dynamic game profile handoff
+Date: Thu, 26 Nov 2026 16:43:33 +0100
+Subject: [PATCH] Support TrinityXSX PC/GOG game handoff and restart.flag
 
 ---
- native/wine64_main.c | 118 +++++++++++++++++++++++++++++++------------
- 1 file changed, 85 insertions(+), 33 deletions(-)
+ native/wine64_main.c | 123 +++++++++++++++++++++++++++++++------------
+ 1 file changed, 90 insertions(+), 33 deletions(-)
 
 diff --git a/native/wine64_main.c b/native/wine64_main.c
-index 9a22090..e8746d5 100644
+index 9a22090..6353eae 100644
 --- a/native/wine64_main.c
 +++ b/native/wine64_main.c
-@@ -752,12 +752,84 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+@@ -752,12 +752,89 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
      }
  }
  
@@ -88,6 +88,11 @@ index 9a22090..e8746d5 100644
 +                }
 +            }
 +        }
++        snprintf(flag_path, sizeof(flag_path), "%s/restart.flag", library_root);
++        if (unlink(flag_path) == 0) {
++            PS5LOG_LOG("PW_WINE64 restart_flag target=%s", launch.app->id);
++            restart_title(launch.app, launch.cycle + 1u, "restart-flag");
++        }
 +    } else if (launch.app && launch.app->id &&
 +               strcmp(launch.app->id, "trinityxsx-library") != 0) {
 +        const PwWineApp *lib_app = find_catalog_app("trinityxsx-library");
@@ -98,7 +103,7 @@ index 9a22090..e8746d5 100644
      restart_title(NULL, launch.cycle + 1u, "wine-exit");
      pw_diagnostics_close("wine64-exit");
  }
-@@ -949,30 +1021,7 @@ static int open_library(void)
+@@ -949,30 +1026,7 @@ static int open_library(void)
      if (status != 0) return -1;
      trinityxsx_sync_runtime_elevated(library_root);
      status = pw_wine_library_load(&library, library_root);
@@ -130,7 +135,7 @@ index 9a22090..e8746d5 100644
      PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
                     "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
                 (unsigned)library.count, (unsigned)catalog_count, library_root);
-@@ -1753,12 +1802,14 @@ int main(int argc, char **argv)
+@@ -1753,12 +1807,14 @@ int main(int argc, char **argv)
                      PS5LOG_LOG("PW_WINE64 menu action=dump-diag");
                      menu_drawn_open = 0; /* redraw menu with notice banner */
                  } else if (view.action == PW_GAME_MENU_ACTION_RESTART_GAME) {
@@ -151,7 +156,7 @@ index 9a22090..e8746d5 100644
                      }
                      PS5LOG_LOG("PW_WINE64 menu action=restart-game");
                      if (rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
-@@ -1767,9 +1818,10 @@ int main(int argc, char **argv)
+@@ -1767,9 +1823,10 @@ int main(int argc, char **argv)
                  } else if (view.action == PW_GAME_MENU_ACTION_KEYBOARD && osk_status == PW_OK) {
                      pw_osk_open(&osk);
                  } else if (view.action == PW_GAME_MENU_ACTION_LIBRARY) {
