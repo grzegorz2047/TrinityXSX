@@ -1,0 +1,5 @@
+# Formatting for TrinityXSX's own library code (CI: rustfmt --check library/*.rs).
+# XCL's tree is not rustfmt-clean and is not formatted; these settings are the closest to its style.
+edition = "2021"
+max_width = 120
+use_small_heuristics = "Max"

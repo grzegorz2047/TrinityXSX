@@ -8,12 +8,12 @@
 //! - Pure-Rust `goggame-*.info` metadata parsing, `.ico` embedded PNG extraction,
 //!   `MicrosoftGame.config` XML generation, and PE32/PE32+ import inspection.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::FreeLibrary;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -28,10 +28,7 @@ pub enum PeLaunchKind {
     /// Imports console-only DLLs (`d3d12_xs.dll`, `xgameplatform.dll`, `xcrdapi.dll`, etc.)
     XboxSeries,
     /// Standard Windows PC executable (e.g. GOG DRM-free game) — best launched via prospero-win
-    PcNative {
-        is_64bit: bool,
-        prefer_opengl: bool,
-    },
+    PcNative { is_64bit: bool, prefer_opengl: bool },
 }
 
 impl PeLaunchKind {
@@ -96,8 +93,8 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
     let opt_off = pe_off + 24;
     let magic = read_u16_le(&header, opt_off).unwrap_or(0);
     let (is_64bit, data_dir_off) = match magic {
-        0x20B => (true, opt_off + 112),  // PE32+
-        0x10B => (false, opt_off + 96),  // PE32
+        0x20B => (true, opt_off + 112), // PE32+
+        0x10B => (false, opt_off + 96), // PE32
         _ => return PeLaunchKind::XboxSeries,
     };
 
@@ -167,19 +164,14 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
         return PeLaunchKind::XboxSeries;
     }
 
-    let has_dx_or_vk = imports.iter().any(|d| {
-        d.starts_with("d3d") || d == "dxgi.dll" || d == "vulkan-1.dll" || d == "unityplayer.dll"
-    });
+    let has_dx_or_vk = imports
+        .iter()
+        .any(|d| d.starts_with("d3d") || d == "dxgi.dll" || d == "vulkan-1.dll" || d == "unityplayer.dll");
     let has_gl = imports.iter().any(|d| d == "opengl32.dll");
-    let has_unity_sibling = exe_path
-        .parent()
-        .is_some_and(|p| p.join("UnityPlayer.dll").is_file());
+    let has_unity_sibling = exe_path.parent().is_some_and(|p| p.join("UnityPlayer.dll").is_file());
     let prefer_opengl = has_gl && !has_dx_or_vk && !has_unity_sibling;
 
-    PeLaunchKind::PcNative {
-        is_64bit,
-        prefer_opengl,
-    }
+    PeLaunchKind::PcNative { is_64bit, prefer_opengl }
 }
 
 fn contains_inno_signature(path: &Path) -> bool {
@@ -370,12 +362,7 @@ fn find_gog_info(dir: &Path) -> Option<(String, String, String)> {
             let text = fs::read_to_string(entry.path()).ok()?;
             let v: serde_json::Value = serde_json::from_str(&text).ok()?;
             let game_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_owned();
-            let game_id = v
-                .get("gameId")
-                .and_then(|x| x.as_str())
-                .unwrap_or("00000001")
-                .trim()
-                .to_owned();
+            let game_id = v.get("gameId").and_then(|x| x.as_str()).unwrap_or("00000001").trim().to_owned();
             let tasks = v.get("playTasks").and_then(|x| x.as_array());
             let mut exe_rel = String::new();
             if let Some(arr) = tasks {
@@ -508,13 +495,7 @@ pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<Fin
     let _ = fs::remove_dir_all(unpacked_dir.join("tmp"));
 
     let pe_kind = detect_pe_kind(&exe_path);
-    Ok(FinalizedGog {
-        name,
-        identity,
-        executable_rel: exe_rel_clean,
-        has_cover,
-        pe_kind,
-    })
+    Ok(FinalizedGog { name, identity, executable_rel: exe_rel_clean, has_cover, pe_kind })
 }
 
 /// Extract a GOG offline installer in-process using bundled `trinity_innoextract.dll` (zlib).
@@ -560,15 +541,9 @@ pub fn extract_gog_installer_in_process(
     let dll_path = dll_candidates
         .into_iter()
         .find(|p| p.is_file())
-        .ok_or_else(|| {
-            "trinity_innoextract.dll not found next to xcl-library.exe (update to v0.2.7+)".to_owned()
-        })?;
+        .ok_or_else(|| "trinity_innoextract.dll not found next to xcl-library.exe (update to v0.2.7+)".to_owned())?;
 
-    let dll_w: Vec<u16> = dll_path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let dll_w: Vec<u16> = dll_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     let setup_clean = strip_verbatim_prefix(&setup_exe.to_string_lossy());
     let out_clean = strip_verbatim_prefix(&output_dir.to_string_lossy());
     let setup_c = CString::new(setup_clean).map_err(|_| "Invalid installer path".to_owned())?;
@@ -577,11 +552,7 @@ pub fn extract_gog_installer_in_process(
     unsafe {
         let module = LoadLibraryW(dll_w.as_ptr());
         if module.is_null() {
-            return Err(format!(
-                "Cannot load {}: {}",
-                dll_path.display(),
-                io::Error::last_os_error()
-            ));
+            return Err(format!("Cannot load {}: {}", dll_path.display(), io::Error::last_os_error()));
         }
         let sym = GetProcAddress(module, b"trinity_inno_extract_utf8\0".as_ptr());
         let Some(sym) = sym else {
@@ -589,10 +560,7 @@ pub fn extract_gog_installer_in_process(
             return Err("trinity_innoextract.dll missing export trinity_inno_extract_utf8".into());
         };
         let extract: ExtractFn = std::mem::transmute(sym);
-        let ctx = ProgressCtx {
-            done: done_bytes,
-            total: total_bytes,
-        };
+        let ctx = ProgressCtx { done: done_bytes, total: total_bytes };
         let mut err_buf = [0u8; 512];
         let rc = extract(
             setup_c.as_ptr(),
@@ -604,14 +572,8 @@ pub fn extract_gog_installer_in_process(
         );
         FreeLibrary(module);
         if rc != 0 {
-            let msg = CStr::from_ptr(err_buf.as_ptr() as *const c_char)
-                .to_string_lossy()
-                .into_owned();
-            return Err(if msg.is_empty() {
-                format!("innoextract failed (rc={rc})")
-            } else {
-                msg
-            });
+            let msg = CStr::from_ptr(err_buf.as_ptr() as *const c_char).to_string_lossy().into_owned();
+            return Err(if msg.is_empty() { format!("innoextract failed (rc={rc})") } else { msg });
         }
     }
     Ok(())
@@ -633,29 +595,19 @@ pub fn ps5_pc_handoff_available() -> bool {
 /// Write a dynamic `prospero-win` `.profile` (`trinityxsx-pc-game.profile`) + `pc_launch.flag`
 /// so `pw_runner.bin` launches a standard 32-bit or 64-bit PC/GOG game directly under Wine +
 /// DXVK / vkd3d-proton / Zink with zero XCL UMA overhead and Touchpad Return-to-Library support.
-pub fn write_pc_handoff(
-    game_name: &str,
-    exe_path: &Path,
-    is_64bit: bool,
-    prefer_opengl: bool,
-) -> Result<(), String> {
+pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer_opengl: bool) -> Result<(), String> {
     let root = Path::new(PS5_STORAGE_ROOT);
     let profiles_dir = root.join("profiles");
     if !profiles_dir.is_dir() {
         return Err("PS5 profiles directory not available".into());
     }
     let clean_exe = strip_verbatim_prefix(&exe_path.to_string_lossy());
-    let work_dir = exe_path
-        .parent()
-        .map(|p| strip_verbatim_prefix(&p.to_string_lossy()))
-        .unwrap_or_else(|| "C:\\XCL".into());
+    let work_dir =
+        exe_path.parent().map(|p| strip_verbatim_prefix(&p.to_string_lossy())).unwrap_or_else(|| "C:\\XCL".into());
 
     // Sanitize display name for prospero-win profile parser (<= 90 ASCII/UTF-8 bytes, single line)
-    let safe_name: String = game_name
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\n' && *c != '\r')
-        .take(80)
-        .collect();
+    let safe_name: String =
+        game_name.chars().filter(|c| !c.is_control() && *c != '\n' && *c != '\r').take(80).collect();
     let safe_name = if safe_name.trim().is_empty() { "PC Game" } else { safe_name.trim() };
 
     let lib_profile = library::runtime_profile_file();

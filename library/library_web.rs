@@ -45,9 +45,8 @@ pub struct WebCompanion {
 
 impl WebCompanion {
     pub fn start(paths_file: PathBuf) -> Option<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", PREFERRED_PORT))
-            .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
-            .ok()?;
+        let listener =
+            TcpListener::bind(("0.0.0.0", PREFERRED_PORT)).or_else(|_| TcpListener::bind(("0.0.0.0", 0))).ok()?;
         let port = listener.local_addr().ok()?.port();
         let _ = listener.set_nonblocking(true);
 
@@ -73,7 +72,15 @@ impl WebCompanion {
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-                        handle_connection(stream, &pin_bg, &session_bg, &mut guard, &paths_file, &dirty_bg, &restart_bg);
+                        handle_connection(
+                            stream,
+                            &pin_bg,
+                            &session_bg,
+                            &mut guard,
+                            &paths_file,
+                            &dirty_bg,
+                            &restart_bg,
+                        );
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(50));
@@ -150,10 +157,7 @@ fn generate_session_token() -> String {
 
 fn generate_pin() -> String {
     use std::hash::{BuildHasher, Hasher};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x5A3C_1234);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x5A3C_1234);
     // `RandomState` keys come from the OS RNG, so the PIN does not follow from the start time alone.
     let mut os_seeded = std::collections::hash_map::RandomState::new().build_hasher();
     os_seeded.write_u64(nanos);
@@ -323,13 +327,12 @@ fn handle_connection(
         ("POST", "/clear-cache") => {
             let body_str = String::from_utf8_lossy(body);
             let form = parse_query(&body_str);
-            let title = form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).filter(|s| is_safe_title_id(s));
+            let title =
+                form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).filter(|s| is_safe_title_id(s));
             let (files, bytes) = library::clear_shader_cache(title);
             dirty.store(true, Ordering::Release);
-            let msg = format!(
-                "Cleared {files} shader cache file(s) ({:.1} MiB freed).",
-                (bytes as f64) / (1024.0 * 1024.0)
-            );
+            let msg =
+                format!("Cleared {files} shader cache file(s) ({:.1} MiB freed).", (bytes as f64) / (1024.0 * 1024.0));
             send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
         }
         ("POST", "/restart") => {
@@ -362,7 +365,13 @@ fn handle_connection(
                     }
                     Err(e) => {
                         let msg = format!("Save restore failed: {e}");
-                        send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", msg.as_bytes(), None);
+                        send_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain; charset=utf-8",
+                            msg.as_bytes(),
+                            None,
+                        );
                     }
                 }
             }
@@ -550,11 +559,7 @@ fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let mut parts = req_line.split_whitespace();
     let method = parts.next()?.to_owned();
     let target = parts.next()?.to_owned();
-    let max_body = if target.starts_with("/saves/restore") {
-        MAX_SAVE_ZIP_BYTES
-    } else {
-        MAX_HTTP_BODY_BYTES
-    };
+    let max_body = if target.starts_with("/saves/restore") { MAX_SAVE_ZIP_BYTES } else { MAX_HTTP_BODY_BYTES };
     let mut content_length = 0usize;
     let (mut session, mut origin, mut host, mut fetch_site) = (None, None, None, None);
     for line in lines {
@@ -650,7 +655,8 @@ fn send_redirect_with_headers(stream: &mut TcpStream, location: &str, extra_head
 }
 
 fn send_redirect(stream: &mut TcpStream, location: &str) {
-    let resp = format!("HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let resp =
+        format!("HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
 }
@@ -761,7 +767,14 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
         let gib = 1024.0 * 1024.0 * 1024.0;
         let parts = storage_items
             .iter()
-            .map(|s| format!("<code>{}</code> {:.1} / {:.1} GB free", html_escape(&s.label), (s.free_bytes as f64) / gib, (s.total_bytes as f64) / gib))
+            .map(|s| {
+                format!(
+                    "<code>{}</code> {:.1} / {:.1} GB free",
+                    html_escape(&s.label),
+                    (s.free_bytes as f64) / gib,
+                    (s.total_bytes as f64) / gib
+                )
+            })
             .collect::<Vec<_>>()
             .join(" · ");
         format!("<p class=muted>Storage: {parts}</p>")
@@ -801,7 +814,11 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
     let mut prof_opts = String::new();
     for (idx, p) in ui.profiles.iter().enumerate() {
         let sel = if idx == ui.active_profile { " selected" } else { "" };
-        prof_opts.push_str(&format!("<option value='{idx}'{sel}>{} (XUID {})</option>", html_escape(&p.name), p.user_id));
+        prof_opts.push_str(&format!(
+            "<option value='{idx}'{sel}>{} (XUID {})</option>",
+            html_escape(&p.name),
+            p.user_id
+        ));
     }
     let mut fg_opts = String::new();
     for (val, label) in [(0u8, "Off"), (2, "2x (30 -> 60 FPS)"), (3, "3x (20 -> 60 FPS)"), (4, "4x (15 -> 60 FPS)")] {
@@ -953,26 +970,22 @@ pub fn build_zip(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
         let offset = out.len() as u32;
         let crc = crc32(data);
         let compressed = miniz_oxide::deflate::compress_to_vec(data, 6);
-        let (method, payload): (u16, &[u8]) = if compressed.len() < data.len() {
-            (8, &compressed)
-        } else {
-            (0, data)
-        };
+        let (method, payload): (u16, &[u8]) = if compressed.len() < data.len() { (8, &compressed) } else { (0, data) };
         let comp_len = payload.len() as u32;
         let uncomp_len = data.len() as u32;
 
         // Local file header
         out.extend_from_slice(&0x0403_4B50u32.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        out.extend_from_slice(&0u16.to_le_bytes());  // flags
+        out.extend_from_slice(&0u16.to_le_bytes()); // flags
         out.extend_from_slice(&method.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());  // mod time
-        out.extend_from_slice(&0u16.to_le_bytes());  // mod date
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod date
         out.extend_from_slice(&crc.to_le_bytes());
         out.extend_from_slice(&comp_len.to_le_bytes());
         out.extend_from_slice(&uncomp_len.to_le_bytes());
         out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());  // extra len
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
         out.extend_from_slice(name_bytes);
         out.extend_from_slice(payload);
 
@@ -1151,8 +1164,12 @@ pub fn extract_zip(data: &[u8]) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
         .find(|&i| &data[i..i + 4] == b"PK\x05\x06")
         .ok_or_else(|| "invalid ZIP archive (missing EOCD)".to_string())?;
     let total_entries = u16::from_le_bytes([data[eocd_pos + 10], data[eocd_pos + 11]]) as usize;
-    let cd_size = u32::from_le_bytes([data[eocd_pos + 12], data[eocd_pos + 13], data[eocd_pos + 14], data[eocd_pos + 15]]) as usize;
-    let cd_offset = u32::from_le_bytes([data[eocd_pos + 16], data[eocd_pos + 17], data[eocd_pos + 18], data[eocd_pos + 19]]) as usize;
+    let cd_size =
+        u32::from_le_bytes([data[eocd_pos + 12], data[eocd_pos + 13], data[eocd_pos + 14], data[eocd_pos + 15]])
+            as usize;
+    let cd_offset =
+        u32::from_le_bytes([data[eocd_pos + 16], data[eocd_pos + 17], data[eocd_pos + 18], data[eocd_pos + 19]])
+            as usize;
     if total_entries > MAX_SAVE_FILES || cd_offset.saturating_add(cd_size) > data.len() {
         return Err("ZIP central directory out of bounds or too many files".into());
     }
@@ -1167,27 +1184,30 @@ pub fn extract_zip(data: &[u8]) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
             return Err("corrupt ZIP central directory header".into());
         }
         let method = u16::from_le_bytes([data[cursor + 10], data[cursor + 11]]);
-        let expected_crc = u32::from_le_bytes([data[cursor + 16], data[cursor + 17], data[cursor + 18], data[cursor + 19]]);
-        let comp_size = u32::from_le_bytes([data[cursor + 20], data[cursor + 21], data[cursor + 22], data[cursor + 23]]) as usize;
-        let uncomp_size = u32::from_le_bytes([data[cursor + 24], data[cursor + 25], data[cursor + 26], data[cursor + 27]]) as usize;
+        let expected_crc =
+            u32::from_le_bytes([data[cursor + 16], data[cursor + 17], data[cursor + 18], data[cursor + 19]]);
+        let comp_size =
+            u32::from_le_bytes([data[cursor + 20], data[cursor + 21], data[cursor + 22], data[cursor + 23]]) as usize;
+        let uncomp_size =
+            u32::from_le_bytes([data[cursor + 24], data[cursor + 25], data[cursor + 26], data[cursor + 27]]) as usize;
         let name_len = u16::from_le_bytes([data[cursor + 28], data[cursor + 29]]) as usize;
         let extra_len = u16::from_le_bytes([data[cursor + 30], data[cursor + 31]]) as usize;
         let comment_len = u16::from_le_bytes([data[cursor + 32], data[cursor + 33]]) as usize;
-        let lfh_offset = u32::from_le_bytes([data[cursor + 42], data[cursor + 43], data[cursor + 44], data[cursor + 45]]) as usize;
+        let lfh_offset =
+            u32::from_le_bytes([data[cursor + 42], data[cursor + 43], data[cursor + 44], data[cursor + 45]]) as usize;
 
         let name_end = cursor + 46 + name_len;
         if name_end > cd_end {
             return Err("truncated ZIP filename".into());
         }
-        let raw_name = std::str::from_utf8(&data[cursor + 46..name_end])
-            .map_err(|_| "non-UTF-8 filename in ZIP".to_string())?;
+        let raw_name =
+            std::str::from_utf8(&data[cursor + 46..name_end]).map_err(|_| "non-UTF-8 filename in ZIP".to_string())?;
         cursor = name_end + extra_len + comment_len;
 
         if raw_name.ends_with('/') || raw_name.ends_with('\\') {
             continue;
         }
-        let rel = sanitize_zip_rel_path(raw_name)
-            .ok_or_else(|| format!("unsafe path in ZIP: {raw_name}"))?;
+        let rel = sanitize_zip_rel_path(raw_name).ok_or_else(|| format!("unsafe path in ZIP: {raw_name}"))?;
         if lfh_offset + 30 > data.len() || &data[lfh_offset..lfh_offset + 4] != b"PK\x03\x04" {
             return Err("corrupt ZIP local file header".into());
         }
@@ -1286,7 +1306,9 @@ mod tests {
         let t1 = t0 + PIN_BASE_LOCKOUT;
         assert!(matches!(guard.check("123456", "123456", t1), PinCheck::Accepted));
         // A correct PIN does not reset the count: the next wrong one doubles the lockout.
-        assert!(matches!(guard.check(&next_wrong(), "123456", t1), PinCheck::LockedOut(d) if d == PIN_BASE_LOCKOUT * 2));
+        assert!(
+            matches!(guard.check(&next_wrong(), "123456", t1), PinCheck::LockedOut(d) if d == PIN_BASE_LOCKOUT * 2)
+        );
         let mut t = t1;
         for _ in 0..40 {
             t += PIN_MAX_LOCKOUT;

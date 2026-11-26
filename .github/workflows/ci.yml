@@ -83,6 +83,14 @@ jobs:
           bash -n tools/build-standalone-ffpkg.sh
           bash -n tools/setup-sources.sh
 
+      # library/ is TrinityXSX's own code, formatted with library/rustfmt.toml. XCL's own tree is
+      # not rustfmt-clean (see its CONTRIBUTING.md), so only library/ is checked.
+      - name: rustfmt library/
+        run: |
+          rustup component add rustfmt
+          rustfmt --version
+          rustfmt --check library/*.rs
+
       - name: Verify patches/prospero-win apply cleanly to pinned prospero-win
         run: |
           set -euo pipefail

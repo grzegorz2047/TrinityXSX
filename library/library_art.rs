@@ -229,10 +229,10 @@ struct VersionSpec {
 
 // Level L capacities (ISO/IEC 18004 Table 9): Versions 1..6 (max 134 payload bytes).
 const SPECS: &[VersionSpec] = &[
-    VersionSpec { version: 1, total_data_bytes: 19,  ecc_bytes_per_block: 7,  num_blocks: 1, align_pos: &[] },
-    VersionSpec { version: 2, total_data_bytes: 34,  ecc_bytes_per_block: 10, num_blocks: 1, align_pos: &[6, 18] },
-    VersionSpec { version: 3, total_data_bytes: 55,  ecc_bytes_per_block: 15, num_blocks: 1, align_pos: &[6, 22] },
-    VersionSpec { version: 4, total_data_bytes: 80,  ecc_bytes_per_block: 20, num_blocks: 1, align_pos: &[6, 26] },
+    VersionSpec { version: 1, total_data_bytes: 19, ecc_bytes_per_block: 7, num_blocks: 1, align_pos: &[] },
+    VersionSpec { version: 2, total_data_bytes: 34, ecc_bytes_per_block: 10, num_blocks: 1, align_pos: &[6, 18] },
+    VersionSpec { version: 3, total_data_bytes: 55, ecc_bytes_per_block: 15, num_blocks: 1, align_pos: &[6, 22] },
+    VersionSpec { version: 4, total_data_bytes: 80, ecc_bytes_per_block: 20, num_blocks: 1, align_pos: &[6, 26] },
     VersionSpec { version: 5, total_data_bytes: 108, ecc_bytes_per_block: 26, num_blocks: 1, align_pos: &[6, 30] },
     VersionSpec { version: 6, total_data_bytes: 136, ecc_bytes_per_block: 18, num_blocks: 2, align_pos: &[6, 34] },
 ];
@@ -503,9 +503,8 @@ pub fn encode_qr(text: &str) -> Option<QrCode> {
     // Alignment patterns
     for &ay in spec.align_pos {
         for &ax in spec.align_pos {
-            let overlaps_finder = (ax == 6 && ay == 6)
-                || (ax == 6 && ay + 4 >= size - 4)
-                || (ay == 6 && ax + 4 >= size - 4);
+            let overlaps_finder =
+                (ax == 6 && ay == 6) || (ax == 6 && ay + 4 >= size - 4) || (ay == 6 && ax + 4 >= size - 4);
             if !overlaps_finder {
                 draw_alignment(&mut base_modules, &mut is_func, size, ax, ay);
             }
@@ -619,7 +618,7 @@ mod tests {
     fn encodes_qr_code_with_valid_finder_patterns() {
         let qr = encode_qr("http://192.168.1.50:8360/?pin=123456").unwrap();
         assert_eq!(qr.size, 29); // Version 3 (36 bytes > 34 bytes for V2)
-        // Top-left finder center (3,3) is dark, ring at (1,1) is light, border (0,0) is dark
+                                 // Top-left finder center (3,3) is dark, ring at (1,1) is light, border (0,0) is dark
         assert!(qr.at(0, 0));
         assert!(!qr.at(1, 1));
         assert!(qr.at(3, 3));

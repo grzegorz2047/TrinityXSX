@@ -139,7 +139,9 @@ fn metadata(raw: &[u8]) -> Result<Metadata, &'static str> {
 
 fn find_logo_in_folder(folder: &Path, candidates: &[String]) -> Option<PathBuf> {
     // Prefer custom cover.png if placed by the user, then manifest PNGs
-    for rel in std::iter::once("cover.png").chain(candidates.iter().map(String::as_str)).chain(["Logo.png", "StoreLogo.png"]) {
+    for rel in
+        std::iter::once("cover.png").chain(candidates.iter().map(String::as_str)).chain(["Logo.png", "StoreLogo.png"])
+    {
         if !is_safe_relative_asset(rel) {
             continue;
         }
@@ -214,31 +216,26 @@ pub fn paths_file() -> PathBuf {
 /// Normalize a user or persisted folder path.
 pub fn normalize_path(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > MAX_STORED_PATH_LEN
-        || trimmed.contains(['\0', '\r', '\n'])
-    {
+    if trimmed.is_empty() || trimmed.len() > MAX_STORED_PATH_LEN || trimmed.contains(['\0', '\r', '\n']) {
         return None;
     }
     let trimmed = trimmed.strip_prefix("\\\\?\\").unwrap_or(trimmed);
 
-    let unix_input = if trimmed.len() >= 2
-        && trimmed.as_bytes()[0].eq_ignore_ascii_case(&b'z')
-        && trimmed.as_bytes()[1] == b':'
-    {
-        let rest = &trimmed[2..];
-        if !rest.is_empty() && !rest.starts_with('\\') && !rest.starts_with('/') {
-            return None;
-        }
-        Some(rest.replace('\\', "/"))
-    } else if trimmed.starts_with('/') {
-        if trimmed.contains('\\') {
-            return None;
-        }
-        Some(trimmed.to_owned())
-    } else {
-        None
-    };
+    let unix_input =
+        if trimmed.len() >= 2 && trimmed.as_bytes()[0].eq_ignore_ascii_case(&b'z') && trimmed.as_bytes()[1] == b':' {
+            let rest = &trimmed[2..];
+            if !rest.is_empty() && !rest.starts_with('\\') && !rest.starts_with('/') {
+                return None;
+            }
+            Some(rest.replace('\\', "/"))
+        } else if trimmed.starts_with('/') {
+            if trimmed.contains('\\') {
+                return None;
+            }
+            Some(trimmed.to_owned())
+        } else {
+            None
+        };
 
     if let Some(unix) = unix_input {
         let mut segments: Vec<&str> = Vec::new();
@@ -258,7 +255,8 @@ pub fn normalize_path(raw: &str) -> Option<String> {
     }
 
     let bytes = trimmed.as_bytes();
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
         let drive = (bytes[0] as char).to_ascii_uppercase();
         let mut segments: Vec<&str> = Vec::new();
         for part in trimmed[3..].split(['\\', '/']) {
@@ -327,10 +325,7 @@ pub fn default_paths(primary_root: Option<&Path>) -> Vec<String> {
         let candidate = if root.is_absolute() {
             root.to_string_lossy().into_owned()
         } else {
-            fs::canonicalize(root)
-                .unwrap_or_else(|_| root.to_path_buf())
-                .to_string_lossy()
-                .into_owned()
+            fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).to_string_lossy().into_owned()
         };
         let _ = push_unique_path(&mut paths, &candidate);
     }
@@ -409,9 +404,7 @@ pub fn load_or_init_paths(file: &Path, primary_root: Option<&Path>) -> Vec<Strin
 }
 
 fn should_skip_dir_name(name: &str) -> bool {
-    name.starts_with('.')
-        || name.starts_with('$')
-        || name.eq_ignore_ascii_case("System Volume Information")
+    name.starts_with('.') || name.starts_with('$') || name.eq_ignore_ascii_case("System Volume Information")
 }
 
 fn scan_directory_into(
@@ -490,7 +483,9 @@ pub fn scan(root: &Path) -> io::Result<(Vec<Game>, usize)> {
     let mut seen_execs = HashSet::new();
     let mut skipped = 0;
     scan_directory_into(&root, &label, 1, &mut seen_execs, &mut games, &mut skipped);
-    games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.executable.cmp(&b.executable)));
+    games.sort_by(|a, b| {
+        a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.executable.cmp(&b.executable))
+    });
     Ok((games, skipped))
 }
 
@@ -503,22 +498,16 @@ pub fn scan_paths(paths: &[String]) -> Catalog {
     for stored in paths {
         let fs_path = to_fs_path(stored);
         if !fs_path.is_dir() {
-            folders.push(FolderStatus {
-                path: stored.clone(),
-                available: false,
-                game_count: 0,
-            });
+            folders.push(FolderStatus { path: stored.clone(), available: false, game_count: 0 });
             continue;
         }
         let count = scan_directory_into(&fs_path, stored, 1, &mut seen_execs, &mut games, &mut skipped);
-        folders.push(FolderStatus {
-            path: stored.clone(),
-            available: true,
-            game_count: count,
-        });
+        folders.push(FolderStatus { path: stored.clone(), available: true, game_count: count });
     }
 
-    games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.executable.cmp(&b.executable)));
+    games.sort_by(|a, b| {
+        a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.executable.cmp(&b.executable))
+    });
     Catalog { games, skipped, folders }
 }
 
@@ -998,10 +987,7 @@ impl Default for UiSettings {
 
 impl UiSettings {
     pub fn current_profile(&self) -> &Profile {
-        self.profiles
-            .get(self.active_profile)
-            .or_else(|| self.profiles.first())
-            .expect("profiles is never empty")
+        self.profiles.get(self.active_profile).or_else(|| self.profiles.first()).expect("profiles is never empty")
     }
 
     pub fn is_favorite(&self, identity: &str) -> bool {
@@ -1036,26 +1022,18 @@ impl UiSettings {
             }
             SortMode::Recent => {
                 games.sort_by(|a, b| {
-                    let ra = self
-                        .recent
-                        .iter()
-                        .position(|id| id.eq_ignore_ascii_case(&a.identity))
-                        .unwrap_or(usize::MAX);
-                    let rb = self
-                        .recent
-                        .iter()
-                        .position(|id| id.eq_ignore_ascii_case(&b.identity))
-                        .unwrap_or(usize::MAX);
-                    ra.cmp(&rb)
-                        .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                    let ra =
+                        self.recent.iter().position(|id| id.eq_ignore_ascii_case(&a.identity)).unwrap_or(usize::MAX);
+                    let rb =
+                        self.recent.iter().position(|id| id.eq_ignore_ascii_case(&b.identity)).unwrap_or(usize::MAX);
+                    ra.cmp(&rb).then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
                 });
             }
             SortMode::Favorites => {
                 games.sort_by(|a, b| {
                     let fa = !self.is_favorite(&a.identity);
                     let fb = !self.is_favorite(&b.identity);
-                    fa.cmp(&fb)
-                        .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                    fa.cmp(&fb).then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
                 });
             }
         }
@@ -1366,11 +1344,7 @@ fn save_display_profile_value(profile_path: &Path, key: &str, value: &str) -> io
 
 /// Read `[display] framegen` from a prospero-win `.profile` file (`0` = off, `2..=4` = factor).
 pub fn read_framegen_setting(profile_path: &Path) -> u8 {
-    match read_display_profile_value(profile_path, "framegen")
-        .as_deref()
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
+    match read_display_profile_value(profile_path, "framegen").as_deref().map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("2") => 2,
         Some("3") => 3,
         Some("4") => 4,
@@ -1391,11 +1365,7 @@ pub fn save_framegen_setting(profile_path: &Path, factor: u8) -> io::Result<()> 
 
 /// Read `[display] show_fps` from a prospero-win `.profile` file (defaults to `true`).
 pub fn read_show_fps_setting(profile_path: &Path) -> bool {
-    match read_display_profile_value(profile_path, "show_fps")
-        .as_deref()
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
+    match read_display_profile_value(profile_path, "show_fps").as_deref().map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("false") | Some("0") | Some("off") => false,
         _ => true,
     }
@@ -1434,11 +1404,7 @@ fn query_disk_space(fs_path: &Path) -> Option<(u64, u64)> {
 /// or `C:\` when running locally on Windows.
 pub fn storage_space_summary() -> Vec<StorageSpace> {
     let candidates: &[(&str, &str)] = if ps5_environment() {
-        &[
-            ("/mnt/ext1", "Z:\\mnt\\ext1"),
-            ("/data", "Z:\\data"),
-            ("/mnt/usb0", "Z:\\mnt\\usb0"),
-        ]
+        &[("/mnt/ext1", "Z:\\mnt\\ext1"), ("/data", "Z:\\data"), ("/mnt/usb0", "Z:\\mnt\\usb0")]
     } else {
         &[("C:", "C:\\")]
     };
@@ -1470,11 +1436,7 @@ pub fn load_ui_settings(file: &Path) -> UiSettings {
     let Ok(parsed) = toml::from_str::<UiSettingsFile>(&text) else {
         return UiSettings::default();
     };
-    let profiles = if parsed.profiles.is_empty() {
-        UiSettings::default().profiles
-    } else {
-        parsed.profiles
-    };
+    let profiles = if parsed.profiles.is_empty() { UiSettings::default().profiles } else { parsed.profiles };
     let active_profile = parsed.active_profile.min(profiles.len() - 1);
     UiSettings {
         language: Lang::parse(&parsed.language).unwrap_or(Lang::En),
@@ -1613,7 +1575,11 @@ mod tests {
         write_paths(&file, &paths).unwrap();
         assert_eq!(read_paths(&file).unwrap(), paths);
 
-        fs::write(&file, "# comment\nZ:\\mnt\\ext1\\xboxseries\\\n/mnt/ext1/xboxseries\nc:/xcl/games\nC:\\XCL\\games\n").unwrap();
+        fs::write(
+            &file,
+            "# comment\nZ:\\mnt\\ext1\\xboxseries\\\n/mnt/ext1/xboxseries\nc:/xcl/games\nC:\\XCL\\games\n",
+        )
+        .unwrap();
         assert_eq!(read_paths(&file).unwrap(), vec!["/mnt/ext1/xboxseries", "C:\\xcl\\games"]);
 
         let _ = fs::remove_dir_all(&dir);

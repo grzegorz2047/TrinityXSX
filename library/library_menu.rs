@@ -29,20 +29,20 @@ const UP: u16 = 0x0001;
 const DOWN: u16 = 0x0002;
 const LEFT: u16 = 0x0004;
 const RIGHT: u16 = 0x0008;
-const START: u16 = 0x0010;    // OPTIONS
-const L1: u16 = 0x0100;       // XINPUT_GAMEPAD_LEFT_SHOULDER
-const R1: u16 = 0x0200;       // XINPUT_GAMEPAD_RIGHT_SHOULDER
-const L2: u16 = 0x0400;       // Virtual trigger edge (unused bit in XInput)
-const R2: u16 = 0x0800;       // Virtual trigger edge (unused bit in XInput)
-const CROSS: u16 = 0x1000;    // XINPUT_GAMEPAD_A  (DualSense Cross)
-const CIRCLE: u16 = 0x2000;   // XINPUT_GAMEPAD_B  (DualSense Circle)
-const SQUARE: u16 = 0x4000;   // XINPUT_GAMEPAD_X  (DualSense Square)
+const START: u16 = 0x0010; // OPTIONS
+const L1: u16 = 0x0100; // XINPUT_GAMEPAD_LEFT_SHOULDER
+const R1: u16 = 0x0200; // XINPUT_GAMEPAD_RIGHT_SHOULDER
+const L2: u16 = 0x0400; // Virtual trigger edge (unused bit in XInput)
+const R2: u16 = 0x0800; // Virtual trigger edge (unused bit in XInput)
+const CROSS: u16 = 0x1000; // XINPUT_GAMEPAD_A  (DualSense Cross)
+const CIRCLE: u16 = 0x2000; // XINPUT_GAMEPAD_B  (DualSense Circle)
+const SQUARE: u16 = 0x4000; // XINPUT_GAMEPAD_X  (DualSense Square)
 const TRIANGLE: u16 = 0x8000; // XINPUT_GAMEPAD_Y  (DualSense Triangle)
 
 const STICK_THRESHOLD: i16 = 18000;
-const REPEAT_DELAY_TICKS: u8 = 14;    // ~350 ms at 25 ms timer
-const REPEAT_INTERVAL_TICKS: u8 = 4;  // ~100 ms
-const AUTO_WATCH_TICKS: u16 = 200;    // ~5 s at 25 ms timer
+const REPEAT_DELAY_TICKS: u8 = 14; // ~350 ms at 25 ms timer
+const REPEAT_INTERVAL_TICKS: u8 = 4; // ~100 ms
+const AUTO_WATCH_TICKS: u16 = 200; // ~5 s at 25 ms timer
 const CARD_BG_RGB: (u8, u8, u8) = (24, 37, 44);
 
 type ReadPad = unsafe extern "system" fn(u32, *mut PadState) -> u32;
@@ -126,11 +126,21 @@ struct Menu {
 }
 
 fn wrap_up(index: usize, len: usize) -> usize {
-    if len == 0 { 0 } else if index == 0 { len - 1 } else { index - 1 }
+    if len == 0 {
+        0
+    } else if index == 0 {
+        len - 1
+    } else {
+        index - 1
+    }
 }
 
 fn wrap_down(index: usize, len: usize) -> usize {
-    if len == 0 { 0 } else { (index + 1) % len }
+    if len == 0 {
+        0
+    } else {
+        (index + 1) % len
+    }
 }
 
 impl Menu {
@@ -153,9 +163,8 @@ impl Menu {
             self.installer_row = self.installers.len() - 1;
         }
         self.folder_sig = library::folders_signature(&self.paths);
-        self.selected = before
-            .and_then(|path| self.catalog.games.iter().position(|game| game.executable == path))
-            .unwrap_or(0);
+        self.selected =
+            before.and_then(|path| self.catalog.games.iter().position(|game| game.executable == path)).unwrap_or(0);
         if !self.paths.is_empty() && self.path_row >= self.paths.len() {
             self.path_row = self.paths.len() - 1;
         }
@@ -173,27 +182,18 @@ impl Menu {
     fn resort_keeping_selection(&mut self) {
         let current = self.catalog.games.get(self.selected).map(|g| g.executable.clone());
         self.ui.sort_games(&mut self.catalog.games);
-        self.selected = current
-            .and_then(|path| self.catalog.games.iter().position(|g| g.executable == path))
-            .unwrap_or(0);
+        self.selected =
+            current.and_then(|path| self.catalog.games.iter().position(|g| g.executable == path)).unwrap_or(0);
         self.preview_key = None;
         self.refresh_preview();
     }
 
     fn cache_visible_covers(&mut self) {
         let first = scroll_window(self.selected, self.catalog.games.len(), GAME_ROWS);
-        let paths: Vec<PathBuf> = self
-            .catalog
-            .games
-            .iter()
-            .skip(first)
-            .take(GAME_ROWS)
-            .filter_map(|g| g.logo.clone())
-            .collect();
+        let paths: Vec<PathBuf> =
+            self.catalog.games.iter().skip(first).take(GAME_ROWS).filter_map(|g| g.logo.clone()).collect();
         for path in paths {
-            self.cover_cache
-                .entry(path.clone())
-                .or_insert_with(|| library_art::load_png_file(&path, CARD_BG_RGB).ok());
+            self.cover_cache.entry(path.clone()).or_insert_with(|| library_art::load_png_file(&path, CARD_BG_RGB).ok());
         }
     }
 
@@ -210,9 +210,7 @@ impl Menu {
         }
         self.preview_key = Some(game.executable.clone());
         if let Some(path) = &game.logo {
-            self.cover_cache
-                .entry(path.clone())
-                .or_insert_with(|| library_art::load_png_file(path, CARD_BG_RGB).ok());
+            self.cover_cache.entry(path.clone()).or_insert_with(|| library_art::load_png_file(path, CARD_BG_RGB).ok());
         }
         let (_, has_cfg) = library::load_game_config(game);
         self.preview_pe_kind = library_gog::detect_pe_kind(&game.executable);
@@ -233,7 +231,11 @@ impl Menu {
 
     fn cycle_setting(&mut self, forward: bool) {
         let step = |idx: usize, len: usize| -> usize {
-            if forward { (idx + 1) % len } else { (idx + len - 1) % len }
+            if forward {
+                (idx + 1) % len
+            } else {
+                (idx + len - 1) % len
+            }
         };
         match self.settings_row {
             0 => {
@@ -279,10 +281,8 @@ impl Menu {
             5 => {
                 // Raytracing
                 const OPTS: [&str; 4] = ["off", "tier1_0", "tier1_1", "auto"];
-                let cur = OPTS
-                    .iter()
-                    .position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.raytracing.trim()))
-                    .unwrap_or(0);
+                let cur =
+                    OPTS.iter().position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.raytracing.trim())).unwrap_or(0);
                 self.settings_cfg.raytracing = OPTS[step(cur, OPTS.len())].into();
             }
             6 => {
@@ -296,10 +296,8 @@ impl Menu {
             8 => {
                 // Log level
                 const OPTS: [&str; 3] = ["info", "debug", "warn"];
-                let cur = OPTS
-                    .iter()
-                    .position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.log_level.trim()))
-                    .unwrap_or(0);
+                let cur =
+                    OPTS.iter().position(|&v| v.eq_ignore_ascii_case(self.settings_cfg.log_level.trim())).unwrap_or(0);
                 self.settings_cfg.log_level = OPTS[step(cur, OPTS.len())].into();
             }
             9 => {
@@ -517,39 +515,29 @@ impl Menu {
         let res_bg = Arc::clone(&result);
         let fallback_name = inst.display_name.clone();
         std::thread::spawn(move || {
-            let outcome = library_gog::extract_gog_installer_in_process(
-                &inst.setup_exe,
-                &dest_dir,
-                done_bg,
-                total_bg,
-            )
-            .and_then(|()| library_gog::finalize_gog_game(&dest_dir, &fallback_name))
-            .map(|fin| {
-                if delete_after {
-                    let _ = std::fs::remove_file(&inst.setup_exe);
-                    for bin in &inst.slice_files {
-                        let _ = std::fs::remove_file(bin);
+            let outcome = library_gog::extract_gog_installer_in_process(&inst.setup_exe, &dest_dir, done_bg, total_bg)
+                .and_then(|()| library_gog::finalize_gog_game(&dest_dir, &fallback_name))
+                .map(|fin| {
+                    if delete_after {
+                        let _ = std::fs::remove_file(&inst.setup_exe);
+                        for bin in &inst.slice_files {
+                            let _ = std::fs::remove_file(bin);
+                        }
                     }
-                }
-                format!(
-                    "Installed '{}' [{}] ({})",
-                    fin.name,
-                    fin.pe_kind.badge(),
-                    if fin.has_cover { "cover OK" } else { "no cover" }
-                )
-            });
+                    format!(
+                        "Installed '{}' [{}] ({})",
+                        fin.name,
+                        fin.pe_kind.badge(),
+                        if fin.has_cover { "cover OK" } else { "no cover" }
+                    )
+                });
             if let Ok(mut guard) = res_bg.lock() {
                 *guard = Some(outcome);
             }
         });
 
         self.status = format!("Installing {}...", inst.display_name);
-        self.install_job = Some(InstallJob {
-            game_name: inst.display_name,
-            done,
-            total,
-            result,
-        });
+        self.install_job = Some(InstallJob { game_name: inst.display_name, done, total, result });
     }
 
     fn poll_install_job(&mut self) -> bool {
@@ -589,10 +577,8 @@ impl Menu {
         }
         if buttons & SQUARE != 0 {
             self.delete_installer_after = !self.delete_installer_after;
-            self.status = format!(
-                "Delete installer after install: {}",
-                if self.delete_installer_after { "On" } else { "Off" }
-            );
+            self.status =
+                format!("Delete installer after install: {}", if self.delete_installer_after { "On" } else { "Off" });
             return false;
         }
         if buttons & UP != 0 {
@@ -637,11 +623,8 @@ impl Menu {
                     self.ui.language = if forward { self.ui.language.next() } else { self.ui.language.prev() };
                     match library::save_ui_settings(&self.ui_file, &self.ui) {
                         Ok(()) => {
-                            self.status = format!(
-                                "{}  ·  {}",
-                                self.ui.language.display_name(),
-                                self.ui.current_profile().name
-                            );
+                            self.status =
+                                format!("{}  ·  {}", self.ui.language.display_name(), self.ui.current_profile().name);
                         }
                         Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
                     }
@@ -657,11 +640,8 @@ impl Menu {
                     }
                     match library::save_ui_settings(&self.ui_file, &self.ui) {
                         Ok(()) => {
-                            self.status = format!(
-                                "{}  ·  {}",
-                                self.ui.language.display_name(),
-                                self.ui.current_profile().name
-                            );
+                            self.status =
+                                format!("{}  ·  {}", self.ui.language.display_name(), self.ui.current_profile().name);
                         }
                         Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
                     }
@@ -777,11 +757,7 @@ impl Menu {
             }
         }
         if buttons & (R2 | RIGHT | LEFT) != 0 {
-            self.ui.sort_mode = if (buttons & LEFT) != 0 {
-                self.ui.sort_mode.prev()
-            } else {
-                self.ui.sort_mode.next()
-            };
+            self.ui.sort_mode = if (buttons & LEFT) != 0 { self.ui.sort_mode.prev() } else { self.ui.sort_mode.next() };
             let _ = library::save_ui_settings(&self.ui_file, &self.ui);
             self.resort_keeping_selection();
             self.status = tr(self.ui.language, self.ui.sort_mode.label_key()).into();
@@ -1001,7 +977,9 @@ impl Menu {
     }
 }
 
-const fn rgb(r: u32, g: u32, b: u32) -> u32 { r | (g << 8) | (b << 16) }
+const fn rgb(r: u32, g: u32, b: u32) -> u32 {
+    r | (g << 8) | (b << 16)
+}
 
 unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
     let brush = CreateSolidBrush(color);
@@ -1164,7 +1142,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
     };
     text_aligned(
         dc,
-        &format!("{}{fg_badge}  ·  TrinityXSX {}  ·  PPSA83601", menu.ui.current_profile().name, library::TRINITYXSX_VERSION),
+        &format!(
+            "{}{fg_badge}  ·  TrinityXSX {}  ·  PPSA83601",
+            menu.ui.current_profile().name,
+            library::TRINITYXSX_VERSION
+        ),
         region(right - scale(760), 68, right, 36),
         scale(23),
         600,
@@ -1216,9 +1198,23 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let y = 426 + (idx as i32) * 44;
                     let badge = if folder.available { "Available" } else { "Not found" };
                     let color = if folder.available { mint } else { muted };
-                    text(dc, &format!("{}   [{}]", folder.path, badge), region(left + scale(18), y, right, 38), scale(24), 400, color);
+                    text(
+                        dc,
+                        &format!("{}   [{}]", folder.path, badge),
+                        region(left + scale(18), y, right, 38),
+                        scale(24),
+                        400,
+                        color,
+                    );
                 }
-                text(dc, t("Press X or Square to open Game folders  ·  Press L1 for Phone/PC Web Companion"), region(left, 630, right, 44), scale(24), 600, snow);
+                text(
+                    dc,
+                    t("Press X or Square to open Game folders  ·  Press L1 for Phone/PC Web Companion"),
+                    region(left, 630, right, 44),
+                    scale(24),
+                    600,
+                    snow,
+                );
             } else {
                 // Split layout: left game list (62%), right preview card with cover art (35%)
                 let list_right = left + ((right - left) * 62) / 100;
@@ -1236,11 +1232,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let thumb_y = scale(top + 10);
                     let thumb_w = scale(116);
                     let thumb_h = scale(72);
-                    let thumb_img = game
-                        .logo
-                        .as_ref()
-                        .and_then(|p| menu.cover_cache.get(p))
-                        .and_then(|o| o.as_ref());
+                    let thumb_img = game.logo.as_ref().and_then(|p| menu.cover_cache.get(p)).and_then(|o| o.as_ref());
                     if let Some(img) = thumb_img {
                         draw_dib(dc, img, thumb_x, thumb_y, thumb_w, thumb_h);
                     } else {
@@ -1293,19 +1285,25 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let art_y = scale(card_top + 24);
                     let art_w = (right - preview_left) - pad * 2;
                     let art_h = scale(290);
-                    let preview_cover = game
-                        .logo
-                        .as_ref()
-                        .and_then(|p| menu.cover_cache.get(p))
-                        .and_then(|o| o.as_ref());
+                    let preview_cover =
+                        game.logo.as_ref().and_then(|p| menu.cover_cache.get(p)).and_then(|o| o.as_ref());
                     if let Some(cover) = preview_cover {
                         draw_dib(dc, cover, art_x, art_y, art_w, art_h);
                     } else {
-                        fill(dc, RECT { left: art_x, top: art_y, right: art_x + art_w, bottom: art_y + art_h }, card_bg);
+                        fill(
+                            dc,
+                            RECT { left: art_x, top: art_y, right: art_x + art_w, bottom: art_y + art_h },
+                            card_bg,
+                        );
                         text_aligned(
                             dc,
                             "XSX",
-                            RECT { left: art_x, top: art_y + art_h / 2 - scale(36), right: art_x + art_w, bottom: art_y + art_h / 2 + scale(36) },
+                            RECT {
+                                left: art_x,
+                                top: art_y + art_h / 2 - scale(36),
+                                right: art_x + art_w,
+                                bottom: art_y + art_h / 2 + scale(36),
+                            },
                             scale(56),
                             700,
                             mint,
@@ -1340,8 +1338,22 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                         format!("Saves: {sfiles} files ({:.1} MiB)", (sbytes as f64) / (1024.0 * 1024.0))
                     };
                     text(dc, &saves_line, region(info_left, card_top + 468, info_right, 32), scale(21), 400, muted);
-                    text(dc, &format!("Folder: {}", game.folder), region(info_left, card_top + 506, info_right, 32), scale(20), 400, muted);
-                    text(dc, t("Press R1 to edit xcl.toml settings"), region(info_left, card_top + 558, info_right, 32), scale(21), 600, snow);
+                    text(
+                        dc,
+                        &format!("Folder: {}", game.folder),
+                        region(info_left, card_top + 506, info_right, 32),
+                        scale(20),
+                        400,
+                        muted,
+                    );
+                    text(
+                        dc,
+                        t("Press R1 to edit xcl.toml settings"),
+                        region(info_left, card_top + 558, info_right, 32),
+                        scale(21),
+                        600,
+                        snow,
+                    );
                 }
             }
 
@@ -1399,22 +1411,10 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let fg_pending = menu.framegen != menu.active_framegen;
             let fps_pending = menu.show_fps != menu.active_show_fps;
             let any_pending = fg_pending || fps_pending;
-            let fg_val = if fg_pending {
-                format!("{fg_base}  [restart]")
-            } else {
-                fg_base
-            };
+            let fg_val = if fg_pending { format!("{fg_base}  [restart]") } else { fg_base };
             let fps_base = t(if menu.show_fps { "On" } else { "Off" }).to_owned();
-            let fps_val = if fps_pending {
-                format!("{fps_base}  [restart]")
-            } else {
-                fps_base
-            };
-            let restart_val = if any_pending {
-                t("Apply changes").to_owned()
-            } else {
-                t("Press X").to_owned()
-            };
+            let fps_val = if fps_pending { format!("{fps_base}  [restart]") } else { fps_base };
+            let restart_val = if any_pending { t("Apply changes").to_owned() } else { t("Press X").to_owned() };
             let gog_val = if menu.installers.is_empty() {
                 "0 found (drop in installers/)".to_owned()
             } else {
@@ -1433,7 +1433,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 let selected = idx == menu.app_row;
                 fill(dc, region(left, top, right, 68), if selected { card_sel } else { card_bg });
                 if selected {
-                    fill(dc, region(left, top, left + scale(6), 68), if idx == 5 && any_pending { amber } else { mint });
+                    fill(
+                        dc,
+                        region(left, top, left + scale(6), 68),
+                        if idx == 5 && any_pending { amber } else { mint },
+                    );
                 }
                 text(dc, label, region(left + scale(26), top + 16, right - scale(500), 36), scale(26), 600, snow);
                 let val_color = if idx == 5 && any_pending {
@@ -1473,11 +1477,25 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 muted,
             );
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            text(dc, t("X / Left / Right  Change & Save     Triangle  Restart TrinityXSX     Circle  Back"), region(left, 958, right, 44), scale(24), 600, snow);
+            text(
+                dc,
+                t("X / Left / Right  Change & Save     Triangle  Restart TrinityXSX     Circle  Back"),
+                region(left, 958, right, 44),
+                scale(24),
+                600,
+                snow,
+            );
         }
 
         Screen::Installers => {
-            text(dc, "Install GOG Games (Open-Source innoextract)", region(left, 56, right - scale(360), 76), scale(44), 700, snow);
+            text(
+                dc,
+                "Install GOG Games (Open-Source innoextract)",
+                region(left, 56, right - scale(360), 76),
+                scale(44),
+                700,
+                snow,
+            );
             text(
                 dc,
                 "Drop DRM-free GOG offline installers (setup_*.exe + .bin) into /mnt/ext1/xboxseries/installers/",
@@ -1523,7 +1541,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
             } else if menu.installers.is_empty() {
                 fill(dc, region(left, 230, right, 240), panel_bg);
-                text(dc, "No GOG offline installers found yet.", region(left + scale(28), 270, right - scale(28), 44), scale(32), 600, snow);
+                text(
+                    dc,
+                    "No GOG offline installers found yet.",
+                    region(left + scale(28), 270, right - scale(28), 44),
+                    scale(32),
+                    600,
+                    snow,
+                );
                 text(
                     dc,
                     "Upload setup_<game>.exe (+ any .bin slices) via FTP to /mnt/ext1/xboxseries/installers/ and press Triangle to rescan.",
@@ -1542,14 +1567,28 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     if selected {
                         fill(dc, region(left, top, left + scale(6), 82), mint);
                     }
-                    text(dc, &inst.display_name, region(left + scale(24), top + 10, right - scale(280), 38), scale(30), 600, snow);
+                    text(
+                        dc,
+                        &inst.display_name,
+                        region(left + scale(24), top + 10, right - scale(280), 38),
+                        scale(30),
+                        600,
+                        snow,
+                    );
                     let detail = format!(
                         "{}  ·  {} file(s)  ->  {}",
                         library::display_path(&inst.setup_exe),
                         1 + inst.slice_files.len(),
                         inst.slug
                     );
-                    text(dc, &detail, region(left + scale(24), top + 48, right - scale(280), 28), scale(20), 400, muted);
+                    text(
+                        dc,
+                        &detail,
+                        region(left + scale(24), top + 48, right - scale(280), 28),
+                        scale(20),
+                        400,
+                        muted,
+                    );
                     let size_lbl = format!("{:.2} GiB", (inst.total_bytes as f64) / (1024.0 * 1024.0 * 1024.0));
                     text_aligned(
                         dc,
@@ -1566,7 +1605,9 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
             text(
                 dc,
-                &format!("X  Install & Convert     Triangle  Rescan     Square  Delete after: {del_lbl}     Circle  Back"),
+                &format!(
+                    "X  Install & Convert     Triangle  Rescan     Square  Delete after: {del_lbl}     Circle  Back"
+                ),
                 region(left, 958, right, 44),
                 scale(23),
                 600,
@@ -1577,7 +1618,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
         Screen::GameSettings => {
             let game_name = menu.catalog.games.get(menu.selected).map(|g| g.name.as_str()).unwrap_or("Game");
             let game_id = menu.catalog.games.get(menu.selected).map(|g| g.identity.as_str()).unwrap_or("");
-            text(dc, &format!("{}  ·  {game_name}", t("Game settings")), region(left, 56, right - scale(660), 76), scale(48), 700, snow);
+            text(
+                dc,
+                &format!("{}  ·  {game_name}", t("Game settings")),
+                region(left, 56, right - scale(660), 76),
+                scale(48),
+                700,
+                snow,
+            );
             let cfg_display = library::display_path(&library::config_path_for_title(game_id));
             text(
                 dc,
@@ -1638,7 +1686,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
 
             if menu.paths.is_empty() {
                 text(dc, t("No game folders configured."), region(left, 320, right, 52), scale(34), 600, snow);
-                text(dc, t("Press Square to browse and add a folder."), region(left, 382, right, 44), scale(24), 400, muted);
+                text(
+                    dc,
+                    t("Press Square to browse and add a folder."),
+                    region(left, 382, right, 44),
+                    scale(24),
+                    400,
+                    muted,
+                );
             } else {
                 let first = scroll_window(menu.path_row, menu.paths.len(), PATH_ROWS);
                 for (i, folder) in menu.catalog.folders.iter().enumerate().skip(first).take(PATH_ROWS) {
@@ -1651,7 +1706,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let inset = left + scale(26);
                     text(dc, &folder.path, region(inset, top + 8, right - scale(20), 42), scale(30), 600, snow);
                     let (state_text, state_color) = if folder.available {
-                        let label = if folder.game_count == 1 { "1 game".into() } else { format!("{} {}", folder.game_count, t("games")) };
+                        let label = if folder.game_count == 1 {
+                            "1 game".into()
+                        } else {
+                            format!("{} {}", folder.game_count, t("games"))
+                        };
                         (format!("Available  ·  {label}"), mint)
                     } else {
                         (t("Disconnected or unavailable").into(), muted)
@@ -1679,12 +1738,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
         Screen::Browser => {
             text(dc, t("Choose folder"), region(left, 56, right - scale(660), 76), scale(54), 700, snow);
             let current_header = if menu.browser_entries.len() > BROWSER_ROWS {
-                format!(
-                    "{}   ({} / {})",
-                    menu.browser_path,
-                    menu.browser_row + 1,
-                    menu.browser_entries.len()
-                )
+                format!("{}   ({} / {})", menu.browser_path, menu.browser_row + 1, menu.browser_entries.len())
             } else {
                 menu.browser_path.clone()
             };
@@ -1709,12 +1763,16 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                         fill(dc, region(left, top, left + scale(6), 76), mint);
                     }
                     let inset = left + scale(26);
-                    let label = if entry.is_game {
-                        format!("{}   [Xbox Series game]", entry.name)
-                    } else {
-                        entry.name.clone()
-                    };
-                    text(dc, &label, region(inset, top + 18, right - scale(20), 42), scale(28), 600, if entry.is_game { mint } else { snow });
+                    let label =
+                        if entry.is_game { format!("{}   [Xbox Series game]", entry.name) } else { entry.name.clone() };
+                    text(
+                        dc,
+                        &label,
+                        region(inset, top + 18, right - scale(20), 42),
+                        scale(28),
+                        600,
+                        if entry.is_game { mint } else { snow },
+                    );
                 }
             }
 
@@ -1759,18 +1817,67 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 }
 
                 let text_x = qr_x + card_px + scale(56);
-                text(dc, t("1. Scan QR code with your phone camera"), region(text_x, 250, right, 44), scale(30), 600, snow);
-                text(dc, t("Or open this address in any browser:"), region(text_x, 314, right, 36), scale(24), 400, muted);
+                text(
+                    dc,
+                    t("1. Scan QR code with your phone camera"),
+                    region(text_x, 250, right, 44),
+                    scale(30),
+                    600,
+                    snow,
+                );
+                text(
+                    dc,
+                    t("Or open this address in any browser:"),
+                    region(text_x, 314, right, 36),
+                    scale(24),
+                    400,
+                    muted,
+                );
                 text(dc, &web.url, region(text_x, 360, right, 48), scale(36), 700, mint);
                 text(dc, &format!("PIN:  {}", web.pin), region(text_x, 424, right, 48), scale(36), 700, snow);
 
                 text(dc, t("What you can do from the browser:"), region(text_x, 514, right, 36), scale(25), 600, snow);
-                text(dc, t("• Download trinityxsx-logs.zip for GitHub bug reports (no FTP needed)"), region(text_x, 560, right, 34), scale(22), 400, muted);
-                text(dc, t("• Edit per-game xcl.toml with syntax validation"), region(text_x, 600, right, 34), scale(22), 400, muted);
-                text(dc, t("• Edit game_paths.txt, profile and UI language"), region(text_x, 640, right, 34), scale(22), 400, muted);
-                text(dc, t("Server stops automatically when you launch a game."), region(left, 710, right, 36), scale(22), 400, muted);
+                text(
+                    dc,
+                    t("• Download trinityxsx-logs.zip for GitHub bug reports (no FTP needed)"),
+                    region(text_x, 560, right, 34),
+                    scale(22),
+                    400,
+                    muted,
+                );
+                text(
+                    dc,
+                    t("• Edit per-game xcl.toml with syntax validation"),
+                    region(text_x, 600, right, 34),
+                    scale(22),
+                    400,
+                    muted,
+                );
+                text(
+                    dc,
+                    t("• Edit game_paths.txt, profile and UI language"),
+                    region(text_x, 640, right, 34),
+                    scale(22),
+                    400,
+                    muted,
+                );
+                text(
+                    dc,
+                    t("Server stops automatically when you launch a game."),
+                    region(left, 710, right, 36),
+                    scale(22),
+                    400,
+                    muted,
+                );
             } else {
-                text(dc, "Web server could not bind a local port on this system.", region(left, 320, right, 48), scale(30), 600, amber);
+                text(
+                    dc,
+                    "Web server could not bind a local port on this system.",
+                    region(left, 320, right, 48),
+                    scale(30),
+                    600,
+                    amber,
+                );
             }
 
             text(dc, t("Circle / L1  Back to library"), region(left, 958, right, 44), scale(26), 600, snow);
