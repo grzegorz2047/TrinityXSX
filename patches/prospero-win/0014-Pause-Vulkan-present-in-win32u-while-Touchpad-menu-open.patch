@@ -1,0 +1,85 @@
+From 3970e8311e331823700b4a51ebfb545af1bfaccc Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 00:33:03 +0100
+Subject: [PATCH] Pause Vulkan presentation in win32u while Touchpad quick menu
+ is open
+
+Adds Wine-PS5 patch 0987 so win32u_vkQueuePresentKHR waits while
+pw_wine_menu() reports an open Touchpad quick menu. This lets RADV
+VideoOut go idle so pw_runner draws the 1080p TrinityXSX Quick Menu
+reliably with zero flicker over DXVK, vkd3d-proton, Zink, and XCL.
+---
+ ...vulkan-present-while-title-menu-open.patch | 61 +++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+ create mode 100644 wine/patches/0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch
+
+diff --git a/wine/patches/0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch b/wine/patches/0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch
+new file mode 100644
+index 0000000..fa5f999
+--- /dev/null
++++ b/wine/patches/0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch
+@@ -0,0 +1,61 @@
++From 869f3c47b0c85d89aa770a7d5849f6c3572445c8 Mon Sep 17 00:00:00 2001
++From: TrinityXSX <trinityxsx@users.noreply.github.com>
++Date: Fri, 27 Nov 2026 00:33:02 +0100
++Subject: [PATCH] win32u: Pause PS5 Vulkan presentation while the Touchpad
++ quick menu is open.
++
++While pw_wine_menu() reports an open TrinityXSX quick menu, hide the hardware
++cursor and wait in ps5drv_vulkan_cursor() (called at the end of every
++win32u_vkQueuePresentKHR) so RADV VideoOut becomes idle and pw_runner can
++present the 1080p overlay cleanly without flicker across DXVK, vkd3d-proton,
++Zink, and XCL.
++---
++ dlls/win32u/ps5drv.c | 19 +++++++++++++++++++
++ 1 file changed, 19 insertions(+)
++
++diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
++index 9e44e09..0238c4c 100644
++--- a/dlls/win32u/ps5drv.c
+++++ b/dlls/win32u/ps5drv.c
++@@ -56,6 +56,7 @@
++ #ifdef SONAME_LIBVULKAN
++ #include "wine/vulkan.h"
++ #include "wine/vulkan_driver.h"
+++#include "../ntdll/pw_title_menu.h"
++ #endif
++ 
++ #ifdef WINE_PS5_USER_DRIVER
++@@ -769,12 +770,30 @@ static void ps5_SetCursor( HWND hwnd, HCURSOR handle )
++ void ps5drv_vulkan_cursor( void *vulkan_handle )
++ {
++     static int (*show)( const UINT32 *, UINT, UINT, INT, INT, UINT, UINT );
+++    static void (*read_menu)( struct pw_title_menu * );
++     static BOOL looked;
+++    struct pw_title_menu menu;
++ 
++     if (!looked)
++     {
++         looked = TRUE;
++         show = dlsym( vulkan_handle, "pw_videoout_cursor" );
+++        read_menu = dlsym( RTLD_DEFAULT, "pw_wine_menu" );
+++    }
+++    if (read_menu)
+++    {
+++        BOOL paused = FALSE;
+++        for (;;)
+++        {
+++            read_menu( &menu );
+++            if (menu.version != PW_TITLE_MENU_VERSION || !menu.open) break;
+++            if (!paused)
+++            {
+++                paused = TRUE;
+++                if (show) show( NULL, 0, 0, 0, 0, screen_width, screen_height );
+++            }
+++            usleep( 16000 );
+++        }
++     }
++     if (!show) return;
++     pthread_mutex_lock( &screen_lock );
++-- 
++2.48.1.windows.1
++
+-- 
+2.48.1.windows.1
+

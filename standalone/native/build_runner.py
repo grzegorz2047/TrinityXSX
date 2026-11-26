@@ -28,6 +28,8 @@ SERVER_DIAGNOSTIC_PATCH = "0999-server-ps5-record-fatal-startup-errors.patch"
 SERVER_MODULE = "win/wine/lib/wine/x86_64-unix/wineserver.prx"
 NTDLL_MODULE = "win/wine/lib/wine/x86_64-unix/ntdll.prx"
 NTDLL_SUBPAGE_PATCH = "0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessible-page-run-hot.patch"
+WIN32U_MODULE = "win/wine/lib/wine/x86_64-unix/win32u.prx"
+WIN32U_MENU_PAUSE_PATCH = "0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch"
 SOURCES = (
     "native/wine64_main.c", "native/pw_diagnostics.c", "native/pw_audio_ps5.c",
     "native/pw_data_mount.c", "native/pw_lapy_elevation.c",
@@ -82,6 +84,25 @@ def rebuilt_ntdll(wine_build: Path) -> tuple[Path, str, bool] | None:
     return path, digest, NTDLL_SUBPAGE_PATCH in patches
 
 
+def rebuilt_win32u(wine_build: Path) -> tuple[Path, str, bool] | None:
+    path = wine_build / "prx/sce_module/win32u.prx"
+    if not path.is_file():
+        return None
+    report = json.loads((wine_build / "report.json").read_text(encoding="utf-8"))
+    patches = report.get("patches", [])
+    if report.get("wine_commit") != WINE_REVISION:
+        raise ValueError("Expected Wine's pinned source revision for win32u.prx")
+    module = report.get("prx", {}).get("modules", {}).get("win32u", {})
+    checks = ("unresolved", "errors", "title_unbound", "webkit_unbound", "raw_syscalls")
+    if not module.get("built") or any(module.get(check) != [] for check in checks):
+        raise ValueError("Expected a linked win32u.prx with a clean title import report")
+    with path.open("rb") as stream:
+        digest = file_digest(stream, "sha256").hexdigest()
+    if module.get("sha256") != digest:
+        raise ValueError("win32u.prx does not match the build report SHA-256")
+    return path, digest, WIN32U_MENU_PAUSE_PATCH in patches
+
+
 def build(
     source: Path, foundation: Path, sdk: Path, llvm: Path, tool: Path, release: Path, output: Path,
     *, wine_build: Path | None = None, lapy_elf: Path | None = None,
@@ -97,6 +118,7 @@ def build(
     runner_source = (source / SOURCES[0]).read_text(encoding="utf-8")
     server = rebuilt_server(wine_build) if wine_build else None
     ntdll_mod = rebuilt_ntdll(wine_build) if wine_build else None
+    win32u_mod = rebuilt_win32u(wine_build) if wine_build else None
     if server and server[2] and "WINE_PS5_SERVER_STARTUP_LOG" not in runner_source:
         raise ValueError("Apply the TrinityXSX server startup diagnostic patch to the runner source")
 
@@ -174,6 +196,8 @@ def build(
             shutil.copyfile(server[0], runner / SERVER_MODULE)
         if ntdll_mod:
             shutil.copyfile(ntdll_mod[0], runner / NTDLL_MODULE)
+        if win32u_mod:
+            shutil.copyfile(win32u_mod[0], runner / WIN32U_MODULE)
         if lapy_elf is not None:
             lapy_bytes = lapy_elf.read_bytes()
             if not lapy_bytes.startswith(b"\x7fELF"):
@@ -207,6 +231,10 @@ def build(
                 if ntdll_mod[2]:
                     sources.write("Patch: patches/prospero-win/0011-Backport-ntdll-patch-0986-hot-subpage-access.patch\n")
                 sources.write(f"ntdll.prx SHA-256: {ntdll_mod[1]}\n")
+            if win32u_mod:
+                if win32u_mod[2]:
+                    sources.write("Patch: patches/prospero-win/0014-Pause-Vulkan-present-in-win32u-while-Touchpad-menu-open.patch\n")
+                sources.write(f"win32u.prx SHA-256: {win32u_mod[1]}\n")
         runner.rename(output)
 
 
