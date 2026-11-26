@@ -36,6 +36,14 @@ cargo build --release                            # xcl.exe, copied as xcl-librar
 
 A change to XCL itself (`host.rs`, `present.rs`, `config.rs`, …) is still a patch in `patches/xcl/`.
 
+## An `xcl/` checkout from before this layout
+
+An `xcl/` made before the library moved here still has its own `crates/xcl/src/library*.rs`, and its `lib.rs` has no `#[path]` lines. Cargo would build those old copies and silently ignore this folder. `tools/setup-sources.sh` refuses such a checkout and changes nothing. To update it:
+
+1. Keep your XCL-side work (`git format-patch` or `git stash` in `xcl/`). Copy any library edits from `xcl/crates/xcl/src/library*.rs` into this folder.
+2. Move `xcl/` aside and run `tools/setup-sources.sh --only xcl`.
+3. Check: `grep -n '#\[path' xcl/crates/xcl/src/lib.rs` lists the `library/` paths.
+
 ## Licence
 
 GPL-2.0-only, the same as XCL: these files are compiled into `xcl.exe`.
