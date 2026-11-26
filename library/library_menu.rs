@@ -1032,6 +1032,146 @@ unsafe fn text(dc: HDC, value: &str, rect: RECT, size: i32, weight: i32, color: 
     text_aligned(dc, value, rect, size, weight, color, DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+#[derive(Clone, Copy)]
+enum BtnIcon {
+    Cross,
+    Circle,
+    Square,
+    Triangle,
+    Pill(&'static str),
+}
+
+unsafe fn measure_text_w(dc: HDC, value: &str, size: i32, weight: i32) -> i32 {
+    if value.is_empty() {
+        return 0;
+    }
+    let font = CreateFontW(-size, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, super::wide("Segoe UI").as_ptr());
+    let old = SelectObject(dc, font);
+    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let wide = super::wide(value);
+    DrawTextW(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut r, DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, old);
+    DeleteObject(font);
+    r.right - r.left
+}
+
+unsafe fn draw_btn_icon(dc: HDC, icon: BtnIcon, x: i32, y: i32, h: i32) -> i32 {
+    let bg = rgb(30, 44, 54);
+    let rim = rgb(104, 132, 148);
+    let stroke = (h / 10).max(2);
+
+    match icon {
+        BtnIcon::Cross | BtnIcon::Circle | BtnIcon::Square | BtnIcon::Triangle => {
+            let fill_br = CreateSolidBrush(bg);
+            let rim_pen = CreatePen(PS_SOLID as i32, 1, rim);
+            let old_br = SelectObject(dc, fill_br);
+            let old_pen = SelectObject(dc, rim_pen);
+            Ellipse(dc, x, y, x + h, y + h);
+            SelectObject(dc, old_br);
+            SelectObject(dc, old_pen);
+            DeleteObject(fill_br);
+            DeleteObject(rim_pen);
+
+            let pad = (h * 27) / 100;
+            let (color, kind) = match icon {
+                BtnIcon::Cross => (rgb(112, 174, 255), 0u8),
+                BtnIcon::Circle => (rgb(255, 110, 118), 1u8),
+                BtnIcon::Square => (rgb(232, 130, 218), 2u8),
+                _ => (rgb(82, 224, 164), 3u8),
+            };
+            let sym_pen = CreatePen(PS_SOLID as i32, stroke, color);
+            let old_pen = SelectObject(dc, sym_pen);
+            let old_br = SelectObject(dc, GetStockObject(NULL_BRUSH as i32));
+            let l = x + pad;
+            let t = y + pad;
+            let r = x + h - pad;
+            let b = y + h - pad;
+            match kind {
+                0 => {
+                    MoveToEx(dc, l, t, null_mut());
+                    LineTo(dc, r, b);
+                    MoveToEx(dc, r, t, null_mut());
+                    LineTo(dc, l, b);
+                }
+                1 => {
+                    Ellipse(dc, l, t, r, b);
+                }
+                2 => {
+                    Rectangle(dc, l, t, r, b);
+                }
+                _ => {
+                    let cx = x + h / 2;
+                    MoveToEx(dc, cx, t, null_mut());
+                    LineTo(dc, r, b);
+                    LineTo(dc, l, b);
+                    LineTo(dc, cx, t);
+                }
+            }
+            SelectObject(dc, old_br);
+            SelectObject(dc, old_pen);
+            DeleteObject(sym_pen);
+            h
+        }
+        BtnIcon::Pill(lbl) => {
+            let font_sz = (h * 56) / 100;
+            let tw = measure_text_w(dc, lbl, font_sz, 700);
+            let pad_x = (h * 34) / 100;
+            let w = (tw + pad_x * 2).max(h + (h / 3));
+            let fill_br = CreateSolidBrush(bg);
+            let rim_pen = CreatePen(PS_SOLID as i32, 1, rim);
+            let old_br = SelectObject(dc, fill_br);
+            let old_pen = SelectObject(dc, rim_pen);
+            let rad = (h * 45) / 100;
+            RoundRect(dc, x, y, x + w, y + h, rad, rad);
+            SelectObject(dc, old_br);
+            SelectObject(dc, old_pen);
+            DeleteObject(fill_br);
+            DeleteObject(rim_pen);
+
+            text_aligned(
+                dc,
+                lbl,
+                RECT { left: x, top: y, right: x + w, bottom: y + h },
+                font_sz,
+                700,
+                rgb(234, 244, 248),
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+            );
+            w
+        }
+    }
+}
+
+unsafe fn draw_button_hints(dc: HDC, left: i32, right: i32, y: i32, text_size: i32, items: &[(BtnIcon, &str)]) {
+    let icon_h = (text_size + (text_size * 30) / 100).max(20);
+    let inner_gap = (text_size * 34) / 100;
+    let item_gap = (text_size * 105) / 100;
+    let mut x = left;
+    let snow = rgb(238, 245, 248);
+
+    for &(icon, label) in items {
+        if x >= right {
+            break;
+        }
+        let iw = draw_btn_icon(dc, icon, x, y, icon_h);
+        x += iw + inner_gap;
+        let lw = measure_text_w(dc, label, text_size, 600);
+        if x < right {
+            let end_x = (x + lw + 4).min(right);
+            text_aligned(
+                dc,
+                label,
+                RECT { left: x, top: y, right: end_x, bottom: y + icon_h },
+                text_size,
+                600,
+                snow,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+        x += lw + item_gap;
+    }
+}
+
 unsafe fn draw_dib(dc: HDC, img: &DibImage, box_x: i32, box_y: i32, box_w: i32, box_h: i32) {
     if img.width == 0 || img.height == 0 || box_w <= 0 || box_h <= 0 {
         return;
@@ -1411,13 +1551,22 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
             }
             text(dc, &menu.status, region(left, 896, right, 38), scale(23), 400, mint);
-            text(
+            draw_button_hints(
                 dc,
-                t("X  Play    R1  Game    Square  Folders    L1  Web/QR    OPTIONS  Settings    L2  Fav    R2  Sort    Circle  Exit"),
-                region(left, 958, right, 44),
+                left,
+                right,
+                scale(954),
                 scale(21),
-                600,
-                snow,
+                &[
+                    (BtnIcon::Cross, t("Play")),
+                    (BtnIcon::Pill("R1"), t("Game")),
+                    (BtnIcon::Square, t("Folders")),
+                    (BtnIcon::Pill("L1"), "Web/QR"),
+                    (BtnIcon::Pill("OPTIONS"), t("Settings")),
+                    (BtnIcon::Pill("L2"), t("Fav")),
+                    (BtnIcon::Pill("R2"), t("Sort")),
+                    (BtnIcon::Circle, t("Exit")),
+                ],
             );
         }
 
@@ -1506,13 +1655,18 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 muted,
             );
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            text(
+            draw_button_hints(
                 dc,
-                t("X / Left / Right  Change & Save     Triangle  Restart TrinityXSX     Circle  Back"),
-                region(left, 958, right, 44),
-                scale(24),
-                600,
-                snow,
+                left,
+                right,
+                scale(954),
+                scale(23),
+                &[
+                    (BtnIcon::Cross, t("Select")),
+                    (BtnIcon::Pill("<-/->"), t("Change")),
+                    (BtnIcon::Triangle, t("Restart")),
+                    (BtnIcon::Circle, t("Back")),
+                ],
             );
         }
 
@@ -1633,18 +1787,20 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 }
             }
             let del_lbl = t(if menu.delete_installer_after { "On" } else { "Off" });
+            let del_text = format!("{} {del_lbl}", t("Delete files after:"));
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            text(
+            draw_button_hints(
                 dc,
-                &format!(
-                    "{} {del_lbl}     {}",
-                    t("X  Install     Triangle  Rescan     Square  Delete files after:"),
-                    t("Circle  Back")
-                ),
-                region(left, 958, right, 44),
-                scale(23),
-                600,
-                snow,
+                left,
+                right,
+                scale(954),
+                scale(22),
+                &[
+                    (BtnIcon::Cross, t("Install")),
+                    (BtnIcon::Triangle, t("Rescan")),
+                    (BtnIcon::Square, &del_text),
+                    (BtnIcon::Circle, t("Back")),
+                ],
             );
         }
 
@@ -1693,13 +1849,18 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let (_, _, about) = menu.setting_row_info(menu.settings_row);
             text(dc, about, region(left, 826, right, 44), scale(22), 400, snow);
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            text(
+            draw_button_hints(
                 dc,
-                t("D-pad  Navigate     X / Left / Right  Change & Save     Triangle  Reset preset     Circle  Back"),
-                region(left, 958, right, 44),
-                scale(24),
-                600,
-                snow,
+                left,
+                right,
+                scale(954),
+                scale(23),
+                &[
+                    (BtnIcon::Pill("D-PAD"), t("Navigate")),
+                    (BtnIcon::Cross, t("Change & Save")),
+                    (BtnIcon::Triangle, t("Reset preset")),
+                    (BtnIcon::Circle, t("Back")),
+                ],
             );
         }
 
@@ -1758,13 +1919,18 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             );
             text(dc, &info, region(left, 846, right, 36), scale(21), 400, muted);
             text(dc, &menu.status, region(left, 892, right, 42), scale(24), 400, mint);
-            text(
+            draw_button_hints(
                 dc,
-                t("X  Browse     Square  Add folder     Triangle  Remove     Circle  Back"),
-                region(left, 958, right, 44),
-                scale(26),
-                600,
-                snow,
+                left,
+                right,
+                scale(954),
+                scale(24),
+                &[
+                    (BtnIcon::Cross, t("Browse")),
+                    (BtnIcon::Square, t("Add folder")),
+                    (BtnIcon::Triangle, t("Remove")),
+                    (BtnIcon::Circle, t("Back")),
+                ],
             );
         }
 
@@ -1820,13 +1986,18 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 400,
                 muted,
             );
-            text(
+            draw_button_hints(
                 dc,
-                t("X  Open     Triangle  Use folder     Circle  Up     Square  Cancel"),
-                region(left, 958, right, 44),
-                scale(26),
-                600,
-                snow,
+                left,
+                right,
+                scale(954),
+                scale(24),
+                &[
+                    (BtnIcon::Cross, t("Open")),
+                    (BtnIcon::Triangle, t("Use folder")),
+                    (BtnIcon::Circle, t("Up")),
+                    (BtnIcon::Square, t("Cancel")),
+                ],
             );
         }
 
@@ -1913,7 +2084,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
             }
 
-            text(dc, t("Circle / L1  Back to library"), region(left, 958, right, 44), scale(26), 600, snow);
+            draw_button_hints(
+                dc,
+                left,
+                right,
+                scale(954),
+                scale(24),
+                &[(BtnIcon::Circle, t("Back")), (BtnIcon::Pill("L1"), t("Back to library"))],
+            );
         }
     }
 
