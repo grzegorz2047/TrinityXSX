@@ -325,11 +325,7 @@ fn handle_connection(
             send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", text.as_bytes(), None);
         }
         ("POST", "/clear-cache") => {
-            let body_str = String::from_utf8_lossy(body);
-            let form = parse_query(&body_str);
-            let title =
-                form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).filter(|s| is_safe_title_id(s));
-            let (files, bytes) = library::clear_shader_cache(title);
+            let (files, bytes) = library::clear_shader_cache();
             dirty.store(true, Ordering::Release);
             let msg =
                 format!("Cleared {files} shader cache file(s) ({:.1} MiB freed).", (bytes as f64) / (1024.0 * 1024.0));
@@ -831,7 +827,7 @@ fn render_dashboard(paths_file: &Path, notice: &str) -> String {
         if show_fps { " selected" } else { "" },
         if !show_fps { " selected" } else { "" }
     );
-    let (cache_files, cache_bytes) = library::shader_cache_summary(None);
+    let (cache_files, cache_bytes) = library::shader_cache_summary();
     html.push_str(&format!(
         "<div class=card><h2>Profile, Language &amp; Display</h2><form method=POST action='/ui'><label class=muted>Language:</label><br><select name=lang style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{lang_opts}</select><br><br><label class=muted>Active offline profile:</label><br><select name=profile style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{prof_opts}</select><br><br><label class=muted>Or create a new gamertag (1-15 letters/digits):</label><br><input type=text name=new_profile maxlength=15 placeholder='Optional new gamertag'><br><br><label class=muted>Frame Generation (MihawkGen — Vulkan / DXVK / D3D12):</label><br><select name=framegen style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fg_opts}</select><br><br><label class=muted>FPS HUD Overlay (restart to apply):</label><br><select name=show_fps style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fps_opts}</select><br><br><button class=btn type=submit>Save settings</button></form>\
          <div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>\

@@ -1117,7 +1117,19 @@ pub fn take_restart_game_target() -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
-fn shader_cache_dirs(title: Option<&str>) -> Vec<PathBuf> {
+/// vkd3d-proton's cache folder for titles run by this process (`VKD3D_SHADER_CACHE_PATH` from the
+/// runtime profile).
+fn vkd3d_cache_dir() -> Option<PathBuf> {
+    let vk = std::env::var("VKD3D_SHADER_CACHE_PATH").ok()?;
+    let trimmed = vk.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// The shader cache folders. All of them are shared by every title: XCL's translated shaders and
+/// DXIL (`dxc::cache_dir`), vkd3d-proton's pipeline cache, and on the PS5 RADV's disk cache, which
+/// the runner points at `<storage root>/cache/radv` (`MESA_SHADER_CACHE_DIR`). There is no per-title
+/// part to count or clear. (`data_root/<title>/cache` holds XCL's TLS loader DLLs, not shaders.)
+fn shader_cache_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut push_unique = |p: PathBuf| {
         if !dirs.iter().any(|d| d == &p) {
@@ -1125,20 +1137,50 @@ fn shader_cache_dirs(title: Option<&str>) -> Vec<PathBuf> {
         }
     };
     push_unique(crate::gpu::recomp::dxc::cache_dir());
-    if let Ok(vk) = std::env::var("VKD3D_SHADER_CACHE_PATH") {
-        let trimmed = vk.trim();
-        if !trimmed.is_empty() {
-            push_unique(PathBuf::from(trimmed));
-        }
-    } else if Path::new("C:\\XCL\\cache\\trinityxsx-library").is_dir() {
-        push_unique(PathBuf::from("C:\\XCL\\cache\\trinityxsx-library"));
+    if let Some(vk) = vkd3d_cache_dir() {
+        push_unique(vk);
+    } else if Path::new(LIBRARY_VKD3D_CACHE).is_dir() {
+        push_unique(PathBuf::from(LIBRARY_VKD3D_CACHE));
     }
-    if let Some(t) = title {
-        if !t.is_empty() {
-            push_unique(launcher::data_root().join(t).join("cache"));
-        }
+    // PC / GOG games handed off to prospero-win keep their own vkd3d-proton cache
+    if Path::new(PC_GAME_VKD3D_CACHE).is_dir() {
+        push_unique(PathBuf::from(PC_GAME_VKD3D_CACHE));
+    }
+    let radv = Path::new(PS5_STORAGE_ROOT).join("cache").join("radv");
+    if radv.is_dir() {
+        push_unique(radv);
     }
     dirs
+}
+
+/// The library profile's vkd3d-proton cache folder (`configs/trinityxsx-library.profile`).
+const LIBRARY_VKD3D_CACHE: &str = "C:\\XCL\\cache\\trinityxsx-library";
+/// The vkd3d-proton cache folder of PC games handed off to prospero-win (`library_gog.rs`).
+const PC_GAME_VKD3D_CACHE: &str = "C:\\XCL\\cache\\pc-game";
+
+/// Create the vkd3d-proton cache folders. vkd3d-proton writes its cache into
+/// `VKD3D_SHADER_CACHE_PATH` but never creates that folder: when it is missing, opening the cache
+/// file fails ("Failed to open stream archive write file exclusively") and every launch compiles
+/// all pipelines again. Called when the library starts, before any title runs in this process.
+pub fn ensure_shader_cache_dirs() -> Vec<PathBuf> {
+    let mut wanted: Vec<PathBuf> = vkd3d_cache_dir().into_iter().collect();
+    // The PC-game handoff runs in another process with its own profile; create its folder too,
+    // but only inside the PS5 runtime's C:\XCL (not on a development PC).
+    if Path::new("C:\\XCL").is_dir() {
+        wanted.push(PathBuf::from(PC_GAME_VKD3D_CACHE));
+    }
+    create_missing_dirs(&wanted)
+}
+
+/// Create each folder that does not exist yet; returns the ones created.
+fn create_missing_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut created = Vec::new();
+    for dir in dirs {
+        if !dir.is_dir() && fs::create_dir_all(dir).is_ok() {
+            created.push(dir.clone());
+        }
+    }
+    created
 }
 
 fn count_dir_files(root: &Path) -> (usize, u64) {
@@ -1151,9 +1193,11 @@ fn count_dir_files(root: &Path) -> (usize, u64) {
     while let Some(dir) = stack.pop() {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                stack.push(p);
+            // file_type comes with the directory listing (no open per entry under Wine) and does not
+            // follow links, so a link inside a cache folder is never walked into
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(entry.path());
             } else if let Ok(meta) = entry.metadata() {
                 files += 1;
                 bytes = bytes.saturating_add(meta.len());
@@ -1174,7 +1218,9 @@ fn clear_dir_contents(root: &Path) -> (usize, u64) {
     };
     for entry in rd.flatten() {
         let p = entry.path();
-        if p.is_dir() {
+        // never recurse through a link: only what really is inside the cache folder is deleted
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
             let (f, b) = clear_dir_contents(&p);
             removed += f;
             freed = freed.saturating_add(b);
@@ -1190,11 +1236,11 @@ fn clear_dir_contents(root: &Path) -> (usize, u64) {
     (removed, freed)
 }
 
-/// Total file count and size across XCL DXIL, vkd3d-proton, and optional per-title shader caches.
-pub fn shader_cache_summary(title: Option<&str>) -> (usize, u64) {
+/// Total file count and size of the shader caches (all titles: see `shader_cache_dirs`).
+pub fn shader_cache_summary() -> (usize, u64) {
     let mut files = 0usize;
     let mut bytes = 0u64;
-    for dir in shader_cache_dirs(title) {
+    for dir in shader_cache_dirs() {
         let (f, b) = count_dir_files(&dir);
         files += f;
         bytes = bytes.saturating_add(b);
@@ -1202,11 +1248,11 @@ pub fn shader_cache_summary(title: Option<&str>) -> (usize, u64) {
     (files, bytes)
 }
 
-/// Remove cached shader binaries without touching saves, profiles, or `xcl.toml`.
-pub fn clear_shader_cache(title: Option<&str>) -> (usize, u64) {
+/// Remove the cached shaders of every title without touching saves, profiles, or `xcl.toml`.
+pub fn clear_shader_cache() -> (usize, u64) {
     let mut removed = 0usize;
     let mut freed = 0u64;
-    for dir in shader_cache_dirs(title) {
+    for dir in shader_cache_dirs() {
         let (f, b) = clear_dir_contents(&dir);
         removed += f;
         freed = freed.saturating_add(b);
@@ -1757,6 +1803,23 @@ mod tests {
         "env = VKD3D_LOG_FILE=C:/XCL/vkd3d-trinityxsx-library.log\n",
         "env = DXVK_LOG_PATH=C:/XCL\n",
     );
+
+    #[test]
+    fn missing_shader_cache_folders_are_created_and_existing_ones_left_alone() {
+        // vkd3d-proton does not create VKD3D_SHADER_CACHE_PATH itself; the library must.
+        let root = std::env::temp_dir().join(format!("txsx_cache_dirs_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let existing = root.join("existing");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(existing.join("vkd3d-proton.cache"), b"VKS4").unwrap();
+        let missing = root.join("cache").join("trinityxsx-library");
+        let created = create_missing_dirs(&[existing.clone(), missing.clone()]);
+        assert_eq!(created, vec![missing.clone()]);
+        assert!(missing.is_dir());
+        assert_eq!(fs::read(existing.join("vkd3d-proton.cache")).unwrap(), b"VKS4");
+        assert!(create_missing_dirs(&[existing, missing]).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn show_fps_defaults_to_true_when_file_section_or_key_is_missing() {

@@ -97,7 +97,9 @@ struct Menu {
     preview_pe_kind: PeLaunchKind,
     preview_has_custom_cfg: bool,
     preview_saves: (usize, u64),
-    preview_shader_cache: (usize, u64),
+    /// Shader cache size, counted once per session: the caches are shared by all titles, and RADV's
+    /// can hold many files.
+    preview_shader_cache: Option<(usize, u64)>,
     // GOG offline installers state
     installers: Vec<GogInstaller>,
     installer_row: usize,
@@ -145,6 +147,8 @@ fn wrap_down(index: usize, len: usize) -> usize {
 
 impl Menu {
     fn scan(&mut self) {
+        // the cache may have been cleared from the Web Companion: count it again when shown
+        self.preview_shader_cache = None;
         let before = self
             .catalog
             .games
@@ -224,7 +228,9 @@ impl Menu {
         self.settings_cfg = cfg;
         self.settings_row = 0;
         self.settings_preset = 0;
-        self.preview_shader_cache = library::shader_cache_summary(Some(&game.identity));
+        if self.preview_shader_cache.is_none() {
+            self.preview_shader_cache = Some(library::shader_cache_summary());
+        }
         self.status.clear();
         self.screen = Screen::GameSettings;
     }
@@ -325,15 +331,13 @@ impl Menu {
                 self.settings_cfg.vkd3d_feature_level = OPTS[step(cur, OPTS.len())].into();
             }
             12 => {
-                // Action row: Clear shader cache (do not overwrite xcl.toml)
-                if let Some(game) = self.catalog.games.get(self.selected) {
-                    let (files, bytes) = library::clear_shader_cache(Some(&game.identity));
-                    self.preview_shader_cache = library::shader_cache_summary(Some(&game.identity));
-                    self.status = format!(
-                        "Cleared {files} shader cache file(s) ({:.1} MiB freed)",
-                        (bytes as f64) / (1024.0 * 1024.0)
-                    );
-                }
+                // Action row: Clear shader cache (all titles share it; xcl.toml is not touched)
+                let (files, bytes) = library::clear_shader_cache();
+                self.preview_shader_cache = Some(library::shader_cache_summary());
+                self.status = format!(
+                    "Cleared {files} shader cache file(s) of all games ({:.1} MiB freed)",
+                    (bytes as f64) / (1024.0 * 1024.0)
+                );
                 return;
             }
             _ => {}
@@ -452,7 +456,7 @@ impl Menu {
                 "Sets VKD3D_FEATURE_LEVEL for vkd3d-proton. Try 12_0 if a game fails D3D12CreateDevice on PS5 RADV.",
             ),
             _ => {
-                let (files, bytes) = self.preview_shader_cache;
+                let (files, bytes) = self.preview_shader_cache.unwrap_or((0, 0));
                 let value = if files == 0 {
                     tr(self.ui.language, "Empty").into()
                 } else {
@@ -461,7 +465,7 @@ impl Menu {
                 (
                     tr(self.ui.language, "Clear Shader Cache"),
                     value,
-                    "Deletes compiled DXIL & vkd3d shader caches (saves and xcl.toml stay untouched). Press X to clear.",
+                    "Deletes the compiled shaders of ALL games (XCL, vkd3d-proton, RADV); they rebuild on next launch. Saves and xcl.toml stay. Press X.",
                 )
             }
         }
@@ -2013,7 +2017,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
         preview_pe_kind: PeLaunchKind::XboxSeries,
         preview_has_custom_cfg: false,
         preview_saves: (0, 0),
-        preview_shader_cache: (0, 0),
+        preview_shader_cache: None,
         installers: Vec::new(),
         installer_row: 0,
         delete_installer_after: false,
@@ -2086,6 +2090,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
 }
 
 pub fn run_direct(folder: PathBuf) -> i32 {
+    library::ensure_shader_cache_dirs();
     match library::inspect_game_folder(&folder) {
         Ok(game) => match library::prepare(&game) {
             Ok(()) => {
@@ -2105,6 +2110,9 @@ pub fn run_direct(folder: PathBuf) -> i32 {
 }
 
 pub fn run(root: Option<PathBuf>, list: bool) -> i32 {
+    for dir in library::ensure_shader_cache_dirs() {
+        println!("TrinityXSX: created shader cache folder {}", dir.display());
+    }
     if list {
         if let Some(root) = root {
             match library::scan(&root) {
