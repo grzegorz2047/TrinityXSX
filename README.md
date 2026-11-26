@@ -4,6 +4,7 @@
 </p>
 
 <p align="center">
+  <a href="https://prosperostore.net/app/PPSA83601/"><strong>Install via ProsperoStore</strong></a> ·
   <a href="https://github.com/grzegorz2047/TrinityXSX/releases"><strong>Download latest release</strong></a> ·
   <a href="docs/USER_GUIDE.md">User Guide (EN)</a> ·
   <a href="docs/PORADNIK_PL.md">Poradnik (PL)</a> ·
@@ -11,20 +12,20 @@
   <a href="https://github.com/grzegorz2047/TrinityXSX/issues/new/choose">Report a Game / Bug</a>
 </p>
 
-**TrinityXSX (`PPSA83601`)** is an experimental standalone **Xbox Series X|S (GDK / Scarlett)** game library and compatibility runtime for jailbroken **PlayStation 5** consoles. It launches directly from its own PS5 home-screen tile (no `prospero-win` front-end required) by combining [XCL](https://github.com/xcl-dev/xcl), [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) (D3D12 → Vulkan on PS5 RADV), [DXVK](https://github.com/doitsujin/dxvk), and the PS5 Wine runtime.
+**TrinityXSX (`PPSA83601`)** is an all-in-one **Xbox Series X|S** and **DRM-free PC/GOG** game library and compatibility runtime for jailbroken **PlayStation 5** consoles. It installs as a single self-contained PS5 home-screen app — no separate PC launcher or extra front-end required — powered by open-source [XCL](https://github.com/xcl-dev/xcl), [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton), [DXVK](https://github.com/doitsujin/dxvk), [innoextract](https://github.com/dscharrer/innoextract), and the PS5 Wine runtime.
 
-> **Experimental software:** game compatibility varies significantly between titles. No games, BIOS, keys, or console SDK files are included — you must supply your own unpacked Xbox Series X|S game folders.
+> **Experimental software:** game compatibility varies between titles. No games, BIOS, keys, or console SDK files are included — supply your own unpacked Xbox Series X|S game folders or DRM-free GOG offline installers.
 
-## What TrinityXSX can do
+## What TrinityXSX gives you on PS5
 
-- **Standalone PS5 home-screen app (`PPSA83601.zip` for ProsperoStore / `/data/homebrew/PPSA83601`, plus optional `PPSA83601.ffpkg`)** — MIT-licensed native launcher (`eboot.bin`) + bundled MIT one-shot elevation helper (`lapy.elf`) + self-seeding Wine prefix.
-- **Multi-folder game library & DualSense folder browser** — scans `C:\XCL\games`, `/data/xboxseries`, `/mnt/ext0..1/xboxseries`, `/mnt/usb0..1/xboxseries`, and any custom folder you add from the controller (`game_paths.txt`), with automatic background detection of newly copied games.
-- **Local cover art & game preview** — decodes PNG artwork straight from each game's `MicrosoftGame.config` (no internet needed), showing `TitleId`, version, config status, and save folder size.
-- **In-app per-game `xcl.toml` editor & compatibility presets (`R1`)** — apply built-in `TitleId` / tuning presets (Recommended, Low-RAM 4 GB, DXC Shaders, Series X, Debug Trace) or tune RAM/UMA budgets, Direct DXIL, raytracing, and offline mode straight from the DualSense.
-- **Phone / PC Web Companion & QR code (`L1`)** — scan the QR code on the same Wi-Fi to download `trinityxsx-logs.zip` bug bundles, **back up and restore game saves (`.zip`)**, apply presets, or edit `xcl.toml` and `game_paths.txt` from a browser.
-- **In-game DualSense Touchpad Quick Menu** — click the Touchpad (or `L3+R3`) anywhere in the library or inside a running Xbox game to inspect live **FPS / frame-time / VRAM** telemetry, trigger a **1-tap diagnostic dump**, Resume, Return to TrinityXSX Library, open the PS5 On-Screen Keyboard, or Exit to PS5 Home.
-- **Offline profiles, multi-language UI (EN / PL / PT / ES), and 0-FPS loading stall diagnostics** — built to make testing new games and reporting bugs effortless.
-- **Verified gameplay:** XCL Test Title passes **51/51** on PS5; **Minecraft Preview 1.18.3064.0 (Scarlett)** runs offline at ~60 FPS with DualSense controls, 3D worlds, persistent saves, and audio ([docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md)); plus two original MIT-licensed open-source 60 FPS Scarlett games included right in this repo for legal testing: **[AETHER DRIFT](samples/aether-drift/README.md)** (full 3D anti-gravity racer with 3 banked circuits, 8 racers, PBR reflections, Time Trial ghosts, and DualSense airbrakes/rumble) and **[NEON VOID XSX](samples/neon-void/README.md)** (twin-stick neon arcade shooter & live VRAM stress benchmark).
+- **One-click standalone PS5 app** — install `PPSA83601.zip` directly from **[ProsperoStore](https://prosperostore.net/app/PPSA83601/)** (or mount `PPSA83601.ffpkg` with ShadowMountPlus) and launch straight from the PS5 home screen.
+- **Play Xbox Series X|S & DRM-free PC/GOG games from one library** — automatically detects `[XSX]`, `[PC64]`, and `[PC32]` titles, running Xbox Series games through XCL and handing off PC/GOG games cleanly to DXVK / vkd3d-proton / Zink with DualSense → XInput controls.
+- **On-console GOG offline installer (`OPTIONS → Install GOG offline games`)** — drop DRM-free GOG offline installers (`setup_*.exe` + `.bin` files) into `/mnt/ext1/xboxseries/installers/` via FTP and unpack + convert them right on the PS5 with a live progress bar, automatic cover art (`Cover.png`), and ready-to-launch library entries (100% open-source `innoextract`, no PC needed).
+- **Multi-folder game library & DualSense browser** — automatically scans internal (`/data/xboxseries`), extended M.2 (`/mnt/ext0..1/xboxseries`), USB (`/mnt/usb0..1/xboxseries`), and custom folders (`game_paths.txt`), with local cover art, instant refresh, and flicker-free UI.
+- **In-game DualSense Touchpad Quick Menu & FPS HUD** — click the Touchpad (or `L3+R3`) anytime to check live **FPS / frame-time / VRAM** stats, toggle **Frame Generation (2x / 3x / 4x)**, grab a **1-tap diagnostic dump**, open the PS5 On-Screen Keyboard, or jump straight back to the TrinityXSX library.
+- **Per-game tuning presets (`R1`) & offline profiles** — switch presets (Recommended, Low-RAM 4 GB, DXC Shaders, Series X, Debug Trace), edit `xcl.toml` right from the DualSense, and use multiple offline profiles in EN / PL / PT / ES.
+- **Phone / PC Web Companion (`L1` QR code)** — scan the QR code on the same Wi-Fi to back up and restore saves (`.zip`), download bug-report logs, or tweak configs from any browser.
+- **Verified gameplay & included open-source test games:** XCL Test Title passes **51/51** on PS5; **Minecraft Preview 1.18.3064.0 (Scarlett)** runs offline at ~60 FPS with DualSense controls, 3D worlds, saves, and audio ([docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md)); plus two MIT-licensed 60 FPS Scarlett sample games right in this repo: **[AETHER DRIFT](samples/aether-drift/README.md)** (3D anti-gravity racer) and **[NEON VOID XSX](samples/neon-void/README.md)** (twin-stick arcade shooter & VRAM stress test).
 
 ## Supported PS5 Firmware & Console Requirements
 
@@ -45,6 +46,7 @@ All external dependencies are pinned in [`pins.env`](pins.env) and tracked autom
 - **[DirectXShaderCompiler (DXC)](https://github.com/microsoft/DirectXShaderCompiler)** (LLVM / MS) — `dxcompiler.dll` / `dxil.dll`.
 - **[prospero-win](https://github.com/mpereiraesaa/prospero-win)** (`v0.3.0`) + `patches/prospero-win/` — PS5 Wine runtime & `wineserver.prx`.
 - **[PS5-Lapy-JB-Daemon](https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon)** (MIT) — bundled `lapy.elf` one-shot helper compiled for `PPSA83601`.
+- **[innoextract](https://github.com/dscharrer/innoextract)** (zlib) — statically linked `trinity_innoextract.dll` for in-process unpacking of DRM-free GOG offline installers.
 - **Build PC toolchain (Windows):** Rust (stable MSVC), Visual Studio Build Tools + Windows SDK, MSYS2 UCRT64 (`gcc`, `meson`, `ninja`, `glslang`, `pkgconf`, `tools`), Python 3.12+, and for `.ffpkg` packaging: Clang 18 / LLD + PS5 Payload SDK + .NET 8 (`UFS2Tool`).
 
 ---
