@@ -19,3 +19,4 @@ __pycache__/
 !/tools/vkcaps/
 /tools/vkcaps/*.exe
 !/tools/innoextract/
+!/tools/netinput-sender/

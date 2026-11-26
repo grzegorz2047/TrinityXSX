@@ -1,0 +1,943 @@
+From 48bea6130a4be3cb5bdfc4a0a373b0fd0dd74286 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 19:57:49 +0100
+Subject: [PATCH] Add network keyboard and mouse input (TXIN over UDP)
+
+A PC's keyboard and mouse reach Wine over the LAN: TrinityXSX's
+tools/netinput-sender captures them on Windows (Ctrl+Alt+F12) and sends
+one 64-byte UDP datagram per change, plus a heartbeat, to port 9396.
+
+src/pw_netinput.c decodes TXIN v1. Each datagram carries the whole state
+(held virtual keys, buttons, and motion and wheel as running totals), so
+a lost datagram is mended by the next one. The receiver follows one
+sender at a time, from a private address only, and releases everything
+it held after 500 ms of silence. Left and right Shift, Ctrl and Alt become
+the generic keys, as the USB keyboard's do.
+
+native/pw_netinput_ps5.c reads a non-blocking libSceNet socket once a
+tick; the title loop posts the result through pw_wine_post_input next to
+the USB keyboard and mouse, with the same rule while the console's
+keyboard is up.
+---
+ Makefile                     |   4 +-
+ PUBLICATION_ALLOWLIST.txt    |   6 ++
+ native/pw_netinput_ps5.c     | 131 +++++++++++++++++++++++++
+ native/pw_netinput_ps5.h     |  37 +++++++
+ native/wine64_main.c         |  52 +++++++++-
+ src/pw_netinput.c            | 177 ++++++++++++++++++++++++++++++++++
+ src/pw_netinput.h            |  95 ++++++++++++++++++
+ tests/test_pw_netinput.c     | 180 +++++++++++++++++++++++++++++++++++
+ tests/test_pw_netinput_ps5.c |  88 +++++++++++++++++
+ tools/build_native.sh        |   4 +-
+ 10 files changed, 768 insertions(+), 6 deletions(-)
+ create mode 100644 native/pw_netinput_ps5.c
+ create mode 100644 native/pw_netinput_ps5.h
+ create mode 100644 src/pw_netinput.c
+ create mode 100644 src/pw_netinput.h
+ create mode 100644 tests/test_pw_netinput.c
+ create mode 100644 tests/test_pw_netinput_ps5.c
+
+diff --git a/Makefile b/Makefile
+index 8309626..1c24c5c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -72,6 +72,8 @@ $(eval $(call test_rule,test_pw_wine_library,tests/test_pw_wine_library.c native
+ $(eval $(call test_rule,test_pw_hid,tests/test_pw_hid.c src/pw_hid.c,))
+ $(eval $(call test_rule,test_pw_spinner,tests/test_pw_spinner.c src/pw_spinner.c,))
+ $(eval $(call test_rule,test_pw_hid_ps5,tests/test_pw_hid_ps5.c native/pw_hid_ps5.c src/pw_hid.c,-DPW_HID_PS5_HOST_TEST))
++$(eval $(call test_rule,test_pw_netinput,tests/test_pw_netinput.c src/pw_netinput.c,))
++$(eval $(call test_rule,test_pw_netinput_ps5,tests/test_pw_netinput_ps5.c native/pw_netinput_ps5.c src/pw_netinput.c,-DPW_NETINPUT_PS5_HOST_TEST))
+ $(eval $(call test_rule,test_pw_wine_display,tests/test_pw_wine_display.c native/pw_wine_display.c src/pw_game_profile.c src/pw_app_profile.c src/pw_script_input.c,-pthread))
+ $(eval $(call test_rule,test_pw_wine_dl,tests/test_pw_wine_dl.c wine/ps5/pw_wine_dl.c wine/ps5/pw_wine_prx.c,-pthread))
+ # The modules and the test are linked with --wrap for every __wrap_ name
+@@ -147,7 +149,7 @@ $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
+ 
+ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog test_pw_present \
+ 	test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc test_vk_replay test_vk_wire test_vk_codec \
+-	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
++	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_netinput test_pw_netinput_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
+ 	test_pw_wine_threads test_pw_wine_compat test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_pw_game_menu test_pw_osk test_pw_osk_ps5 \
+ 	test_pw_guest_fp test_pw_vm test_pw_x86_block test_pw_x86_flat test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top \
+ 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index b3c3192..a7f9b1d 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -313,6 +313,12 @@ tests/test_pw_hid.c
+ native/pw_hid_ps5.c
+ native/pw_hid_ps5.h
+ tests/test_pw_hid_ps5.c
++src/pw_netinput.c
++src/pw_netinput.h
++tests/test_pw_netinput.c
++native/pw_netinput_ps5.c
++native/pw_netinput_ps5.h
++tests/test_pw_netinput_ps5.c
+ native/pw_osk_ps5.c
+ native/pw_osk_ps5.h
+ tests/test_pw_osk.c
+diff --git a/native/pw_netinput_ps5.c b/native/pw_netinput_ps5.c
+new file mode 100644
+index 0000000..37d1f89
+--- /dev/null
++++ b/native/pw_netinput_ps5.c
+@@ -0,0 +1,131 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_netinput_ps5.h"
++#include "../include/prospero_win.h"
++#include <stdio.h>
++#include <string.h>
++
++static void logf_(const PwNetInputPs5 *net, const char *line)
++{
++    if (net->ops.log) net->ops.log(line);
++}
++
++int pw_netinput_ps5_open(PwNetInputPs5 *net, const PwNetInputPs5Ops *ops, uint16_t port)
++{
++    char line[96];
++
++    if (!net || !ops || !ops->open || !ops->receive) return PW_ERR_PRECONDITION;
++    memset(net, 0, sizeof(*net));
++    net->ops = *ops;
++    pw_netinput_init(&net->input);
++    net->socket = ops->open(port);
++    snprintf(line, sizeof(line), "listen udp port=%u socket=%d", (unsigned)port, net->socket);
++    logf_(net, line);
++    if (net->socket < 0) {
++        net->socket = -1;
++        return PW_ERR_NOT_FOUND;
++    }
++    return PW_OK;
++}
++
++void pw_netinput_ps5_poll(PwNetInputPs5 *net, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    PwNetInput *in;
++    char line[128];
++
++    memset(poll, 0, sizeof(*poll));
++    if (!net || net->socket < 0) return;
++    in = &net->input;
++    for (int i = 0; i < PW_NETINPUT_PS5_DATAGRAMS; i++) {
++        uint8_t bytes[2 * PW_NETINPUT_PACKET];
++        uint32_t address = 0;
++        uint16_t port = 0;
++        long got;
++
++        if (PW_NETINPUT_EVENTS - poll->count < PW_NETINPUT_PACKET_EVENTS) break;   /* the rest next tick */
++        got = net->ops.receive(net->socket, bytes, sizeof(bytes), &address, &port);
++        if (got < 0) break;
++        if (pw_netinput_receive(in, bytes, (size_t)got, address, port, now_ns, poll) != PW_OK &&
++            (in->refused & (in->refused - 1)) == 0 && in->refused != net->refused_logged) {
++            /* the 1st, 2nd, 4th, 8th... refused datagram */
++            net->refused_logged = in->refused;
++            snprintf(line, sizeof(line), "refused #%llu from %u.%u.%u.%u:%u length=%ld",
++                     (unsigned long long)in->refused, address >> 24, address >> 16 & 255,
++                     address >> 8 & 255, address & 255, (unsigned)port, got);
++            logf_(net, line);
++        }
++        if (in->links != net->links_logged) {
++            net->links_logged = in->links;
++            snprintf(line, sizeof(line), "sender %u.%u.%u.%u:%u session=%08x",
++                     in->address >> 24, in->address >> 16 & 255, in->address >> 8 & 255,
++                     in->address & 255, (unsigned)in->port, (unsigned)in->session);
++            logf_(net, line);
++        }
++    }
++    pw_netinput_tick(in, now_ns, poll);
++    if (in->timeouts != net->timeouts_logged) {
++        net->timeouts_logged = in->timeouts;
++        snprintf(line, sizeof(line), "sender silent: released everything (datagrams=%llu refused=%llu)",
++                 (unsigned long long)in->packets, (unsigned long long)in->refused);
++        logf_(net, line);
++    }
++}
++
++#ifndef PW_NETINPUT_PS5_HOST_TEST
++#include <sys/socket.h>
++#include <netinet/in.h>
++
++int sceNetSocket(const char *name, int domain, int type, int protocol);
++int sceNetSocketClose(int socket);
++int sceNetSetsockopt(int socket, int level, int option, const void *value, socklen_t length);
++int sceNetBind(int socket, const struct sockaddr *address, socklen_t length);
++int sceNetRecvfrom(int socket, void *buffer, size_t length, int flags, struct sockaddr *from,
++                   socklen_t *from_length);
++
++enum { PW_SCE_SO_NBIO = 0x1200 };   /* as ps5log_ps5_net.c */
++
++static int system_open(uint16_t port)
++{
++    struct sockaddr_in address;
++    int enabled = 1;
++    int s = sceNetSocket("pw-netinput", AF_INET, SOCK_DGRAM, 0);
++
++    if (s < 0) return s;
++    memset(&address, 0, sizeof(address));
++    address.sin_len = sizeof(address);
++    address.sin_family = AF_INET;
++    address.sin_port = (in_port_t)((port >> 8) | (port << 8 & 0xff00));   /* network order */
++    address.sin_addr.s_addr = 0;                                          /* INADDR_ANY */
++    if (sceNetSetsockopt(s, SOL_SOCKET, PW_SCE_SO_NBIO, &enabled, sizeof(enabled)) < 0 ||
++        sceNetBind(s, (const struct sockaddr *)&address, sizeof(address)) < 0) {
++        (void)sceNetSocketClose(s);
++        return -1;
++    }
++    return s;
++}
++
++static long system_receive(int s, void *buffer, size_t length, uint32_t *address, uint16_t *port)
++{
++    struct sockaddr_in from;
++    socklen_t from_length = sizeof(from);
++    int got;
++
++    memset(&from, 0, sizeof(from));
++    got = sceNetRecvfrom(s, buffer, length, 0, (struct sockaddr *)&from, &from_length);
++    if (got < 0) return -1;
++    {
++        const uint8_t *a = (const uint8_t *)&from.sin_addr.s_addr, *p = (const uint8_t *)&from.sin_port;
++        *address = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
++        *port = (uint16_t)(p[0] << 8 | p[1]);
++    }
++    return got;
++}
++
++const PwNetInputPs5Ops *pw_netinput_ps5_system_ops(void (*log)(const char *line))
++{
++    static PwNetInputPs5Ops ops;
++    ops.open = system_open;
++    ops.receive = system_receive;
++    ops.log = log;
++    return &ops;
++}
++#endif
+diff --git a/native/pw_netinput_ps5.h b/native/pw_netinput_ps5.h
+new file mode 100644
+index 0000000..586e2d4
+--- /dev/null
++++ b/native/pw_netinput_ps5.h
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_NETINPUT_PS5_H
++#define PW_NETINPUT_PS5_H
++/*
++ * The network keyboard and mouse (src/pw_netinput.h) on the PS5: one
++ * non-blocking UDP socket through libSceNet (the calls ps5log already
++ * uses), drained once a tick by the title's loop.
++ */
++#include "../src/pw_netinput.h"
++#include <stddef.h>
++#include <stdint.h>
++
++enum { PW_NETINPUT_PS5_DATAGRAMS = 64 };   /* read per poll at most */
++
++typedef struct PwNetInputPs5Ops {
++    int (*open)(uint16_t port);             /* a bound non-blocking socket, or < 0 */
++    /* One datagram: its length and IPv4 source (host order), or < 0 when none is waiting. */
++    long (*receive)(int socket, void *buffer, size_t length, uint32_t *address, uint16_t *port);
++    void (*log)(const char *line);
++} PwNetInputPs5Ops;
++
++typedef struct PwNetInputPs5 {
++    PwNetInputPs5Ops ops;
++    int socket;                             /* -1 when closed */
++    PwNetInput input;
++    uint64_t links_logged, timeouts_logged, refused_logged;
++} PwNetInputPs5;
++
++/* Binds port on every address; logs the result. PW_OK when listening. */
++int pw_netinput_ps5_open(PwNetInputPs5 *net, const PwNetInputPs5Ops *ops, uint16_t port);
++/* Reads what waits, then times out a silent sender; logs a new sender, a
++ * timeout, and the first refused datagram of each kind of change. */
++void pw_netinput_ps5_poll(PwNetInputPs5 *net, uint64_t now_ns, PwNetInputPoll *poll);
++
++/* libSceNet, on the console. */
++const PwNetInputPs5Ops *pw_netinput_ps5_system_ops(void (*log)(const char *line));
++#endif
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 6353eae..f21ea81 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -40,6 +40,7 @@
+ #include "pw_audio_ps5.h"
+ #include "pw_pad_ps5.h"
+ #include "pw_hid_ps5.h"
++#include "pw_netinput_ps5.h"
+ #include "pw_osk_ps5.h"
+ #include "pw_videoout_ps5.h"
+ #include "pw_wine_library.h"
+@@ -1045,6 +1046,40 @@ static void osk_log(const char *line)
+     PS5LOG_LOG("PW_WINE64 osk %s", line);
+ }
+ 
++/* The network keyboard and mouse's (src/pw_netinput.h). */
++static void netinput_log(const char *line)
++{
++    PS5LOG_LOG("PW_WINE64 netinput %s", line);
++}
++
++/* One poll of the network keyboard and mouse into Wine, as the USB ones'
++ * are posted: while the console's keyboard is up only releases reach
++ * the game. */
++static void post_netinput(int (*post_input)(const PwWineInput *), const PwNetInputPoll *poll, int dialog,
++                          uint64_t *posted, uint64_t *refused)
++{
++    PwWineInput input;
++
++    if ((poll->dx || poll->dy) && !dialog) {
++        input = (PwWineInput){ PW_WINE_INPUT_MOUSE_MOVE, 0, poll->dx, poll->dy, 0 };
++        if (post_input(&input) == 0) (*posted)++;
++        else (*refused)++;
++    }
++    if (poll->wheel && !dialog) {
++        input = (PwWineInput){ PW_WINE_INPUT_MOUSE_WHEEL, 0, poll->wheel, 0, 0 };
++        if (post_input(&input) == 0) (*posted)++;
++        else (*refused)++;
++    }
++    for (size_t i = 0; i < poll->count; i++) {
++        if (dialog && poll->events[i].down) continue;
++        input = (PwWineInput){ poll->events[i].kind == PW_HID_EVENT_KEY ? PW_WINE_INPUT_KEY :
++                               PW_WINE_INPUT_MOUSE_BUTTON, poll->events[i].code, 0, 0,
++                               poll->events[i].down };
++        if (post_input(&input) == 0) (*posted)++;
++        else (*refused)++;
++    }
++}
++
+ /* The process's CPU time, user and system, in milliseconds: a stall that
+  * waits shows no growth, one that spins grows by a core a second. */
+ static unsigned long long cpu_ms(void)
+@@ -1300,6 +1335,10 @@ int main(int argc, char **argv)
+     static PwVideoOutPs5 video;
+     static PwPadPs5 pad;
+     static PwHidPs5 hid;
++    /* A PC's keyboard and mouse over the LAN (tools/netinput-sender). */
++    static PwNetInputPs5 netinput;
++    static PwNetInputPoll netinput_poll;
++    int netinput_status = PW_ERR_STATE;
+     static PwGameInput game_input;
+     /* [input] player2: a second signed-in user's DualSense as more keys. */
+     static PwPadPs5 pad2;
+@@ -1589,6 +1628,8 @@ int main(int argc, char **argv)
+              * dialog over the game and the title types what comes back. */
+             osk_status = pw_osk_ps5_open(&osk_ps5, pw_osk_ps5_system_ops(osk_log), user);
+             game_menu.keyboard = osk_status == PW_OK;
++            netinput_status = pw_netinput_ps5_open(&netinput, pw_netinput_ps5_system_ops(netinput_log),
++                                                   PW_NETINPUT_PORT);
+         }
+         {
+             uint8_t *storage = mmap(NULL, 2u * PW_WINE64_MAX_FRAME, PROT_READ | PROT_WRITE,
+@@ -1605,11 +1646,11 @@ int main(int argc, char **argv)
+             if (set_release) set_release(wine_release_display, NULL);
+         }
+         PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d video=%s "
+-                   "pad=%s hid=%s osk=%s", set_present != NULL, frame_shown != NULL, post_input != NULL,
+-                   set_pad != NULL,
++                   "pad=%s hid=%s osk=%s netinput=%s", set_present != NULL, frame_shown != NULL,
++                   post_input != NULL, set_pad != NULL,
+                    pw_result_name(video_status),
+                    pw_result_name(pad_status), pw_result_name(hid_status),
+-                   pw_result_name(osk_status));
++                   pw_result_name(osk_status), pw_result_name(netinput_status));
+         if (player2)
+             PS5LOG_LOG("PW_WINE64 pad2 status=%s user=%d", pw_result_name(pad2_status),
+                        (int)pad2.user_id);
+@@ -1692,6 +1733,11 @@ int main(int argc, char **argv)
+                 else refused++;
+             }
+         }
++        /* The PC's keyboard and mouse, as the USB ones. */
++        if (post_input && netinput_status == PW_OK) {
++            pw_netinput_ps5_poll(&netinput, now, &netinput_poll);
++            post_netinput(post_input, &netinput_poll, osk_ps5.showing, &posted, &refused);
++        }
+ #if PW_WINE64_SCRIPT
+         while (post_input && script_key_next < script_key_count &&
+                now - script_start_ns >= script_keys[script_key_next].at_ns) {
+diff --git a/src/pw_netinput.c b/src/pw_netinput.c
+new file mode 100644
+index 0000000..e614e04
+--- /dev/null
++++ b/src/pw_netinput.c
+@@ -0,0 +1,177 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_netinput.h"
++#include "../include/prospero_win.h"
++#include <string.h>
++
++static uint32_t get32(const uint8_t *p)
++{
++    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++static void put32(uint8_t *p, uint32_t v)
++{
++    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
++}
++
++int pw_netinput_parse(const uint8_t *bytes, size_t length, PwNetInputPacket *out)
++{
++    if (!bytes || !out) return PW_ERR_PRECONDITION;
++    if (length < PW_NETINPUT_PACKET) return PW_ERR_TRUNCATED;
++    if (memcmp(bytes, "TXIN", 4)) return PW_ERR_MALFORMED;
++    if (bytes[4] != PW_NETINPUT_VERSION) return PW_ERR_UNSUPPORTED;
++    memset(out, 0, sizeof(*out));
++    out->flags = bytes[5];
++    out->session = get32(bytes + 8);
++    out->sequence = get32(bytes + 12);
++    memcpy(out->keys, bytes + 16, sizeof(out->keys));
++    out->buttons = bytes[48] & 7u;
++    out->motion_x = get32(bytes + 52);
++    out->motion_y = get32(bytes + 56);
++    out->wheel = get32(bytes + 60);
++    return PW_OK;
++}
++
++size_t pw_netinput_write(const PwNetInputPacket *packet, uint8_t out[PW_NETINPUT_PACKET])
++{
++    memset(out, 0, PW_NETINPUT_PACKET);
++    memcpy(out, "TXIN", 4);
++    out[4] = PW_NETINPUT_VERSION;
++    out[5] = packet->flags;
++    put32(out + 8, packet->session);
++    put32(out + 12, packet->sequence);
++    memcpy(out + 16, packet->keys, sizeof(packet->keys));
++    out[48] = packet->buttons & 7u;
++    put32(out + 52, packet->motion_x);
++    put32(out + 56, packet->motion_y);
++    put32(out + 60, packet->wheel);
++    return PW_NETINPUT_PACKET;
++}
++
++int pw_netinput_private_address(uint32_t a)
++{
++    return (a >> 24) == 10 || (a >> 20) == 0xac1 || (a >> 16) == 0xc0a8 || (a >> 16) == 0xa9fe;
++}
++
++void pw_netinput_init(PwNetInput *input)
++{
++    if (input) memset(input, 0, sizeof(*input));
++}
++
++static int held(const uint8_t *keys, unsigned vk) { return keys[vk >> 3] >> (vk & 7) & 1u; }
++static void hold(uint8_t *keys, unsigned vk) { keys[vk >> 3] |= (uint8_t)(1u << (vk & 7)); }
++
++/* The keys a game sees: left and right Shift, Ctrl and Alt as the generic
++ * key, and no mouse-button keys (the buttons come on their own). */
++static void fold(const uint8_t *raw, uint8_t *out)
++{
++    static const uint8_t sided[6][2] = {
++        { 0xa0, 0x10 }, { 0xa1, 0x10 }, { 0xa2, 0x11 }, { 0xa3, 0x11 }, { 0xa4, 0x12 }, { 0xa5, 0x12 },
++    };
++
++    memcpy(out, raw, 32);
++    for (size_t i = 0; i < 6; i++) {
++        if (held(raw, sided[i][0])) hold(out, sided[i][1]);
++        out[sided[i][0] >> 3] &= (uint8_t)~(1u << (sided[i][0] & 7));
++    }
++    out[0] &= (uint8_t)~0x77u;   /* 0 none, 1 2 4 5 6 mouse buttons; 3 VK_CANCEL stays */
++    out[0xff >> 3] &= 0x7fu;     /* 0xff: no key */
++}
++
++static void put(PwNetInputPoll *poll, uint8_t kind, uint8_t down, uint16_t code)
++{
++    if (poll->count < PW_NETINPUT_EVENTS) poll->events[poll->count++] = (PwHidEvent){ kind, down, code };
++}
++
++/* From the delivered state to keys and buttons, releases first. */
++static void change(PwNetInput *input, const uint8_t *keys, uint8_t buttons, PwNetInputPoll *poll)
++{
++    for (unsigned vk = 0; vk < 256; vk++)
++        if (held(input->keys, vk) && !held(keys, vk)) put(poll, PW_HID_EVENT_KEY, 0, (uint16_t)vk);
++    for (uint16_t b = 0; b < 3; b++)
++        if ((input->buttons >> b & 1u) && !(buttons >> b & 1u)) put(poll, PW_HID_EVENT_BUTTON, 0, b);
++    for (unsigned vk = 0; vk < 256; vk++)
++        if (!held(input->keys, vk) && held(keys, vk)) put(poll, PW_HID_EVENT_KEY, 1, (uint16_t)vk);
++    for (uint16_t b = 0; b < 3; b++)
++        if (!(input->buttons >> b & 1u) && (buttons >> b & 1u)) put(poll, PW_HID_EVENT_BUTTON, 1, b);
++    memcpy(input->keys, keys, sizeof(input->keys));
++    input->buttons = buttons;
++}
++
++static void release_all(PwNetInput *input, PwNetInputPoll *poll)
++{
++    static const uint8_t none[32];
++    change(input, none, 0, poll);
++}
++
++static int32_t motion(uint32_t now, uint32_t before)
++{
++    int32_t d = (int32_t)(now - before);
++    if (d > PW_NETINPUT_MAX_MOTION) return PW_NETINPUT_MAX_MOTION;
++    if (d < -PW_NETINPUT_MAX_MOTION) return -PW_NETINPUT_MAX_MOTION;
++    return d;
++}
++
++int pw_netinput_receive(PwNetInput *input, const uint8_t *bytes, size_t length, uint32_t address,
++                        uint16_t port, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    PwNetInputPacket packet;
++    uint8_t keys[32];
++    int fresh;
++
++    if (!input || !poll) return PW_ERR_PRECONDITION;
++    if (PW_NETINPUT_EVENTS - poll->count < PW_NETINPUT_PACKET_EVENTS) return PW_ERR_LIMIT;
++    if (pw_netinput_parse(bytes, length, &packet) != PW_OK || !pw_netinput_private_address(address)) {
++        input->refused++;
++        return PW_ERR_UNSUPPORTED;
++    }
++    /* A new sender: the first one, one whose sender went silent, or the
++     * same computer started again (another session or port). */
++    fresh = !input->linked || now_ns - input->last_ns >= PW_NETINPUT_TIMEOUT_NS ||
++            (address == input->address && (packet.session != input->session || port != input->port));
++    if (!fresh && (address != input->address || port != input->port)) {
++        input->refused++;
++        return PW_ERR_STATE;
++    }
++    if (fresh) {
++        release_all(input, poll);
++        input->linked = 1;
++        input->address = address;
++        input->port = port;
++        input->session = packet.session;
++        input->links++;
++    } else {
++        if ((int32_t)(packet.sequence - input->sequence) <= 0) {   /* late or repeated */
++            input->refused++;
++            return PW_ERR_STATE;
++        }
++        if (packet.flags & PW_NETINPUT_CAPTURING) {
++            poll->dx += motion(packet.motion_x, input->motion_x);
++            poll->dy += motion(packet.motion_y, input->motion_y);
++            poll->wheel += motion(packet.wheel, input->wheel);
++        }
++    }
++    input->sequence = packet.sequence;
++    input->motion_x = packet.motion_x;
++    input->motion_y = packet.motion_y;
++    input->wheel = packet.wheel;
++    input->last_ns = now_ns;
++    input->released = 0;
++    input->packets++;
++    if (packet.flags & PW_NETINPUT_CAPTURING) {
++        fold(packet.keys, keys);
++        change(input, keys, packet.buttons, poll);
++    } else {
++        release_all(input, poll);
++    }
++    return PW_OK;
++}
++
++void pw_netinput_tick(PwNetInput *input, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    if (!input || !poll || !input->linked || input->released) return;
++    if (now_ns - input->last_ns < PW_NETINPUT_TIMEOUT_NS) return;
++    if (PW_NETINPUT_EVENTS - poll->count < PW_NETINPUT_PACKET_EVENTS) return;   /* next poll */
++    release_all(input, poll);
++    input->released = 1;
++    input->timeouts++;
++}
+diff --git a/src/pw_netinput.h b/src/pw_netinput.h
+new file mode 100644
+index 0000000..84fd047
+--- /dev/null
++++ b/src/pw_netinput.h
+@@ -0,0 +1,95 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_NETINPUT_H
++#define PW_NETINPUT_H
++/*
++ * A PC's keyboard and mouse over the local network, as Wine input: a
++ * sender on Windows (TrinityXSX's tools/netinput-sender) sends one UDP
++ * datagram per change and a heartbeat while it captures, and each carries
++ * its whole state, so a lost datagram is mended by the next one and
++ * nothing stays held:
++ *
++ *   offset  size  field (little-endian)
++ *        0     4  magic "TXIN"
++ *        4     1  version (1)
++ *        5     1  flags: bit 0 capturing (0: everything is released)
++ *        6     2  reserved, 0
++ *        8     4  session: random per sender start
++ *       12     4  sequence: +1 per datagram
++ *       16    32  held Windows virtual keys, bit (vk & 7) of byte vk >> 3
++ *       48     1  held mouse buttons: bit 0 left, 1 right, 2 middle
++ *       49     3  reserved, 0
++ *       52     4  mouse motion x, total since the session began (wraps)
++ *       56     4  mouse motion y, total (down positive)
++ *       60     4  wheel detents, total (up positive)
++ *
++ * Motion is sent as totals, so motion in a lost datagram still arrives
++ * with the next one. The receiver follows one sender at a time, from a
++ * private (LAN) address only; another may take over once the first has
++ * been silent for PW_NETINPUT_TIMEOUT_NS, which also releases whatever
++ * the first held. The left and right Shift, Ctrl and Alt keys become the
++ * generic ones, as the USB keyboard's do (src/pw_hid.c).
++ */
++#include "pw_hid.h"
++#include <stddef.h>
++#include <stdint.h>
++
++enum {
++    PW_NETINPUT_PORT = 9396,
++    PW_NETINPUT_PACKET = 64,
++    PW_NETINPUT_VERSION = 1,
++    PW_NETINPUT_CAPTURING = 1u,
++    /* The changes one datagram can make: every key and button. */
++    PW_NETINPUT_PACKET_EVENTS = 256 + 3,
++    PW_NETINPUT_EVENTS = 2 * PW_NETINPUT_PACKET_EVENTS,
++    PW_NETINPUT_MAX_MOTION = 32767,       /* per datagram, either axis */
++};
++#define PW_NETINPUT_TIMEOUT_NS 500000000ull
++
++typedef struct PwNetInputPacket {
++    uint8_t flags;
++    uint32_t session, sequence;
++    uint8_t keys[32];
++    uint8_t buttons;
++    uint32_t motion_x, motion_y, wheel;
++} PwNetInputPacket;
++
++typedef struct PwNetInput {
++    int linked;                 /* a sender was accepted */
++    int released;               /* its timeout already released everything */
++    uint32_t address;           /* IPv4, host order */
++    uint16_t port;
++    uint32_t session, sequence;
++    uint64_t last_ns;           /* its newest accepted datagram */
++    uint8_t keys[32];           /* as delivered: folded, no mouse keys */
++    uint8_t buttons;
++    uint32_t motion_x, motion_y, wheel;
++    uint64_t packets, refused, links, timeouts;
++} PwNetInput;
++
++/* What the datagrams of one poll changed. */
++typedef struct PwNetInputPoll {
++    int32_t dx, dy, wheel;
++    size_t count;
++    PwHidEvent events[PW_NETINPUT_EVENTS];
++} PwNetInputPoll;
++
++/* Reads one datagram: PW_OK, PW_ERR_TRUNCATED (short), PW_ERR_MALFORMED
++ * (not TXIN) or PW_ERR_UNSUPPORTED (another version). */
++int pw_netinput_parse(const uint8_t *bytes, size_t length, PwNetInputPacket *out);
++/* Writes one (for the sender's tests and tools); returns PW_NETINPUT_PACKET. */
++size_t pw_netinput_write(const PwNetInputPacket *packet, uint8_t out[PW_NETINPUT_PACKET]);
++
++/* 10/8, 172.16/12, 192.168/16 and 169.254/16 (host order). */
++int pw_netinput_private_address(uint32_t address);
++
++void pw_netinput_init(PwNetInput *input);
++/* One datagram from address:port at now_ns: its changes are added to poll.
++ * PW_OK when it was accepted; PW_ERR_LIMIT when poll has no room for a
++ * whole datagram's changes (nothing is read then); otherwise it is
++ * refused and counted. */
++int pw_netinput_receive(PwNetInput *input, const uint8_t *bytes, size_t length, uint32_t address,
++                        uint16_t port, uint64_t now_ns, PwNetInputPoll *poll);
++/* Once per poll: a sender silent for PW_NETINPUT_TIMEOUT_NS has all it
++ * held released. */
++void pw_netinput_tick(PwNetInput *input, uint64_t now_ns, PwNetInputPoll *poll);
++#endif
+diff --git a/tests/test_pw_netinput.c b/tests/test_pw_netinput.c
+new file mode 100644
+index 0000000..38a20ec
+--- /dev/null
++++ b/tests/test_pw_netinput.c
+@@ -0,0 +1,180 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "../src/pw_netinput.h"
++#include "../include/prospero_win.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++#define LAN 0xc0a80105u            /* 192.168.1.5 */
++#define LAN2 0xc0a80106u
++#define MS 1000000ull
++
++static void key(PwNetInputPacket *p, unsigned vk, int down)
++{
++    if (down) p->keys[vk >> 3] |= (uint8_t)(1u << (vk & 7));
++    else p->keys[vk >> 3] &= (uint8_t)~(1u << (vk & 7));
++}
++
++static int deliver(PwNetInput *in, const PwNetInputPacket *p, uint32_t address, uint16_t port, uint64_t now,
++                PwNetInputPoll *poll)
++{
++    uint8_t bytes[PW_NETINPUT_PACKET];
++    memset(poll, 0, sizeof(*poll));
++    pw_netinput_write(p, bytes);
++    return pw_netinput_receive(in, bytes, sizeof(bytes), address, port, now, poll);
++}
++
++static void test_parse(void)
++{
++    PwNetInputPacket p = { 0 }, q;
++    uint8_t bytes[PW_NETINPUT_PACKET];
++
++    p.flags = PW_NETINPUT_CAPTURING; p.session = 0x11223344u; p.sequence = 7; p.buttons = 5;
++    p.motion_x = (uint32_t)-3; p.motion_y = 9; p.wheel = 2;
++    key(&p, 'W', 1);
++    assert(pw_netinput_write(&p, bytes) == PW_NETINPUT_PACKET);
++    assert(!memcmp(bytes, "TXIN\x01\x01", 6) && bytes[8] == 0x44 && bytes[11] == 0x11);
++    assert(pw_netinput_parse(bytes, sizeof(bytes), &q) == PW_OK);
++    assert(q.session == p.session && q.sequence == 7 && q.buttons == 5 && q.flags == 1);
++    assert((int32_t)q.motion_x == -3 && q.motion_y == 9 && q.wheel == 2 && !memcmp(q.keys, p.keys, 32));
++    assert(pw_netinput_parse(bytes, PW_NETINPUT_PACKET - 1, &q) == PW_ERR_TRUNCATED);
++    bytes[4] = 2;
++    assert(pw_netinput_parse(bytes, sizeof(bytes), &q) == PW_ERR_UNSUPPORTED);
++    bytes[0] = 'X';
++    assert(pw_netinput_parse(bytes, sizeof(bytes), &q) == PW_ERR_MALFORMED);
++}
++
++static void test_private(void)
++{
++    assert(pw_netinput_private_address(0x0a000001u) && pw_netinput_private_address(0xac1f0001u));
++    assert(pw_netinput_private_address(0xc0a80001u) && pw_netinput_private_address(0xa9fe0101u));
++    assert(!pw_netinput_private_address(0xac200001u) && !pw_netinput_private_address(0x08080808u));
++}
++
++static void test_keys_and_motion(void)
++{
++    PwNetInput in;
++    PwNetInputPacket p = { 0 };
++    PwNetInputPoll poll;
++
++    pw_netinput_init(&in);
++    p.flags = PW_NETINPUT_CAPTURING; p.session = 1; p.sequence = 1;
++    p.motion_x = 1000; p.motion_y = 2000;              /* the first totals are the baseline */
++    key(&p, 'W', 1);
++    assert(deliver(&in, &p, LAN, 5000, 1 * MS, &poll) == PW_OK);
++    assert(poll.count == 1 && poll.events[0].kind == PW_HID_EVENT_KEY && poll.events[0].down &&
++           poll.events[0].code == 'W' && poll.dx == 0 && poll.dy == 0);
++
++    /* Motion is the difference of totals, even across a lost datagram. */
++    p.sequence = 3; p.motion_x = 1010; p.motion_y = 1995; p.wheel = (uint32_t)-1;
++    assert(deliver(&in, &p, LAN, 5000, 2 * MS, &poll) == PW_OK);
++    assert(poll.count == 0 && poll.dx == 10 && poll.dy == -5 && poll.wheel == -1);
++
++    /* Late and repeated datagrams change nothing. */
++    p.sequence = 2;
++    assert(deliver(&in, &p, LAN, 5000, 3 * MS, &poll) != PW_OK);
++    p.sequence = 3;
++    assert(deliver(&in, &p, LAN, 5000, 3 * MS, &poll) != PW_OK && poll.count == 0);
++
++    /* W released and A pressed with the left button: releases first. */
++    p.sequence = 4; key(&p, 'W', 0); key(&p, 'A', 1); p.buttons = 1;
++    assert(deliver(&in, &p, LAN, 5000, 4 * MS, &poll) == PW_OK);
++    assert(poll.count == 3);
++    assert(!poll.events[0].down && poll.events[0].code == 'W');
++    assert(poll.events[1].down && poll.events[1].code == 'A' && poll.events[1].kind == PW_HID_EVENT_KEY);
++    assert(poll.events[2].down && poll.events[2].kind == PW_HID_EVENT_BUTTON && poll.events[2].code == 0);
++
++    /* Capture off: everything released, motion ignored. */
++    p.sequence = 5; p.flags = 0; p.motion_x = 99999;
++    assert(deliver(&in, &p, LAN, 5000, 5 * MS, &poll) == PW_OK);
++    assert(poll.count == 2 && !poll.events[0].down && !poll.events[1].down && poll.dx == 0);
++}
++
++static void test_modifiers(void)
++{
++    PwNetInput in;
++    PwNetInputPacket p = { 0 };
++    PwNetInputPoll poll;
++
++    pw_netinput_init(&in);
++    p.flags = PW_NETINPUT_CAPTURING; p.session = 1; p.sequence = 1;
++    key(&p, 0xa0, 1); key(&p, 0xa1, 1); key(&p, 0x01, 1);       /* both Shifts, VK_LBUTTON */
++    assert(deliver(&in, &p, LAN, 5000, MS, &poll) == PW_OK);
++    assert(poll.count == 1 && poll.events[0].down && poll.events[0].code == 0x10);
++    p.sequence = 2; key(&p, 0xa0, 0);                             /* right Shift still held */
++    assert(deliver(&in, &p, LAN, 5000, 2 * MS, &poll) == PW_OK && poll.count == 0);
++    p.sequence = 3; key(&p, 0xa1, 0);
++    assert(deliver(&in, &p, LAN, 5000, 3 * MS, &poll) == PW_OK);
++    assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 0x10);
++}
++
++static void test_senders_and_timeout(void)
++{
++    PwNetInput in;
++    PwNetInputPacket p = { 0 }, other = { 0 };
++    PwNetInputPoll poll;
++
++    pw_netinput_init(&in);
++    p.flags = other.flags = PW_NETINPUT_CAPTURING; p.session = 1; p.sequence = 1;
++    key(&p, 'W', 1);
++    assert(deliver(&in, &p, LAN, 5000, MS, &poll) == PW_OK);
++
++    /* Not from the LAN, or another computer while the first one talks. */
++    assert(deliver(&in, &other, 0x08080808u, 5000, 2 * MS, &poll) != PW_OK);
++    other.session = 2; other.sequence = 1; key(&other, 'S', 1);
++    assert(deliver(&in, &other, LAN2, 5000, 2 * MS, &poll) != PW_OK && poll.count == 0);
++
++    /* Silence: W is released once. */
++    memset(&poll, 0, sizeof(poll));
++    pw_netinput_tick(&in, 100 * MS, &poll);
++    assert(poll.count == 0);
++    pw_netinput_tick(&in, MS + PW_NETINPUT_TIMEOUT_NS, &poll);
++    assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'W' && in.timeouts == 1);
++    memset(&poll, 0, sizeof(poll));
++    pw_netinput_tick(&in, 2 * PW_NETINPUT_TIMEOUT_NS, &poll);
++    assert(poll.count == 0);
++
++    /* Then the other computer may take over. */
++    assert(deliver(&in, &other, LAN2, 5000, 2 * PW_NETINPUT_TIMEOUT_NS, &poll) == PW_OK);
++    assert(poll.count == 1 && poll.events[0].down && poll.events[0].code == 'S' && in.links == 2);
++
++    /* The same computer started again: what the old session held is
++     * released before the new one's state. */
++    p.session = 9; p.sequence = 1; memset(p.keys, 0, 32); key(&p, 'D', 1);
++    assert(deliver(&in, &p, LAN2, 6000, 2 * PW_NETINPUT_TIMEOUT_NS + MS, &poll) == PW_OK);
++    assert(poll.count == 2 && !poll.events[0].down && poll.events[0].code == 'S' &&
++           poll.events[1].down && poll.events[1].code == 'D');
++}
++
++static void test_room(void)
++{
++    PwNetInput in;
++    PwNetInputPacket p = { 0 };
++    PwNetInputPoll poll;
++    uint8_t bytes[PW_NETINPUT_PACKET];
++
++    pw_netinput_init(&in);
++    p.flags = PW_NETINPUT_CAPTURING; p.session = 1; p.sequence = 1;
++    memset(p.keys, 0xff, 32); p.buttons = 7;
++    pw_netinput_write(&p, bytes);
++    memset(&poll, 0, sizeof(poll));
++    assert(pw_netinput_receive(&in, bytes, sizeof(bytes), LAN, 1, MS, &poll) == PW_OK);
++    assert(poll.count <= PW_NETINPUT_PACKET_EVENTS);
++    poll.count = PW_NETINPUT_EVENTS - PW_NETINPUT_PACKET_EVENTS + 1;
++    p.sequence = 2;
++    pw_netinput_write(&p, bytes);
++    assert(pw_netinput_receive(&in, bytes, sizeof(bytes), LAN, 1, 2 * MS, &poll) == PW_ERR_LIMIT);
++    assert(in.sequence == 1);
++}
++
++int main(void)
++{
++    test_parse();
++    test_private();
++    test_keys_and_motion();
++    test_modifiers();
++    test_senders_and_timeout();
++    test_room();
++    puts("test_pw_netinput: ok");
++    return 0;
++}
+diff --git a/tests/test_pw_netinput_ps5.c b/tests/test_pw_netinput_ps5.c
+new file mode 100644
+index 0000000..adf6536
+--- /dev/null
++++ b/tests/test_pw_netinput_ps5.c
+@@ -0,0 +1,88 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "../native/pw_netinput_ps5.h"
++#include "../include/prospero_win.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++#define MS 1000000ull
++
++static struct { uint8_t bytes[PW_NETINPUT_PACKET]; uint32_t address; uint16_t port; } queue[200];
++static int queued, taken, open_result, opened_port;
++static char last_line[160];
++static int lines;
++
++static int fake_open(uint16_t port) { opened_port = port; return open_result; }
++
++static long fake_receive(int s, void *buffer, size_t length, uint32_t *address, uint16_t *port)
++{
++    assert(s == 7 && length >= PW_NETINPUT_PACKET);
++    if (taken == queued) return -1;
++    memcpy(buffer, queue[taken].bytes, PW_NETINPUT_PACKET);
++    *address = queue[taken].address;
++    *port = queue[taken].port;
++    taken++;
++    return PW_NETINPUT_PACKET;
++}
++
++static void fake_log(const char *line)
++{
++    snprintf(last_line, sizeof(last_line), "%s", line);
++    lines++;
++}
++
++static const PwNetInputPs5Ops ops = { fake_open, fake_receive, fake_log };
++
++static void push(uint32_t sequence, unsigned vk, int down, uint32_t mx, uint32_t address)
++{
++    PwNetInputPacket p = { 0 };
++    p.flags = PW_NETINPUT_CAPTURING; p.session = 0xabcd; p.sequence = sequence; p.motion_x = mx;
++    if (down) p.keys[vk >> 3] |= (uint8_t)(1u << (vk & 7));
++    pw_netinput_write(&p, queue[queued].bytes);
++    queue[queued].address = address;
++    queue[queued].port = 50000;
++    queued++;
++}
++
++int main(void)
++{
++    static PwNetInputPs5 net;
++    static PwNetInputPoll poll;
++
++    open_result = -1;
++    assert(pw_netinput_ps5_open(&net, &ops, PW_NETINPUT_PORT) == PW_ERR_NOT_FOUND && net.socket == -1);
++    assert(opened_port == PW_NETINPUT_PORT && strstr(last_line, "socket=-1"));
++    pw_netinput_ps5_poll(&net, MS, &poll);              /* closed: nothing, no crash */
++    assert(poll.count == 0);
++
++    open_result = 7;
++    assert(pw_netinput_ps5_open(&net, &ops, PW_NETINPUT_PORT) == PW_OK);
++
++    /* Several datagrams in one tick: the newest state, the summed motion. */
++    push(1, 'W', 1, 0, 0xc0a80105u);
++    push(2, 'W', 1, 5, 0xc0a80105u);
++    push(3, 'W', 0, 12, 0xc0a80105u);
++    push(1, 'S', 1, 0, 0x08080808u);                  /* not from the LAN */
++    lines = 0;
++    pw_netinput_ps5_poll(&net, 2 * MS, &poll);
++    assert(taken == 4 && poll.dx == 12 && poll.count == 2);
++    assert(poll.events[0].down && poll.events[0].code == 'W' && !poll.events[1].down);
++    assert(lines == 2 && strstr(last_line, "refused #1 from 8.8.8.8:50000"));
++
++    /* Many datagrams: every one is read within the per-poll limit. */
++    for (uint32_t s = 4; s < 4 + 100; s++) push(s, 'A', s & 1, 12, 0xc0a80105u);
++    pw_netinput_ps5_poll(&net, 3 * MS, &poll);
++    assert(taken == 4 + PW_NETINPUT_PS5_DATAGRAMS);
++    pw_netinput_ps5_poll(&net, 4 * MS, &poll);
++    assert(taken == queued);
++
++    /* Silence releases what is held, and says so. */
++    push(200, 'D', 1, 12, 0xc0a80105u);
++    pw_netinput_ps5_poll(&net, 5 * MS, &poll);
++    assert(poll.count >= 1);
++    pw_netinput_ps5_poll(&net, 5 * MS + PW_NETINPUT_TIMEOUT_NS, &poll);
++    assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'D');
++    assert(strstr(last_line, "sender silent"));
++    puts("test_pw_netinput_ps5: ok");
++    return 0;
++}
+diff --git a/tools/build_native.sh b/tools/build_native.sh
+index 8d08e8b..49735d2 100755
+--- a/tools/build_native.sh
++++ b/tools/build_native.sh
+@@ -193,11 +193,11 @@ sources=(
+     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
+     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
+     native/pw_lapy_elevation.c
+-    native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_osk_ps5.c
++    native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_netinput_ps5.c native/pw_osk_ps5.c
+     native/pw_wine_prefix.c
+     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
+     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
+-    src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c
++    src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_netinput.c src/pw_spinner.c src/pw_script_input.c
+     src/pw_tsc_calibrate.c
+     wine/ps5/pw_wine_prx.c
+ )
+-- 
+2.48.1.windows.1
+
