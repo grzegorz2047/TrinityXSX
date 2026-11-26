@@ -1,20 +1,29 @@
-From 704e07f447f2c05904d0ff5a1fb39ce55f18b13b Mon Sep 17 00:00:00 2001
+From 71dbd25ddad3e7060dad261798b7564350c71f28 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Thu, 26 Nov 2026 08:39:41 +0100
-Subject: [PATCH] TrinityXSX: add FPS HUD toggle, storage free space
- bar, and
+Date: Thu, 26 Nov 2026 09:05:09 +0100
+Subject: [PATCH] TrinityXSX: add FPS HUD toggle, storage free space bar, and
+ cached list cover thumbnails
 
 ---
- crates/xcl/src/library.rs      | 148 +++++++++++++++++++++++++------
+ crates/xcl/src/library.rs      | 150 ++++++++++++++++++++++++++------
  crates/xcl/src/library_i18n.rs |   3 +
  crates/xcl/src/library_menu.rs | 153 +++++++++++++++++++++++++++------
  crates/xcl/src/library_web.rs  |  33 ++++++-
- 4 files changed, 286 insertions(+), 51 deletions(-)
+ 4 files changed, 287 insertions(+), 52 deletions(-)
 
 diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
-index e800b18..fbd1ede 100644
+index e800b18..d632077 100644
 --- a/crates/xcl/src/library.rs
 +++ b/crates/xcl/src/library.rs
+@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
+ 
+ use crate::{config::Config, launcher, library_i18n::Lang};
+ 
+-pub const TRINITYXSX_VERSION: &str = "v0.2.4";
++pub const TRINITYXSX_VERSION: &str = "v0.2.5";
+ 
+ const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
+ const MAX_STORED_PATH_LEN: usize = 1024;
 @@ -1250,11 +1250,9 @@ pub fn runtime_profile_file() -> PathBuf {
      launcher::data_root().join("trinityxsx-library.profile")
  }
