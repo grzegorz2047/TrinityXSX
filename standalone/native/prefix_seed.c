@@ -27,9 +27,9 @@ static int joined(char *output, size_t size, const char *directory, const char *
     return -1;
 }
 
-static int copy_file(int input, const char *destination)
+static int copy_file_direct(int input, const char *destination, int extra_flags)
 {
-    int output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK, 0644);
+    int output = open(destination, O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | extra_flags, 0666);
     if (output < 0) return -1;
     struct stat info;
     int failed = fstat(output, &info) != 0 || !S_ISREG(info.st_mode);
@@ -57,6 +57,35 @@ static int copy_file(int input, const char *destination)
     if (close(output) != 0) return -1;
     errno = error;
     return failed ? -1 : 0;
+}
+
+static int copy_file(int input, const char *destination)
+{
+    /* Write to a sibling .tmp file and atomically rename into place.
+     * On PS5 (sandbox UID 1), O_TRUNC on an existing UID 0 file fails with EPERM,
+     * whereas creating a new temp file and renaming over it succeeds in 0777 dirs
+     * and prevents partial writes on power loss. */
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", destination);
+    if (n > 0 && (size_t)n < sizeof(tmp)) {
+        (void)unlink(tmp);
+        if (copy_file_direct(input, tmp, O_EXCL) == 0) {
+            if (rename(tmp, destination) == 0) return 0;
+            /* If rename over UID 0 target fails, unlink target and retry once. */
+            if (unlink(destination) == 0 && rename(tmp, destination) == 0) return 0;
+            int err = errno;
+            (void)unlink(tmp);
+            errno = err;
+            return -1;
+        }
+        int err = errno;
+        (void)unlink(tmp);
+        if (lseek(input, 0, SEEK_SET) != 0) {
+            errno = err;
+            return -1;
+        }
+    }
+    return copy_file_direct(input, destination, O_TRUNC);
 }
 
 static int copy_tree(const char *source, const char *destination)
