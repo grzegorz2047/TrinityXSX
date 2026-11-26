@@ -43,9 +43,9 @@ ct = cmake.read_text(encoding="utf-8")
 ct = ct.replace("src/cli/main.cpp", "src/cli/trinity_inno_api.cpp")
 old_target = "add_executable(innoextract ${INNOEXTRACT_SOURCES})\ntarget_link_libraries(innoextract ${LIBRARIES})"
 new_target = (
-    "add_library(trinity_innoextract SHARED ${INNOEXTRACT_SOURCES})\n"
-    "set_target_properties(trinity_innoextract PROPERTIES PREFIX \"\" OUTPUT_NAME \"trinity_innoextract\")\n"
-    "target_link_libraries(trinity_innoextract ${LIBRARIES} -static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)"
+    "add_library(innoextract SHARED ${INNOEXTRACT_SOURCES})\n"
+    "set_target_properties(innoextract PROPERTIES PREFIX \"\" OUTPUT_NAME \"trinity_innoextract\")\n"
+    "target_link_libraries(innoextract ${LIBRARIES} -static -static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic)"
 )
 assert old_target in ct, "innoextract CMake target not found"
 ct = ct.replace(old_target, new_target, 1)
@@ -55,6 +55,7 @@ PY
 
 cmake -S "$src" -B "$build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
   -DUSE_STATIC_LIBS=ON \
   -DLZMA_USE_STATIC_LIBS=ON \
   -DBoost_USE_STATIC_LIBS=ON \
@@ -63,10 +64,16 @@ cmake -S "$src" -B "$build" -G Ninja \
   -DBUILD_TESTS=OFF \
   -DSET_WARNING_FLAGS=OFF
 
-cmake --build "$build" --target trinity_innoextract -j "$(nproc)"
+cmake --build "$build" --target innoextract -j "$(nproc)"
 
 mkdir -p "$out"
 cp "$build/trinity_innoextract.dll" "$out/"
 cp "$src/LICENSE" "$out/innoextract-zlib.txt"
 strip --strip-unneeded "$out/trinity_innoextract.dll" || true
 ls -lh "$out/"
+objdump -p "$out/trinity_innoextract.dll" | grep "DLL Name:" || true
+# Fail fast if any non-Windows MSYS2 DLL leaked into imports
+if objdump -p "$out/trinity_innoextract.dll" | grep -Ei "DLL Name:.*(libgcc|libstdc\+\+|libwinpthread|libboost|liblzma|libbz2|libz|libiconv)"; then
+  echo "ERROR: trinity_innoextract.dll has non-static MSYS2 DLL dependency!" >&2
+  exit 1
+fi
