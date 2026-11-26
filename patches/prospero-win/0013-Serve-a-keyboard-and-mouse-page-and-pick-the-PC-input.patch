@@ -1,0 +1,2027 @@
+From 27b9052faa100a562a1c4a0bc96b8c5756cab731 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 21:04:14 +0100
+Subject: [PATCH] Serve a keyboard and mouse page, and pick the PC input in the
+ profile
+
+[input] remote = off | sender | browser chooses how a PC's keyboard and
+mouse reach the game (off by default: no port is open). The title reads
+the profile again every two seconds, so TrinityXSX's settings switch it
+while it runs, and writes <data>/netinput.txt (the mode, and the page's
+address and PIN) for the library to show.
+
+browser: src/pw_webinput.c serves the capture page (src/pw_webinput_page.c,
+generated from TrinityXSX's tools/netinput-sender/src/web/index.html) and
+a WebSocket on TCP 8361 to private addresses only. The WebSocket wants
+the PIN the in-game menu shows (fresh each start), an IPv4 Host and the
+page's own Origin; wrong PINs lock it out for a while. Its text commands
+(on, off, h, k, b, m, w) become input through pw_netinput_set, which
+folds and diffs as the other sources do; a stop, a closed page or a
+silent capturing one releases everything. native/pw_webinput_ps5.c is the
+non-blocking libSceNet side, and finds the console's address with a
+connected UDP socket (no libSceNetCtl).
+
+sender: the TXIN datagrams of patch 0012, now opened and closed with the
+mode (pw_netinput_ps5_close releases what was held).
+---
+ Makefile                     |   3 +-
+ PUBLICATION_ALLOWLIST.txt    |   6 +
+ native/pw_netinput_ps5.c     |  15 ++
+ native/pw_netinput_ps5.h     |   3 +
+ native/pw_webinput_ps5.c     | 139 ++++++++++
+ native/pw_webinput_ps5.h     |  21 ++
+ native/wine64_main.c         | 140 +++++++++-
+ src/pw_game_profile.c        |  11 +-
+ src/pw_game_profile.h        |   9 +
+ src/pw_netinput.c            |  14 +
+ src/pw_netinput.h            |   5 +
+ src/pw_webinput.c            | 499 +++++++++++++++++++++++++++++++++++
+ src/pw_webinput.h            | 102 +++++++
+ src/pw_webinput_page.c       | 400 ++++++++++++++++++++++++++++
+ tests/test_pw_game_profile.c |   9 +
+ tests/test_pw_netinput_ps5.c |  12 +-
+ tests/test_pw_webinput.c     | 300 +++++++++++++++++++++
+ tools/build_native.sh        |   4 +-
+ 18 files changed, 1675 insertions(+), 17 deletions(-)
+ create mode 100644 native/pw_webinput_ps5.c
+ create mode 100644 native/pw_webinput_ps5.h
+ create mode 100644 src/pw_webinput.c
+ create mode 100644 src/pw_webinput.h
+ create mode 100644 src/pw_webinput_page.c
+ create mode 100644 tests/test_pw_webinput.c
+
+diff --git a/Makefile b/Makefile
+index 1c24c5c..ae686e9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -74,6 +74,7 @@ $(eval $(call test_rule,test_pw_spinner,tests/test_pw_spinner.c src/pw_spinner.c
+ $(eval $(call test_rule,test_pw_hid_ps5,tests/test_pw_hid_ps5.c native/pw_hid_ps5.c src/pw_hid.c,-DPW_HID_PS5_HOST_TEST))
+ $(eval $(call test_rule,test_pw_netinput,tests/test_pw_netinput.c src/pw_netinput.c,))
+ $(eval $(call test_rule,test_pw_netinput_ps5,tests/test_pw_netinput_ps5.c native/pw_netinput_ps5.c src/pw_netinput.c,-DPW_NETINPUT_PS5_HOST_TEST))
++$(eval $(call test_rule,test_pw_webinput,tests/test_pw_webinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_netinput.c,))
+ $(eval $(call test_rule,test_pw_wine_display,tests/test_pw_wine_display.c native/pw_wine_display.c src/pw_game_profile.c src/pw_app_profile.c src/pw_script_input.c,-pthread))
+ $(eval $(call test_rule,test_pw_wine_dl,tests/test_pw_wine_dl.c wine/ps5/pw_wine_dl.c wine/ps5/pw_wine_prx.c,-pthread))
+ # The modules and the test are linked with --wrap for every __wrap_ name
+@@ -149,7 +150,7 @@ $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
+ 
+ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog test_pw_present \
+ 	test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc test_vk_replay test_vk_wire test_vk_codec \
+-	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_netinput test_pw_netinput_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
++	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_netinput test_pw_netinput_ps5 test_pw_webinput test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
+ 	test_pw_wine_threads test_pw_wine_compat test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_pw_game_menu test_pw_osk test_pw_osk_ps5 \
+ 	test_pw_guest_fp test_pw_vm test_pw_x86_block test_pw_x86_flat test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top \
+ 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index a7f9b1d..0459e86 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -319,6 +319,12 @@ tests/test_pw_netinput.c
+ native/pw_netinput_ps5.c
+ native/pw_netinput_ps5.h
+ tests/test_pw_netinput_ps5.c
++src/pw_webinput.c
++src/pw_webinput.h
++src/pw_webinput_page.c
++tests/test_pw_webinput.c
++native/pw_webinput_ps5.c
++native/pw_webinput_ps5.h
+ native/pw_osk_ps5.c
+ native/pw_osk_ps5.h
+ tests/test_pw_osk.c
+diff --git a/native/pw_netinput_ps5.c b/native/pw_netinput_ps5.c
+index 37d1f89..7a7c452 100644
+--- a/native/pw_netinput_ps5.c
++++ b/native/pw_netinput_ps5.c
+@@ -70,6 +70,18 @@ void pw_netinput_ps5_poll(PwNetInputPs5 *net, uint64_t now_ns, PwNetInputPoll *p
+     }
+ }
+ 
++void pw_netinput_ps5_close(PwNetInputPs5 *net, PwNetInputPoll *poll)
++{
++    if (!net) return;
++    if (poll) {
++        memset(poll, 0, sizeof(*poll));
++        pw_netinput_release(&net->input, poll);
++    }
++    if (net->socket >= 0 && net->ops.close) net->ops.close(net->socket);
++    net->socket = -1;
++    logf_(net, "closed");
++}
++
+ #ifndef PW_NETINPUT_PS5_HOST_TEST
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+@@ -103,6 +115,8 @@ static int system_open(uint16_t port)
+     return s;
+ }
+ 
++static void system_close(int s) { (void)sceNetSocketClose(s); }
++
+ static long system_receive(int s, void *buffer, size_t length, uint32_t *address, uint16_t *port)
+ {
+     struct sockaddr_in from;
+@@ -126,6 +140,7 @@ const PwNetInputPs5Ops *pw_netinput_ps5_system_ops(void (*log)(const char *line)
+     ops.open = system_open;
+     ops.receive = system_receive;
+     ops.log = log;
++    ops.close = system_close;
+     return &ops;
+ }
+ #endif
+diff --git a/native/pw_netinput_ps5.h b/native/pw_netinput_ps5.h
+index 586e2d4..6a55a9d 100644
+--- a/native/pw_netinput_ps5.h
++++ b/native/pw_netinput_ps5.h
+@@ -17,6 +17,7 @@ typedef struct PwNetInputPs5Ops {
+     /* One datagram: its length and IPv4 source (host order), or < 0 when none is waiting. */
+     long (*receive)(int socket, void *buffer, size_t length, uint32_t *address, uint16_t *port);
+     void (*log)(const char *line);
++    void (*close)(int socket);              /* may be NULL in tests */
+ } PwNetInputPs5Ops;
+ 
+ typedef struct PwNetInputPs5 {
+@@ -31,6 +32,8 @@ int pw_netinput_ps5_open(PwNetInputPs5 *net, const PwNetInputPs5Ops *ops, uint16
+ /* Reads what waits, then times out a silent sender; logs a new sender, a
+  * timeout, and the first refused datagram of each kind of change. */
+ void pw_netinput_ps5_poll(PwNetInputPs5 *net, uint64_t now_ns, PwNetInputPoll *poll);
++/* Stops listening; what the sender held is released into poll. */
++void pw_netinput_ps5_close(PwNetInputPs5 *net, PwNetInputPoll *poll);
+ 
+ /* libSceNet, on the console. */
+ const PwNetInputPs5Ops *pw_netinput_ps5_system_ops(void (*log)(const char *line));
+diff --git a/native/pw_webinput_ps5.c b/native/pw_webinput_ps5.c
+new file mode 100644
+index 0000000..bf27e94
+--- /dev/null
++++ b/native/pw_webinput_ps5.c
+@@ -0,0 +1,139 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_webinput_ps5.h"
++#include <stdio.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++
++void pw_webinput_ps5_pin(uint64_t seed, char out[8])
++{
++    uint64_t x = seed ^ 0x2545f4914f6cdd1dull;
++    /* splitmix64 */
++    x += 0x9e3779b97f4a7c15ull;
++    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
++    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
++    x ^= x >> 31;
++    snprintf(out, 8, "%04u", (unsigned)(x % 10000u));
++}
++
++int sceNetSocket(const char *name, int domain, int type, int protocol);
++int sceNetSocketClose(int socket);
++int sceNetSetsockopt(int socket, int level, int option, const void *value, socklen_t length);
++int sceNetBind(int socket, const struct sockaddr *address, socklen_t length);
++int sceNetListen(int socket, int backlog);
++int sceNetAccept(int socket, struct sockaddr *address, socklen_t *length);
++int sceNetRecv(int socket, void *buffer, size_t length, int flags);
++int sceNetSend(int socket, const void *buffer, size_t length, int flags);
++int *sceNetErrnoLoc(void);
++int sceNetConnect(int socket, const struct sockaddr *address, socklen_t length);
++int sceNetGetsockname(int socket, struct sockaddr *address, socklen_t *length);
++
++enum {
++    PW_SCE_SO_NBIO = 0x1200,          /* as ps5log_ps5_net.c */
++    PW_SCE_EAGAIN = 35,               /* FreeBSD's EAGAIN / EWOULDBLOCK */
++};
++
++static int nonblocking(int s)
++{
++    int enabled = 1;
++    return sceNetSetsockopt(s, SOL_SOCKET, PW_SCE_SO_NBIO, &enabled, sizeof(enabled));
++}
++
++static int would_block(void)
++{
++    int *e = sceNetErrnoLoc();
++    return e && *e == PW_SCE_EAGAIN;
++}
++
++int pw_webinput_ps5_listen(uint16_t port)
++{
++    struct sockaddr_in address;
++    int reuse = 1;
++    int s = sceNetSocket("pw-webinput", AF_INET, SOCK_STREAM, 0);
++
++    if (s < 0) return s;
++    memset(&address, 0, sizeof(address));
++    address.sin_len = sizeof(address);
++    address.sin_family = AF_INET;
++    address.sin_port = (in_port_t)((port >> 8) | (port << 8 & 0xff00));   /* network order */
++    address.sin_addr.s_addr = 0;                                          /* INADDR_ANY */
++    (void)sceNetSetsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
++    if (nonblocking(s) < 0 || sceNetBind(s, (const struct sockaddr *)&address, sizeof(address)) < 0 ||
++        sceNetListen(s, 8) < 0) {
++        (void)sceNetSocketClose(s);
++        return -1;
++    }
++    return s;
++}
++
++static int system_accept(int listener, uint32_t *address)
++{
++    struct sockaddr_in from;
++    socklen_t length = sizeof(from);
++    int s;
++
++    memset(&from, 0, sizeof(from));
++    s = sceNetAccept(listener, (struct sockaddr *)&from, &length);
++    if (s < 0) return -1;
++    {
++        const uint8_t *a = (const uint8_t *)&from.sin_addr.s_addr;
++        *address = (uint32_t)a[0] << 24 | (uint32_t)a[1] << 16 | (uint32_t)a[2] << 8 | a[3];
++    }
++    if (nonblocking(s) < 0) {
++        (void)sceNetSocketClose(s);
++        return -1;
++    }
++    return s;
++}
++
++static long system_receive(int s, void *buffer, size_t length)
++{
++    int got = sceNetRecv(s, buffer, length, 0);
++    if (got > 0) return got;
++    if (got < 0 && would_block()) return -1;
++    return 0;
++}
++
++static long system_send(int s, const void *buffer, size_t length)
++{
++    int sent = sceNetSend(s, buffer, length, 0);
++    if (sent >= 0) return sent;
++    return would_block() ? 0 : -1;
++}
++
++static void system_close(int s) { (void)sceNetSocketClose(s); }
++
++const PwWebInputOps *pw_webinput_ps5_system_ops(void (*log)(const char *line))
++{
++    static PwWebInputOps ops;
++    ops.accept = system_accept;
++    ops.receive = system_receive;
++    ops.send = system_send;
++    ops.close = system_close;
++    ops.log = log;
++    return &ops;
++}
++
++void pw_webinput_ps5_address(char out[16])
++{
++    /* The address a datagram to the internet would leave from: a UDP socket
++     * "connected" there sends nothing, and getsockname names the interface.
++     * Only libSceNet, which the title already uses. */
++    struct sockaddr_in to, local;
++    socklen_t length = sizeof(local);
++    int s = sceNetSocket("pw-webinput-ip", AF_INET, SOCK_DGRAM, 0);
++    const uint8_t *a = (const uint8_t *)&local.sin_addr.s_addr;
++
++    out[0] = 0;
++    if (s < 0) return;
++    memset(&to, 0, sizeof(to));
++    memset(&local, 0, sizeof(local));
++    to.sin_len = sizeof(to);
++    to.sin_family = AF_INET;
++    to.sin_port = (in_port_t)(53u << 8);                     /* 53, network order */
++    to.sin_addr.s_addr = (in_addr_t)(1u | 1u << 8 | 1u << 16 | 1u << 24);   /* 1.1.1.1 */
++    if (sceNetConnect(s, (const struct sockaddr *)&to, sizeof(to)) >= 0 &&
++        sceNetGetsockname(s, (struct sockaddr *)&local, &length) >= 0 && a[0])
++        snprintf(out, 16, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
++    (void)sceNetSocketClose(s);
++}
+diff --git a/native/pw_webinput_ps5.h b/native/pw_webinput_ps5.h
+new file mode 100644
+index 0000000..4a1be31
+--- /dev/null
++++ b/native/pw_webinput_ps5.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_WEBINPUT_PS5_H
++#define PW_WEBINPUT_PS5_H
++/*
++ * The web page keyboard and mouse (src/pw_webinput.h) on the PS5: a
++ * non-blocking TCP listener through libSceNet, the console's LAN address
++ * for the menu, and a fresh PIN each time it opens.
++ */
++#include "../src/pw_webinput.h"
++#include <stdint.h>
++
++/* A bound, listening, non-blocking socket on every address, or < 0. */
++int pw_webinput_ps5_listen(uint16_t port);
++/* libSceNet's accept, recv, send and close. */
++const PwWebInputOps *pw_webinput_ps5_system_ops(void (*log)(const char *line));
++/* The console's IPv4 address as text, or "" when it has none. */
++void pw_webinput_ps5_address(char out[16]);
++/* Four digits mixed from a seed (the clock): enough to keep
++ * another player on the LAN from typing into the game by accident. */
++void pw_webinput_ps5_pin(uint64_t seed, char out[8]);
++#endif
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index f21ea81..d849862 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -41,6 +41,7 @@
+ #include "pw_pad_ps5.h"
+ #include "pw_hid_ps5.h"
+ #include "pw_netinput_ps5.h"
++#include "pw_webinput_ps5.h"
+ #include "pw_osk_ps5.h"
+ #include "pw_videoout_ps5.h"
+ #include "pw_wine_library.h"
+@@ -1080,6 +1081,112 @@ static void post_netinput(int (*post_input)(const PwWineInput *), const PwNetInp
+     }
+ }
+ 
++/* A PC's keyboard and mouse ([input] remote in the game's profile): the
++ * txin-sender datagrams, the title's own web page, or neither. The profile
++ * is read again every few seconds, so TrinityXSX's settings switch it while
++ * the title runs. What the mode is, and the page's address and PIN, go to
++ * <data>/netinput.txt for the library to show and to the in-game menu. */
++static struct {
++    int mode;                   /* PW_GAME_REMOTE_* in use */
++    int status;                 /* the source's open result */
++    char profile[PW_APP_ID_CAPACITY];
++    PwNetInputPs5 udp;
++    PwWebInput web;
++    PwNetInputPoll poll;
++    char address[16], pin[8];
++} remote_input = { .mode = PW_GAME_REMOTE_OFF, .status = PW_ERR_STATE };
++
++enum { REMOTE_PROFILE_MAX = PW_APP_PROFILE_MAX_BYTES };
++
++static void webinput_log(const char *line)
++{
++    PS5LOG_LOG("PW_WINE64 webinput %s", line);
++}
++
++static void remote_note(void)
++{
++    char path[256], text[160];
++    int fd, n;
++
++    snprintf(path, sizeof(path), "%s/netinput.txt", PW_WINE64_ROOT_DATA);
++    if (remote_input.mode == PW_GAME_REMOTE_BROWSER && remote_input.status == PW_OK)
++        n = snprintf(text, sizeof(text), "mode=browser\nurl=http://%s:%u\npin=%s\n",
++                     remote_input.address[0] ? remote_input.address : "PS5", (unsigned)PW_WEBINPUT_PORT,
++                     remote_input.pin);
++    else if (remote_input.mode == PW_GAME_REMOTE_SENDER && remote_input.status == PW_OK)
++        n = snprintf(text, sizeof(text), "mode=sender\naddress=%s\nport=%u\n",
++                     remote_input.address[0] ? remote_input.address : "PS5", (unsigned)PW_NETINPUT_PORT);
++    else
++        n = snprintf(text, sizeof(text), "mode=%s\n", remote_input.mode == PW_GAME_REMOTE_OFF ? "off" : "failed");
++    fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++    if (fd < 0) return;
++    if (n > 0 && write(fd, text, (size_t)n) < 0) {}
++    close(fd);
++}
++
++/* The menu's line for it, or "" when it is off. */
++static void remote_menu_line(char *out, size_t capacity)
++{
++    out[0] = 0;
++    if (remote_input.status != PW_OK) return;
++    if (remote_input.mode == PW_GAME_REMOTE_BROWSER)
++        snprintf(out, capacity, "PC: HTTP://%s:%u  PIN %s", remote_input.address[0] ? remote_input.address : "PS5",
++                 (unsigned)PW_WEBINPUT_PORT, remote_input.pin);
++    else if (remote_input.mode == PW_GAME_REMOTE_SENDER)
++        snprintf(out, capacity, "PC: TXIN-SENDER %s", remote_input.address[0] ? remote_input.address : "");
++}
++
++/* Closes the source in use and opens mode's; what was held is posted as released. */
++static void remote_switch(int mode, uint64_t now, int (*post_input)(const PwWineInput *), uint64_t *posted,
++                          uint64_t *refused)
++{
++    /* the same mode stays; one that failed to open (a port in use) is tried again */
++    if (mode == remote_input.mode && remote_input.status == PW_OK) return;
++    memset(&remote_input.poll, 0, sizeof(remote_input.poll));
++    if (remote_input.status == PW_OK && remote_input.mode == PW_GAME_REMOTE_SENDER)
++        pw_netinput_ps5_close(&remote_input.udp, &remote_input.poll);
++    if (remote_input.status == PW_OK && remote_input.mode == PW_GAME_REMOTE_BROWSER)
++        pw_webinput_close(&remote_input.web, &remote_input.poll);
++    if (post_input) post_netinput(post_input, &remote_input.poll, 0, posted, refused);
++    remote_input.mode = mode;
++    remote_input.status = PW_OK;
++    pw_webinput_ps5_address(remote_input.address);
++    if (mode == PW_GAME_REMOTE_SENDER) {
++        remote_input.status = pw_netinput_ps5_open(&remote_input.udp, pw_netinput_ps5_system_ops(netinput_log),
++                                                   PW_NETINPUT_PORT);
++    } else if (mode == PW_GAME_REMOTE_BROWSER) {
++        int listener = pw_webinput_ps5_listen(PW_WEBINPUT_PORT);
++        pw_webinput_ps5_pin(now ^ (uint64_t)listener << 32, remote_input.pin);
++        remote_input.status = listener < 0 ? PW_ERR_NOT_FOUND :
++            pw_webinput_open(&remote_input.web, pw_webinput_ps5_system_ops(webinput_log), listener, remote_input.pin);
++        PS5LOG_LOG("PW_WINE64 webinput listen tcp port=%u socket=%d status=%s address=%s",
++                   (unsigned)PW_WEBINPUT_PORT, listener, pw_result_name(remote_input.status),
++                   remote_input.address[0] ? remote_input.address : "?");
++    }
++    PS5LOG_LOG("PW_WINE64 remote input mode=%s status=%s", mode == PW_GAME_REMOTE_SENDER ? "sender" :
++               mode == PW_GAME_REMOTE_BROWSER ? "browser" : "off", pw_result_name(remote_input.status));
++    remote_note();
++}
++
++/* [input] remote as the profile says now, or -1 when it cannot be read. */
++static int remote_profile_mode(void)
++{
++    static uint8_t text[REMOTE_PROFILE_MAX];
++    static PwGameProfile parsed;
++    char path[256];
++    ssize_t n;
++    int fd;
++
++    if (!remote_input.profile[0]) return -1;
++    snprintf(path, sizeof(path), "%s/profiles/%s.profile", PW_WINE64_ROOT_DATA, remote_input.profile);
++    fd = open(path, O_RDONLY);
++    if (fd < 0) return -1;
++    n = read(fd, text, sizeof(text));
++    close(fd);
++    if (n <= 0 || pw_game_profile_parse(text, (size_t)n, &parsed) != PW_OK) return -1;
++    return (int)parsed.input.remote;
++}
++
+ /* The process's CPU time, user and system, in milliseconds: a stall that
+  * waits shows no growth, one that spins grows by a core a second. */
+ static unsigned long long cpu_ms(void)
+@@ -1335,10 +1442,6 @@ int main(int argc, char **argv)
+     static PwVideoOutPs5 video;
+     static PwPadPs5 pad;
+     static PwHidPs5 hid;
+-    /* A PC's keyboard and mouse over the LAN (tools/netinput-sender). */
+-    static PwNetInputPs5 netinput;
+-    static PwNetInputPoll netinput_poll;
+-    int netinput_status = PW_ERR_STATE;
+     static PwGameInput game_input;
+     /* [input] player2: a second signed-in user's DualSense as more keys. */
+     static PwPadPs5 pad2;
+@@ -1628,8 +1731,9 @@ int main(int argc, char **argv)
+              * dialog over the game and the title types what comes back. */
+             osk_status = pw_osk_ps5_open(&osk_ps5, pw_osk_ps5_system_ops(osk_log), user);
+             game_menu.keyboard = osk_status == PW_OK;
+-            netinput_status = pw_netinput_ps5_open(&netinput, pw_netinput_ps5_system_ops(netinput_log),
+-                                                   PW_NETINPUT_PORT);
++            /* A PC's keyboard and mouse over the LAN, as the profile says (remote_input). */
++            if (game) snprintf(remote_input.profile, sizeof(remote_input.profile), "%s", game->app.id);
++            remote_switch(game ? (int)game->input.remote : PW_GAME_REMOTE_OFF, now_ns(), NULL, NULL, NULL);
+         }
+         {
+             uint8_t *storage = mmap(NULL, 2u * PW_WINE64_MAX_FRAME, PROT_READ | PROT_WRITE,
+@@ -1646,11 +1750,11 @@ int main(int argc, char **argv)
+             if (set_release) set_release(wine_release_display, NULL);
+         }
+         PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d video=%s "
+-                   "pad=%s hid=%s osk=%s netinput=%s", set_present != NULL, frame_shown != NULL,
++                   "pad=%s hid=%s osk=%s remote=%s", set_present != NULL, frame_shown != NULL,
+                    post_input != NULL, set_pad != NULL,
+                    pw_result_name(video_status),
+                    pw_result_name(pad_status), pw_result_name(hid_status),
+-                   pw_result_name(osk_status), pw_result_name(netinput_status));
++                   pw_result_name(osk_status), pw_result_name(remote_input.status));
+         if (player2)
+             PS5LOG_LOG("PW_WINE64 pad2 status=%s user=%d", pw_result_name(pad2_status),
+                        (int)pad2.user_id);
+@@ -1733,10 +1837,21 @@ int main(int argc, char **argv)
+                 else refused++;
+             }
+         }
+-        /* The PC's keyboard and mouse, as the USB ones. */
+-        if (post_input && netinput_status == PW_OK) {
+-            pw_netinput_ps5_poll(&netinput, now, &netinput_poll);
+-            post_netinput(post_input, &netinput_poll, osk_ps5.showing, &posted, &refused);
++        /* The PC's keyboard and mouse, as the USB ones; the profile's mode is
++         * looked at again every two seconds. */
++        if (post_input) {
++            if (tick % (2 * PW_WINE64_TICKS_PER_S) == 0) {
++                int mode = remote_profile_mode();
++                if (mode >= 0) remote_switch(mode, now, post_input, &posted, &refused);
++            }
++            if (remote_input.status == PW_OK && remote_input.mode != PW_GAME_REMOTE_OFF) {
++                memset(&remote_input.poll, 0, sizeof(remote_input.poll));
++                if (remote_input.mode == PW_GAME_REMOTE_SENDER)
++                    pw_netinput_ps5_poll(&remote_input.udp, now, &remote_input.poll);
++                else
++                    pw_webinput_poll(&remote_input.web, now, &remote_input.poll);
++                post_netinput(post_input, &remote_input.poll, osk_ps5.showing, &posted, &refused);
++            }
+         }
+ #if PW_WINE64_SCRIPT
+         while (post_input && script_key_next < script_key_count &&
+@@ -1815,6 +1930,7 @@ int main(int argc, char **argv)
+                     /* Refresh compact FPS/VRAM telemetry snapshot when opening menu. */
+                     menu_telemetry[0] = '\0';
+                     menu_notice[0] = '\0';
++                    remote_menu_line(menu_notice, sizeof(menu_notice));
+                     char hud_path[256];
+                     snprintf(hud_path, sizeof(hud_path), "%s/hud_stats.txt", PW_WINE64_ROOT_DATA);
+                     int hfd = open(hud_path, O_RDONLY);
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 7769136..825bdf2 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -3,7 +3,7 @@
+ #include <string.h>
+ 
+ enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3,
+-       SET_PLAYER2 = 1u << 4 };
++       SET_PLAYER2 = 1u << 4, SET_REMOTE = 1u << 5 };
+ 
+ /* DualSense buttons in PW_GAME_BUTTON order, with their scePadRead bits. */
+ static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_COUNT] = {
+@@ -127,6 +127,15 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
+         input->set |= SET_PLAYER2;
+         return PW_OK;
+     }
++    if (is(key, key_length, "remote")) {
++        if (!allow_preset || (input->set & SET_REMOTE)) return PW_ERR_MALFORMED;
++        if (is(v, n, "off")) input->remote = PW_GAME_REMOTE_OFF;
++        else if (is(v, n, "sender")) input->remote = PW_GAME_REMOTE_SENDER;
++        else if (is(v, n, "browser")) input->remote = PW_GAME_REMOTE_BROWSER;
++        else return PW_ERR_UNSUPPORTED;
++        input->set |= SET_REMOTE;
++        return PW_OK;
++    }
+     if (is(key, key_length, "mode")) {
+         if (input->set & SET_MODE) return PW_ERR_MALFORMED;
+         if (is(v, n, "keyboard")) input->mode = PW_GAME_INPUT_KEYBOARD;
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index 19eaa22..2c02325 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -36,6 +36,13 @@
+  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
+  *   player2 = pinball-p2   ; a keyboard preset for a second DualSense, the pad
+  *                          ; of another signed-in user (local multiplayer)
++ *   remote = off           ; a PC's keyboard and mouse over the LAN, profile
++ *                          ; only: off; sender (TrinityXSX's txin-sender,
++ *                          ; UDP 9396, src/pw_netinput.h); or browser (a page
++ *                          ; the title serves on TCP 8361 behind a PIN its
++ *                          ; menu shows, src/pw_webinput.h). Default off.
++ *                          ; The title reads it again while it runs, so a
++ *                          ; change applies without a restart
+  *
+  *   [debug]
+  *   winedebug = +seh,+virtual   ; Wine's debug channels for this game (default:
+@@ -91,6 +98,7 @@ typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
+                              PW_GAME_SCALING_STRETCH } PwGameScaling;
+ typedef enum PwGameView { PW_GAME_VIEW_WINDOW = 0, PW_GAME_VIEW_DESKTOP } PwGameView;
+ typedef enum PwGameInputMode { PW_GAME_INPUT_KEYBOARD = 0, PW_GAME_INPUT_XINPUT } PwGameInputMode;
++typedef enum PwGameRemote { PW_GAME_REMOTE_OFF = 0, PW_GAME_REMOTE_SENDER, PW_GAME_REMOTE_BROWSER } PwGameRemote;
+ typedef enum PwGameStick { PW_GAME_STICK_NONE = 0, PW_GAME_STICK_LEFT, PW_GAME_STICK_RIGHT } PwGameStick;
+ typedef enum PwGameBindKind { PW_GAME_BIND_UNSET = 0, PW_GAME_BIND_NONE, PW_GAME_BIND_KEY,
+                               PW_GAME_BIND_MOUSE } PwGameBindKind;
+@@ -108,6 +116,7 @@ typedef struct PwGameInput {
+     PwGameBinding bindings[PW_GAME_BUTTON_COUNT];   /* in PW_GAME_BUTTON order */
+     char preset[PW_APP_ID_CAPACITY];
+     char player2[PW_APP_ID_CAPACITY];   /* the second pad's preset, profile only */
++    PwGameRemote remote;                /* a PC's keyboard and mouse, profile only */
+     uint32_t set;       /* which of mode/mouse/mouse_speed a file set (overlay) */
+ } PwGameInput;
+ 
+diff --git a/src/pw_netinput.c b/src/pw_netinput.c
+index e614e04..d24b745 100644
+--- a/src/pw_netinput.c
++++ b/src/pw_netinput.c
+@@ -166,6 +166,20 @@ int pw_netinput_receive(PwNetInput *input, const uint8_t *bytes, size_t length,
+     return PW_OK;
+ }
+ 
++void pw_netinput_set(PwNetInput *input, const uint8_t raw_keys[32], uint8_t buttons, PwNetInputPoll *poll)
++{
++    uint8_t keys[32];
++
++    if (!input || !raw_keys || !poll) return;
++    fold(raw_keys, keys);
++    change(input, keys, buttons & 7u, poll);
++}
++
++void pw_netinput_release(PwNetInput *input, PwNetInputPoll *poll)
++{
++    if (input && poll) release_all(input, poll);
++}
++
+ void pw_netinput_tick(PwNetInput *input, uint64_t now_ns, PwNetInputPoll *poll)
+ {
+     if (!input || !poll || !input->linked || input->released) return;
+diff --git a/src/pw_netinput.h b/src/pw_netinput.h
+index 84fd047..d56b222 100644
+--- a/src/pw_netinput.h
++++ b/src/pw_netinput.h
+@@ -92,4 +92,9 @@ int pw_netinput_receive(PwNetInput *input, const uint8_t *bytes, size_t length,
+ /* Once per poll: a sender silent for PW_NETINPUT_TIMEOUT_NS has all it
+  * held released. */
+ void pw_netinput_tick(PwNetInput *input, uint64_t now_ns, PwNetInputPoll *poll);
++/* Another source's whole state (src/pw_webinput.c): raw held virtual keys
++ * and buttons, folded and compared with what was delivered, releases first. */
++void pw_netinput_set(PwNetInput *input, const uint8_t raw_keys[32], uint8_t buttons, PwNetInputPoll *poll);
++/* Releases whatever is held, as when the source goes away. */
++void pw_netinput_release(PwNetInput *input, PwNetInputPoll *poll);
+ #endif
+diff --git a/src/pw_webinput.c b/src/pw_webinput.c
+new file mode 100644
+index 0000000..8ff9868
+--- /dev/null
++++ b/src/pw_webinput.c
+@@ -0,0 +1,499 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_webinput.h"
++#include "../include/prospero_win.h"
++#include <stdio.h>
++#include <string.h>
++
++static uint32_t rol(uint32_t v, unsigned n) { return v << n | v >> (32 - n); }
++
++void pw_webinput_sha1(const uint8_t *data, size_t length, uint8_t out[20])
++{
++    uint32_t h[5] = { 0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u, 0xc3d2e1f0u };
++    uint64_t bits = (uint64_t)length * 8u;
++    size_t total = (length + 9 + 63) / 64 * 64;
++
++    for (size_t at = 0; at < total; at += 64) {
++        uint32_t w[80], a, b, c, d, e;
++        uint8_t block[64];
++        for (size_t i = 0; i < 64; i++) {
++            size_t k = at + i;
++            block[i] = k < length ? data[k] : k == length ? 0x80 : 0;
++            if (k >= total - 8) block[i] = (uint8_t)(bits >> (8 * (total - 1 - k)));
++        }
++        for (int i = 0; i < 16; i++)
++            w[i] = (uint32_t)block[4 * i] << 24 | (uint32_t)block[4 * i + 1] << 16 |
++                   (uint32_t)block[4 * i + 2] << 8 | block[4 * i + 3];
++        for (int i = 16; i < 80; i++) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++        a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
++        for (int i = 0; i < 80; i++) {
++            uint32_t f, k, t;
++            if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999u; }
++            else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1u; }
++            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdcu; }
++            else { f = b ^ c ^ d; k = 0xca62c1d6u; }
++            t = rol(a, 5) + f + e + k + w[i];
++            e = d; d = c; c = rol(b, 30); b = a; a = t;
++        }
++        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
++    }
++    for (int i = 0; i < 5; i++) {
++        out[4 * i] = (uint8_t)(h[i] >> 24); out[4 * i + 1] = (uint8_t)(h[i] >> 16);
++        out[4 * i + 2] = (uint8_t)(h[i] >> 8); out[4 * i + 3] = (uint8_t)h[i];
++    }
++}
++
++size_t pw_webinput_base64(const uint8_t *data, size_t length, char *out, size_t capacity)
++{
++    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    size_t used = 0;
++
++    if (capacity < (length + 2) / 3 * 4 + 1) return 0;
++    for (size_t i = 0; i < length; i += 3) {
++        uint32_t n = (uint32_t)data[i] << 16 | (i + 1 < length ? (uint32_t)data[i + 1] << 8 : 0) |
++                     (i + 2 < length ? data[i + 2] : 0);
++        out[used++] = alphabet[n >> 18 & 63];
++        out[used++] = alphabet[n >> 12 & 63];
++        out[used++] = i + 1 < length ? alphabet[n >> 6 & 63] : '=';
++        out[used++] = i + 2 < length ? alphabet[n & 63] : '=';
++    }
++    out[used] = 0;
++    return used;
++}
++
++void pw_webinput_accept_key(const char *key, size_t key_length, char out[29])
++{
++    static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
++    uint8_t joined[128], digest[20];
++
++    if (key_length > sizeof(joined) - (sizeof(guid) - 1)) key_length = sizeof(joined) - (sizeof(guid) - 1);
++    memcpy(joined, key, key_length);
++    memcpy(joined + key_length, guid, sizeof(guid) - 1);
++    pw_webinput_sha1(joined, key_length + sizeof(guid) - 1, digest);
++    pw_webinput_base64(digest, sizeof(digest), out, 29);
++}
++
++static void logf_(const PwWebInput *web, const char *line)
++{
++    if (web->ops.log) web->ops.log(line);
++}
++
++static void address_text(uint32_t a, char out[16])
++{
++    snprintf(out, 16, "%u.%u.%u.%u", a >> 24, a >> 16 & 255, a >> 8 & 255, a & 255);
++}
++
++int pw_webinput_open(PwWebInput *web, const PwWebInputOps *ops, int listener, const char *pin)
++{
++    size_t n = pin ? strlen(pin) : 0;
++
++    if (!web || !ops || !ops->accept || !ops->receive || !ops->send || !ops->close || listener < 0 ||
++        n < 4 || n >= sizeof(web->pin))
++        return PW_ERR_PRECONDITION;
++    for (size_t i = 0; i < n; i++)
++        if (pin[i] < '0' || pin[i] > '9') return PW_ERR_PRECONDITION;
++    memset(web, 0, sizeof(*web));
++    web->ops = *ops;
++    web->listener = listener;
++    memcpy(web->pin, pin, n + 1);
++    web->controller = -1;
++    pw_netinput_init(&web->delivered);
++    for (int i = 0; i < PW_WEBINPUT_CLIENTS; i++) web->clients[i].socket = -1;
++    return PW_OK;
++}
++
++/* Nothing held, nothing captured; the game is told what was released. */
++static void release(PwWebInput *web, PwNetInputPoll *poll)
++{
++    web->capturing = 0;
++    memset(web->keys, 0, sizeof(web->keys));
++    web->buttons = 0;
++    pw_netinput_release(&web->delivered, poll);
++}
++
++static void drop(PwWebInput *web, int index, PwNetInputPoll *poll)
++{
++    PwWebInputClient *c = &web->clients[index];
++
++    if (c->socket < 0) return;
++    web->ops.close(c->socket);
++    if (index == web->controller) {
++        web->controller = -1;
++        if (web->capturing) logf_(web, "page gone: capture stopped");
++        release(web, poll);
++    }
++    memset(c, 0, sizeof(*c));
++    c->socket = -1;
++}
++
++/* Queues bytes to send; returns 0 when they do not fit. */
++static int queue(PwWebInputClient *c, const void *bytes, size_t length)
++{
++    if (c->head_sent == c->head_used) c->head_sent = c->head_used = 0;
++    if (length > sizeof(c->head) - c->head_used) return 0;
++    memcpy(c->head + c->head_used, bytes, length);
++    c->head_used += length;
++    return 1;
++}
++
++static void frame(PwWebInputClient *c, uint8_t opcode, const char *payload, size_t length)
++{
++    uint8_t bytes[2 + 125];
++
++    if (length > 125) return;
++    bytes[0] = (uint8_t)(0x80u | opcode);
++    bytes[1] = (uint8_t)length;
++    memcpy(bytes + 2, payload, length);
++    (void)queue(c, bytes, 2 + length);
++}
++
++static void respond(PwWebInputClient *c, const char *status, const char *type, const char *body,
++                    size_t length)
++{
++    char head[sizeof(c->head)];
++    int n = snprintf(head, sizeof(head),
++                     "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\nCache-Control: no-store\r\n"
++                     "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n"
++                     "Connection: close\r\n\r\n", status, type, (unsigned long)length);
++    if (n > 0 && (size_t)n < sizeof(head)) (void)queue(c, head, (size_t)n);
++    c->body = body;
++    c->body_used = length;
++    c->body_sent = 0;
++    c->close_after = 1;
++}
++
++static void plain(PwWebInputClient *c, const char *status)
++{
++    respond(c, status, "text/plain; charset=utf-8", status, strlen(status));
++}
++
++/* A header's value from a request head, or NULL. */
++static const char *header(const char *head, const char *name, size_t *length)
++{
++    size_t n = strlen(name);
++    for (const char *line = strstr(head, "\r\n"); line && line[2]; line = strstr(line + 2, "\r\n")) {
++        const char *p = line + 2, *end = strstr(p, "\r\n");
++        size_t i = 0;
++        if (!end || end == p) return NULL;   /* the blank line ends the head */
++        while (i < n && p + i < end) {
++            char a = p[i], b = name[i];
++            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
++            if (a != b) break;
++            i++;
++        }
++        if (i == n && p[n] == ':') {
++            const char *v = p + n + 1;
++            while (v < end && (*v == ' ' || *v == '\t')) v++;
++            *length = (size_t)(end - v);
++            while (*length && (v[*length - 1] == ' ' || v[*length - 1] == '\t')) (*length)--;
++            return v;
++        }
++    }
++    return NULL;
++}
++
++/* An IPv4 literal, with or without a port: a page reached by name could be
++ * someone else's (DNS rebinding). */
++static int ipv4_host(const char *v, size_t n)
++{
++    int dots = 0, digits = 0, colon = 0;
++    if (!v || !n) return 0;
++    for (size_t i = 0; i < n; i++) {
++        if (v[i] >= '0' && v[i] <= '9') digits++;
++        else if (v[i] == '.' && !colon) { if (!digits) return 0; dots++; digits = 0; }
++        else if (v[i] == ':' && !colon && dots == 3 && digits) { colon = 1; digits = 0; }
++        else return 0;
++    }
++    return dots == 3 && digits;
++}
++
++static int pin_ok(const PwWebInput *web, const char *target)
++{
++    const char *q = strchr(target, '?');
++    size_t n = strlen(web->pin);
++    while (q) {
++        q++;
++        if (!strncmp(q, "pin=", 4)) {
++            const char *v = q + 4;
++            size_t m = strcspn(v, "& ");
++            return m == n && !memcmp(v, web->pin, n);
++        }
++        q = strchr(q, '&');
++    }
++    return 0;
++}
++
++static void handshake(PwWebInput *web, int index, const char *head, const char *target, uint64_t now_ns,
++                      PwNetInputPoll *poll)
++{
++    PwWebInputClient *c = &web->clients[index];
++    size_t host_n = 0, origin_n = 0, key_n = 0, upgrade_n = 0;
++    const char *host = header(head, "host", &host_n), *origin = header(head, "origin", &origin_n);
++    const char *key = header(head, "sec-websocket-key", &key_n), *upgrade = header(head, "upgrade", &upgrade_n);
++    char line[96], from[16], accept[29], reply[256];
++
++    address_text(c->address, from);
++    if (!upgrade || upgrade_n != 9 || strncmp(upgrade, "websocket", 9) || !key || !key_n) {
++        plain(c, "400 Bad Request");
++        return;
++    }
++    if (!ipv4_host(host, host_n) || !origin || origin_n != host_n + 7 || strncmp(origin, "http://", 7) ||
++        memcmp(origin + 7, host, host_n)) {
++        web->refused++;
++        snprintf(line, sizeof(line), "refused %s: not the page's own origin", from);
++        logf_(web, line);
++        plain(c, "403 Forbidden");
++        return;
++    }
++    if (now_ns < web->locked_until_ns) {
++        web->refused++;
++        plain(c, "429 Too Many Requests");
++        return;
++    }
++    if (!pin_ok(web, target)) {
++        web->refused++;
++        if (++web->wrong_pins >= PW_WEBINPUT_PIN_FREE) {
++            unsigned shift = web->wrong_pins - PW_WEBINPUT_PIN_FREE;
++            uint64_t wait = PW_WEBINPUT_LOCKOUT_NS << (shift > 4 ? 4 : shift);
++            if (wait > 600000000000ull) wait = 600000000000ull;
++            web->locked_until_ns = now_ns + wait;
++        }
++        snprintf(line, sizeof(line), "wrong PIN from %s (%u)", from, (unsigned)web->wrong_pins);
++        logf_(web, line);
++        plain(c, "403 Forbidden");
++        return;
++    }
++    web->wrong_pins = 0;
++    pw_webinput_accept_key(key, key_n, accept);
++    snprintf(reply, sizeof(reply),
++             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
++             "Sec-WebSocket-Accept: %s\r\n\r\n", accept);
++    (void)queue(c, reply, strlen(reply));
++    c->websocket = 1;
++    c->close_after = 0;
++    if (web->controller >= 0 && web->controller != index) {
++        logf_(web, "another page took over");
++        drop(web, web->controller, poll);
++    }
++    web->controller = index;
++    web->sockets++;
++    snprintf(reply, sizeof(reply), "target %.*s", (int)(host_n < 64 ? host_n : 64), host);
++    frame(c, 1, reply, strlen(reply));
++    snprintf(line, sizeof(line), "page connected from %s", from);
++    logf_(web, line);
++}
++
++/* A whole request head is in: answer it. */
++static void request(PwWebInput *web, int index, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    PwWebInputClient *c = &web->clients[index];
++    char head[PW_WEBINPUT_HEAD + 1], target[256];
++    size_t n = 0;
++    const char *space;
++
++    memcpy(head, c->in, c->in_used);
++    head[c->in_used] = 0;
++    c->in_used = 0;
++    if (strncmp(head, "GET ", 4)) {
++        plain(c, "405 Method Not Allowed");
++        return;
++    }
++    space = strchr(head + 4, ' ');
++    n = space ? (size_t)(space - (head + 4)) : 0;
++    if (!n || n >= sizeof(target)) {
++        plain(c, "400 Bad Request");
++        return;
++    }
++    memcpy(target, head + 4, n);
++    target[n] = 0;
++    if (!strcmp(target, "/") || !strncmp(target, "/?", 2)) {
++        web->pages++;
++        respond(c, "200 OK", "text/html; charset=utf-8", pw_webinput_page, pw_webinput_page_length);
++    } else if (!strcmp(target, "/ws") || !strncmp(target, "/ws?", 4)) {
++        handshake(web, index, head, target, now_ns, poll);
++    } else {
++        plain(c, "404 Not Found");
++    }
++}
++
++static int head_complete(const uint8_t *bytes, size_t length)
++{
++    for (size_t i = 3; i < length; i++)
++        if (bytes[i - 3] == '\r' && bytes[i - 2] == '\n' && bytes[i - 1] == '\r' && bytes[i] == '\n') return 1;
++    return 0;
++}
++
++static int number(const char **p, long *out)
++{
++    long sign = 1, v = 0;
++    int digits = 0;
++    while (**p == ' ') (*p)++;
++    if (**p == '-') { sign = -1; (*p)++; }
++    while (**p >= '0' && **p <= '9' && digits < 9) { v = v * 10 + (**p - '0'); (*p)++; digits++; }
++    *out = sign * v;
++    return digits > 0;
++}
++
++static long clamp(long v, long limit) { return v > limit ? limit : v < -limit ? -limit : v; }
++
++int pw_webinput_command(PwWebInput *web, const char *text, size_t length, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    char line[PW_WEBINPUT_PAYLOAD + 1];
++    const char *p = line;
++    long a = 0, b = 0;
++    char verb[8] = { 0 };
++    size_t v = 0;
++
++    (void)now_ns;
++    if (!web || !text || !poll || length > PW_WEBINPUT_PAYLOAD) return PW_ERR_PRECONDITION;
++    memcpy(line, text, length);
++    line[length] = 0;
++    while (*p && *p != ' ' && v < sizeof(verb) - 1) verb[v++] = *p++;
++    web->commands++;
++    if (!strcmp(verb, "h") || !strcmp(verb, "target")) return PW_OK;
++    if (!strcmp(verb, "on")) {
++        if (!web->capturing) logf_(web, "capture on");
++        web->capturing = 1;
++        return PW_OK;
++    }
++    if (!strcmp(verb, "off")) {
++        if (web->capturing) logf_(web, "capture off");
++        release(web, poll);
++        return PW_OK;
++    }
++    if (strcmp(verb, "k") && strcmp(verb, "b") && strcmp(verb, "m") && strcmp(verb, "w"))
++        return PW_ERR_UNSUPPORTED;
++    if (!web->capturing) return PW_OK;   /* late input after a stop */
++    if (!number(&p, &a)) return PW_ERR_MALFORMED;
++    if (verb[0] == 'w') {
++        poll->wheel += (int32_t)clamp(a, 100);
++        return PW_OK;
++    }
++    if (!number(&p, &b)) return PW_ERR_MALFORMED;
++    if (verb[0] == 'm') {
++        poll->dx += (int32_t)clamp(a, PW_NETINPUT_MAX_MOTION);
++        poll->dy += (int32_t)clamp(b, PW_NETINPUT_MAX_MOTION);
++        return PW_OK;
++    }
++    if (verb[0] == 'k') {
++        if (a <= 0 || a >= 255) return PW_ERR_MALFORMED;
++        if (b) web->keys[a >> 3] |= (uint8_t)(1u << (a & 7));
++        else web->keys[a >> 3] &= (uint8_t)~(1u << (a & 7));
++    } else {
++        if (a < 0 || a > 2) return PW_ERR_MALFORMED;
++        if (b) web->buttons |= (uint8_t)(1u << a);
++        else web->buttons &= (uint8_t)~(1u << a);
++    }
++    pw_netinput_set(&web->delivered, web->keys, web->buttons, poll);
++    return PW_OK;
++}
++
++/* Reads the WebSocket frames that are complete; 0 when the client must go. */
++static int frames(PwWebInput *web, int index, uint64_t now_ns, PwNetInputPoll *poll, int *budget)
++{
++    PwWebInputClient *c = &web->clients[index];
++
++    while (c->in_used >= 2 && *budget > 0) {
++        uint8_t opcode = c->in[0] & 0x0f, *mask;
++        size_t length = c->in[1] & 0x7f, at = 2;
++        char payload[PW_WEBINPUT_PAYLOAD];
++
++        if (!(c->in[0] & 0x80) || !(c->in[1] & 0x80) || length == 127) return 0;   /* fragment, unmasked, huge */
++        if (length == 126) {
++            if (c->in_used < 4) return 1;
++            length = (size_t)c->in[2] << 8 | c->in[3];
++            at = 4;
++        }
++        if (length > sizeof(payload)) return 0;
++        if (c->in_used < at + 4 + length) return 1;
++        mask = c->in + at;
++        for (size_t i = 0; i < length; i++) payload[i] = (char)(c->in[at + 4 + i] ^ mask[i & 3]);
++        memmove(c->in, c->in + at + 4 + length, c->in_used - (at + 4 + length));
++        c->in_used -= at + 4 + length;
++        if (opcode == 8) return 0;
++        if (opcode == 9) frame(c, 10, payload, length);
++        if (opcode == 1 && index == web->controller) {
++            if (PW_NETINPUT_EVENTS - poll->count < 8) { *budget = 0; return 1; }
++            (void)pw_webinput_command(web, payload, length, now_ns, poll);
++            (*budget)--;
++        }
++    }
++    return 1;
++}
++
++/* Sends what is queued; 0 when the client is done or failed. */
++static int flush(PwWebInput *web, PwWebInputClient *c)
++{
++    while (c->head_sent < c->head_used) {
++        long n = web->ops.send(c->socket, c->head + c->head_sent, c->head_used - c->head_sent);
++        if (n < 0) return 0;
++        if (n == 0) return 1;
++        c->head_sent += (size_t)n;
++    }
++    while (c->body && c->body_sent < c->body_used) {
++        long n = web->ops.send(c->socket, c->body + c->body_sent, c->body_used - c->body_sent);
++        if (n < 0) return 0;
++        if (n == 0) return 1;
++        c->body_sent += (size_t)n;
++    }
++    return !c->close_after;
++}
++
++void pw_webinput_poll(PwWebInput *web, uint64_t now_ns, PwNetInputPoll *poll)
++{
++    int budget = PW_WEBINPUT_FRAMES;
++
++    if (!web || !poll || web->listener < 0) return;
++    for (int accepted = 0; accepted < 8; accepted++) {
++        uint32_t address = 0;
++        int s = web->ops.accept(web->listener, &address), slot = -1;
++        if (s < 0) break;
++        for (int i = 0; i < PW_WEBINPUT_CLIENTS && slot < 0; i++)
++            if (web->clients[i].socket < 0) slot = i;
++        if (slot < 0 || !pw_netinput_private_address(address)) {
++            web->refused++;
++            web->ops.close(s);
++            continue;
++        }
++        memset(&web->clients[slot], 0, sizeof(web->clients[slot]));
++        web->clients[slot].socket = s;
++        web->clients[slot].address = address;
++        web->clients[slot].since_ns = web->clients[slot].last_ns = now_ns;
++    }
++    for (int i = 0; i < PW_WEBINPUT_CLIENTS; i++) {
++        PwWebInputClient *c = &web->clients[i];
++        int keep = 1;
++
++        if (c->socket < 0) continue;
++        while (keep && c->in_used < sizeof(c->in) && !c->close_after) {
++            long n = web->ops.receive(c->socket, c->in + c->in_used, sizeof(c->in) - c->in_used);
++            if (n < 0) break;
++            if (n == 0) { keep = 0; break; }
++            c->in_used += (size_t)n;
++            c->last_ns = now_ns;
++            if (c->websocket) {
++                keep = frames(web, i, now_ns, poll, &budget);
++            } else {
++                if (head_complete(c->in, c->in_used)) request(web, i, now_ns, poll);
++                else if (c->in_used == sizeof(c->in)) plain(c, "431 Request Header Fields Too Large");
++            }
++        }
++        if (keep && c->websocket && c->in_used) keep = frames(web, i, now_ns, poll, &budget);
++        if (keep) keep = flush(web, c);
++        if (keep && !c->websocket && now_ns - c->since_ns > PW_WEBINPUT_HTTP_NS) keep = 0;
++        if (keep && c->websocket && now_ns - c->last_ns > 10 * PW_WEBINPUT_IDLE_NS) keep = 0;
++        if (keep && i == web->controller && web->capturing && now_ns - c->last_ns > PW_WEBINPUT_IDLE_NS) {
++            logf_(web, "page silent: capture stopped");
++            release(web, poll);
++        }
++        if (!keep) drop(web, i, poll);
++    }
++}
++
++void pw_webinput_close(PwWebInput *web, PwNetInputPoll *poll)
++{
++    if (!web) return;
++    for (int i = 0; i < PW_WEBINPUT_CLIENTS; i++) drop(web, i, poll);
++    if (web->listener >= 0) web->ops.close(web->listener);
++    web->listener = -1;
++    if (poll) release(web, poll);
++}
+diff --git a/src/pw_webinput.h b/src/pw_webinput.h
+new file mode 100644
+index 0000000..1903cbf
+--- /dev/null
++++ b/src/pw_webinput.h
+@@ -0,0 +1,102 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_WEBINPUT_H
++#define PW_WEBINPUT_H
++/*
++ * A PC's keyboard and mouse from a web page the title serves itself, so the
++ * player needs nothing installed: a browser on the LAN opens
++ * http://<console>:8361/, enters the PIN the title's menu shows, goes full
++ * screen and captures (TrinityXSX's tools/netinput-sender/src/web/index.html,
++ * which also runs from that tool on 127.0.0.1).
++ *
++ * The page sends short text commands over one WebSocket:
++ *
++ *   on · off            capture starts / stops (stop releases everything)
++ *   h                   heartbeat while capturing
++ *   k <vk> <0|1>        a Windows virtual key up or down
++ *   b <0|1|2> <0|1>     left, right or middle button up or down
++ *   m <dx> <dy>         relative mouse motion in pixels
++ *   w <detents>         wheel, up positive
++ *
++ * Keys keep their sides (0xa0..0xa5) on the wire and are folded here as the
++ * other sources' are (pw_netinput_set). One page drives input at a time: a
++ * new one takes over and the old one is closed. Everything held is released
++ * when the page stops, disconnects, or a capturing page is silent for
++ * PW_WEBINPUT_IDLE_NS. Only private (LAN) addresses are served; the
++ * WebSocket wants the PIN (?pin=), an IPv4 Host (no DNS rebinding) and an
++ * Origin that is the page's own; wrong PINs lock it out for a while.
++ *
++ * Sockets come through PwWebInputOps (native/pw_webinput_ps5.c on the
++ * console), so all of this runs in host tests too.
++ */
++#include "pw_netinput.h"
++#include <stddef.h>
++#include <stdint.h>
++
++enum {
++    PW_WEBINPUT_PORT = 8361,
++    PW_WEBINPUT_CLIENTS = 6,
++    PW_WEBINPUT_HEAD = 4096,         /* a request head, and a WebSocket's unread bytes */
++    PW_WEBINPUT_PAYLOAD = 256,       /* the largest command */
++    PW_WEBINPUT_PIN_FREE = 5,        /* wrong PINs before a lockout */
++    PW_WEBINPUT_FRAMES = 128,        /* commands read per poll at most */
++};
++#define PW_WEBINPUT_IDLE_NS 1500000000ull        /* a capturing page this silent is released */
++#define PW_WEBINPUT_HTTP_NS 10000000000ull       /* a plain request has this long */
++#define PW_WEBINPUT_LOCKOUT_NS 30000000000ull    /* first lockout; doubles, up to 10 minutes */
++
++typedef struct PwWebInputOps {
++    /* A new connection and its IPv4 address (host order), or < 0 when none waits. */
++    int (*accept)(int listener, uint32_t *address);
++    /* Bytes read; 0 when the peer closed or failed; < 0 when nothing waits. */
++    long (*receive)(int socket, void *buffer, size_t length);
++    /* Bytes sent, 0 when it would block; < 0 when the connection failed. */
++    long (*send)(int socket, const void *buffer, size_t length);
++    void (*close)(int socket);
++    void (*log)(const char *line);
++} PwWebInputOps;
++
++typedef struct PwWebInputClient {
++    int socket;                      /* -1: a free slot */
++    uint32_t address;
++    int websocket;
++    uint64_t since_ns, last_ns;      /* accepted; its newest bytes */
++    uint8_t in[PW_WEBINPUT_HEAD];
++    size_t in_used;
++    char head[640];                  /* a response head still to send */
++    size_t head_used, head_sent;
++    const char *body;                /* then its body (static), then it is closed */
++    size_t body_used, body_sent;
++    int close_after;
++} PwWebInputClient;
++
++typedef struct PwWebInput {
++    PwWebInputOps ops;
++    int listener;
++    char pin[8];
++    PwWebInputClient clients[PW_WEBINPUT_CLIENTS];
++    int controller;                  /* the client whose page drives input, or -1 */
++    int capturing;
++    uint8_t keys[32], buttons;       /* as the page holds them, sides kept */
++    PwNetInput delivered;            /* what the game was given */
++    uint32_t wrong_pins;
++    uint64_t locked_until_ns;
++    uint64_t pages, sockets, refused, commands;
++} PwWebInput;
++
++/* Serves on an already listening, non-blocking socket. pin: 4 to 7 digits. */
++int pw_webinput_open(PwWebInput *web, const PwWebInputOps *ops, int listener, const char *pin);
++/* Accepts, reads and answers what waits; input changes are added to poll. */
++void pw_webinput_poll(PwWebInput *web, uint64_t now_ns, PwNetInputPoll *poll);
++/* Closes every connection and the listener; releases what was held. */
++void pw_webinput_close(PwWebInput *web, PwNetInputPoll *poll);
++
++/* The page (src/pw_webinput_page.h, generated from TrinityXSX's copy). */
++extern const char pw_webinput_page[];
++extern const size_t pw_webinput_page_length;
++
++/* For tests: SHA-1, base64, the WebSocket accept key, one command. */
++void pw_webinput_sha1(const uint8_t *data, size_t length, uint8_t out[20]);
++size_t pw_webinput_base64(const uint8_t *data, size_t length, char *out, size_t capacity);
++void pw_webinput_accept_key(const char *key, size_t key_length, char out[29]);
++int pw_webinput_command(PwWebInput *web, const char *text, size_t length, uint64_t now_ns, PwNetInputPoll *poll);
++#endif
+diff --git a/src/pw_webinput_page.c b/src/pw_webinput_page.c
+new file mode 100644
+index 0000000..f0374d8
+--- /dev/null
++++ b/src/pw_webinput_page.c
+@@ -0,0 +1,400 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* Generated by TrinityXSX's tools/netinput-sender/make_page_c.py from its src/web/index.html;
++ * do not edit: change the page there and run the script again. */
++#include "pw_webinput.h"
++
++const char pw_webinput_page[] =
++    "<!doctype html>\012"
++    "<html lang=\042pl\042>\012"
++    "<head>\012"
++    "<meta charset=\042utf-8\042>\012"
++    "<meta name=\042viewport\042 content=\042width=device-width, initial-scale=1\042>\012"
++    "<title>TrinityXSX \302\267 keyboard &amp; mouse</title>\012"
++    "<style>\012"
++    "  :root {\012"
++    "    --bg: #0d1016; --panel: #161b24; --line: #273041; --text: #e8edf5; --muted: #93a0b4;\012"
++    "    --accent: #4fa3ff; --warn: #ffb547; --bad: #ff6b6b; --good: #4fd18b;\012"
++    "  }\012"
++    "  * { box-sizing: border-box; }\012"
++    "  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);\012"
++    "    font: 16px/1.5 system-ui, -apple-system, \042Segoe UI\042, Roboto, sans-serif; }\012"
++    "  #setup { min-height: 100%; display: grid; place-items: center; padding: 32px 16px; }\012"
++    "  .card { width: min(560px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; }\012"
++    "  h1 { margin: 0 0 4px; font-size: 22px; }\012"
++    "  .sub { margin: 0 0 22px; color: var(--muted); }\012"
++    "  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 6px; }\012"
++    "  .row { display: flex; gap: 10px; }\012"
++    "  input { flex: 1; min-width: 0; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--line);\012"
++    "    background: var(--bg); color: var(--text); font: inherit; }\012"
++    "  input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }\012"
++    "  button { padding: 11px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #04121f;\012"
++    "    font: inherit; font-weight: 600; cursor: pointer; }\012"
++    "  button:disabled { opacity: .5; cursor: default; }\012"
++    "  .steps { margin: 20px 0 0; padding-left: 22px; color: var(--text); }\012"
++    "  .steps li { display: list-item; color: var(--text); margin-top: 4px; }\012"
++    "  ul { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }\012"
++    "  li { display: flex; gap: 12px; align-items: baseline; color: var(--muted); }\012"
++    "  kbd { font: 600 13px/1 ui-monospace, Consolas, monospace; color: var(--text); background: var(--bg);\012"
++    "    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 4px 6px; white-space: nowrap; }\012"
++    "  #status { margin-top: 18px; min-height: 1.5em; font-size: 14px; color: var(--muted); }\012"
++    "  #status.bad { color: var(--bad); } #status.good { color: var(--good); }\012"
++    "  #notice { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; display: none; }\012"
++    "  #notice.warn { display: block; background: #3a2b10; color: var(--warn); }\012"
++    "  #notice.bad { display: block; background: #3a1717; color: var(--bad); }\012"
++    "  #notice.info { display: block; background: #13243a; color: #a9cdf5; }\012"
++    "\012"
++    "  #stage { position: fixed; inset: 0; display: none; place-items: center; background: #000; cursor: none; user-select: none; }\012"
++    "  body.fullscreen #setup { display: none; }\012"
++    "  body.fullscreen #stage { display: grid; }\012"
++    "  .msg { text-align: center; padding: 24px; max-width: 900px; }\012"
++    "  .big { font-size: clamp(26px, 4vw, 48px); font-weight: 700; margin: 0 0 14px; }\012"
++    "  .small { color: var(--muted); font-size: clamp(15px, 1.6vw, 20px); margin: 0; }\012"
++    "  body.capturing .big { font-size: clamp(16px, 1.6vw, 20px); font-weight: 500; color: #5d6878; }\012"
++    "  body.capturing .small { color: #3f4856; font-size: 14px; }\012"
++    "  .echo { margin: 28px 0 0; min-height: 1.5em; font: 14px/1.5 ui-monospace, Consolas, monospace; color: #5d6878; }\012"
++    "  body.capturing .echo { display: none; }\012"
++    "  #hold { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: var(--bad);\012"
++    "    transform-origin: left; transform: scaleX(0); }\012"
++    "  body.holding #hold { transition: transform 1.5s linear; transform: scaleX(1); }\012"
++    "</style>\012"
++    "</head>\012"
++    "<body>\012"
++    "<main id=\042setup\042>\012"
++    "  <div class=\042card\042>\012"
++    "    <h1 id=\042t-title\042></h1>\012"
++    "    <p class=\042sub\042 id=\042t-sub\042></p>\012"
++    "    <label for=\042field\042 id=\042t-field\042></label>\012"
++    "    <div class=\042row\042>\012"
++    "      <input id=\042field\042 autocomplete=\042off\042 spellcheck=\042false\042>\012"
++    "      <button id=\042go\042 type=\042button\042></button>\012"
++    "    </div>\012"
++    "    <ol class=\042steps\042>\012"
++    "      <li id=\042t-step1\042></li>\012"
++    "      <li id=\042t-step2\042></li>\012"
++    "    </ol>\012"
++    "    <ul>\012"
++    "      <li><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>F12</kbd><span id=\042t-toggle\042></span></li>\012"
++    "      <li><kbd id=\042t-esc-key\042></kbd><span id=\042t-esc\042></span></li>\012"
++    "    </ul>\012"
++    "    <div id=\042notice\042 role=\042alert\042></div>\012"
++    "    <div id=\042status\042 aria-live=\042polite\042></div>\012"
++    "  </div>\012"
++    "</main>\012"
++    "<div id=\042stage\042>\012"
++    "  <div class=\042msg\042>\012"
++    "    <p class=\042big\042 id=\042big\042></p>\012"
++    "    <p class=\042small\042 id=\042small\042></p>\012"
++    "    <p class=\042echo\042 id=\042echo\042></p>\012"
++    "  </div>\012"
++    "  <div id=\042hold\042></div>\012"
++    "</div>\012"
++    "<script>\012"
++    "\042use strict\042;\012"
++    "// Two homes, one page: txin-sender serves it on 127.0.0.1 (a secure context, so Keyboard Lock gives the\012"
++    "// game Esc, Alt+Tab and the Windows key), and the PS5 serves it on the LAN behind a PIN (plain http: the\012"
++    "// browser keeps those keys, Esc leaves at once, and the ` key stands in for Esc).\012"
++    "const HELPER = [\042127.0.0.1\042, \042localhost\042, \042[::1]\042].includes(location.hostname);\012"
++    "const PANIC_MS = 1500;\012"
++    "const pl = (navigator.languages || [navigator.language || \042\042]).some((l) => String(l).toLowerCase().startsWith(\042pl\042));\012"
++    "const T = pl \077 {\012"
++    "  title: \042TrinityXSX \302\267 klawiatura i mysz\042,\012"
++    "  sub: \042Steruj gr\304\205 na PS5 klawiatur\304\205 i mysz\304\205 tego komputera.\042,\012"
++    "  go: \042Pe\305\202ny ekran\042,\012"
++    "  addr: \042Adres PS5\042,\012"
++    "  step1: \042Wpisz adres PS5 i kliknij Pe\305\202ny ekran.\042,\012"
++    "  pin: \042PIN z menu Touchpada na PS5\042,\012"
++    "  step1Ps5: \042Wpisz PIN, kt\303\263ry pokazuje menu Touchpada na PS5, i kliknij Pe\305\202ny ekran.\042,\012"
++    "  step2: \042Na czarnym ekranie naci\305\233nij Ctrl+Alt+F12: dopiero wtedy zaczyna si\304\231 przechwytywanie (na laptopie mo\305\274e by\304\207 potrzebny Fn).\042,\012"
++    "  toggle: \042zaczyna i ko\305\204czy przechwytywanie\042,\012"
++    "  escKey: \042Esc \303\2271,5 s\042, esc: \042tryb awaryjny: zatrzymuje wszystko i wychodzi z pe\305\202nego ekranu\042,\012"
++    "  escKeyPs5: \042Esc\042, escPs5: \042zatrzymuje wszystko i wychodzi z pe\305\202nego ekranu; do gry Esc wysy\305\202a klawisz ` (pod Esc)\042,\012"
++    "  ready: \042Naci\305\233nij Ctrl+Alt+F12, aby zacz\304\205\304\207 przechwytywanie\042,\012"
++    "  readySmall: \042Przytrzymaj Esc, aby wyj\305\233\304\207\042,\012"
++    "  readySmallPs5: \042Esc wychodzi \302\267 w grze Esc to klawisz `\042,\012"
++    "  capturing: \042Przechwytywanie \302\267 Ctrl+Alt+F12 zatrzymuje\042,\012"
++    "  capturingSmall: \042przytrzymaj Esc, aby wyj\305\233\304\207\042,\012"
++    "  capturingSmallPs5: \042Esc wychodzi \302\267 w grze Esc to klawisz `\042,\012"
++    "  interrupted: \042Przechwytywanie przerwane. Naci\305\233nij Ctrl+Alt+F12, aby wr\303\263ci\304\207\042,\012"
++    "  noLock: \042Ta przegl\304\205darka nie blokuje klawiatury: Esc, Alt+Tab i klawisz Windows nie trafi\304\205 do gry. Najlepiej dzia\305\202a Chrome lub Edge.\042,\012"
++    "  ps5Note: \042Strona z konsoli nie mo\305\274e przej\304\205\304\207 Esc, Alt+Tab ani klawisza Windows. Pe\305\202ne przechwytywanie daje program txin-sender.exe.\042,\012"
++    "  panicked: \042Tryb awaryjny: przechwytywanie zatrzymane, klawiatura i mysz wr\303\263ci\305\202y do komputera.\042,\012"
++    "  left: \042Wyszed\305\202e\305\233 z pe\305\202nego ekranu, przechwytywanie zatrzymane.\042,\012"
++    "  needAddr: \042Wpisz adres PS5 (np. 192.168.1.170).\042, needPin: \042Wpisz PIN z menu Touchpada na PS5.\042,\012"
++    "  connecting: \042\305\201\304\205czenie z pomocnikiem\342\200\246\042, helper: \042Pomocnik dzia\305\202a.\042,\012"
++    "  helperGone: \042Pomocnik txin-sender nie dzia\305\202a. Uruchom go ponownie i od\305\233wie\305\274 stron\304\231.\042,\012"
++    "  badPin: \042PS5 nie przyj\304\205\305\202 po\305\202\304\205czenia: z\305\202y PIN, zbyt wiele pr\303\263b albo w ustawieniach TrinityXSX nie wybrano trybu Przegl\304\205darka.\042,\012"
++    "  ps5Gone: \042Po\305\202\304\205czenie z PS5 przerwane.\042,\012"
++    "  lastKey: (k) => `Ostatni odebrany klawisz: ${k}`,\012"
++    "  target: (a) => `Cel: ${a}`, sent: (n) => `Wys\305\202ano ${n} pakiet\303\263w`, err: (e) => `B\305\202\304\205d: ${e}`,\012"
++    "  ps5: (a) => `Po\305\202\304\205czono z PS5 (${a})`,\012"
++    "  noFull: \042Bez pe\305\202nego ekranu: Esc zwalnia mysz, a Alt+Tab i klawisz Windows zostaj\304\205 na komputerze. Przytrzymaj Esc, aby wyj\305\233\304\207\042,\012"
++    "} : {\012"
++    "  title: \042TrinityXSX \302\267 keyboard & mouse\042,\012"
++    "  sub: \042Play the game on your PS5 with this computer's keyboard and mouse.\042,\012"
++    "  go: \042Full screen\042,\012"
++    "  addr: \042PS5 address\042,\012"
++    "  step1: \042Enter the PS5's address and click Full screen.\042,\012"
++    "  pin: \042PIN from the PS5's Touchpad menu\042,\012"
++    "  step1Ps5: \042Enter the PIN the PS5's Touchpad menu shows and click Full screen.\042,\012"
++    "  step2: \042On the black screen press Ctrl+Alt+F12: only then does capturing start (a laptop may need Fn).\042,\012"
++    "  toggle: \042starts and stops capturing\042,\012"
++    "  escKey: \042Esc \303\2271.5 s\042, esc: \042panic: stops everything and leaves full screen\042,\012"
++    "  escKeyPs5: \042Esc\042, escPs5: \042stops everything and leaves full screen; the ` key (below Esc) sends Esc to the game\042,\012"
++    "  ready: \042Press Ctrl+Alt+F12 to start capturing\042,\012"
++    "  readySmall: \042Hold Esc to leave\042,\012"
++    "  readySmallPs5: \042Esc leaves \302\267 in the game, ` is Esc\042,\012"
++    "  capturing: \042Capturing \302\267 Ctrl+Alt+F12 stops\042,\012"
++    "  capturingSmall: \042hold Esc to leave\042,\012"
++    "  capturingSmallPs5: \042Esc leaves \302\267 in the game, ` is Esc\042,\012"
++    "  interrupted: \042Capture interrupted. Press Ctrl+Alt+F12 to resume\042,\012"
++    "  noLock: \042This browser cannot lock the keyboard: Esc, Alt+Tab and the Windows key will not reach the game. Chrome or Edge work best.\042,\012"
++    "  ps5Note: \042A page from the console cannot take Esc, Alt+Tab or the Windows key. txin-sender.exe captures everything.\042,\012"
++    "  panicked: \042Panic: capture stopped, the keyboard and mouse are this computer's again.\042,\012"
++    "  left: \042You left full screen, so capture stopped.\042,\012"
++    "  needAddr: \042Enter the PS5's address (e.g. 192.168.1.170).\042, needPin: \042Enter the PIN from the PS5's Touchpad menu.\042,\012"
++    "  connecting: \042Connecting to the helper\342\200\246\042, helper: \042Helper running.\042,\012"
++    "  helperGone: \042The txin-sender helper is not running. Start it again and reload this page.\042,\012"
++    "  badPin: \042The PS5 refused: wrong PIN, too many tries, or TrinityXSX's settings do not have Browser selected.\042,\012"
++    "  ps5Gone: \042The connection to the PS5 was lost.\042,\012"
++    "  lastKey: (k) => `Last key received: ${k}`,\012"
++    "  target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,\012"
++    "  ps5: (a) => `Connected to the PS5 (${a})`,\012"
++    "  noFull: \042Not full screen: Esc frees the mouse, and Alt+Tab and the Windows key stay on this computer. Hold Esc to leave\042,\012"
++    "};\012"
++    "\012"
++    "// KeyboardEvent.code (the physical key) to the Windows virtual key the PS5 side expects.\012"
++    "const VK = {\012"
++    "  Backspace: 0x08, Tab: 0x09, Enter: 0x0d, NumpadEnter: 0x0d, ShiftLeft: 0xa0, ShiftRight: 0xa1,\012"
++    "  ControlLeft: 0xa2, ControlRight: 0xa3, AltLeft: 0xa4, AltRight: 0xa5, Pause: 0x13, CapsLock: 0x14,\012"
++    "  Escape: 0x1b, Space: 0x20, PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24, ArrowLeft: 0x25,\012"
++    "  ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28, PrintScreen: 0x2c, Insert: 0x2d, Delete: 0x2e,\012"
++    "  MetaLeft: 0x5b, MetaRight: 0x5c, OSLeft: 0x5b, OSRight: 0x5c, ContextMenu: 0x5d,\012"
++    "  NumpadMultiply: 0x6a, NumpadAdd: 0x6b, NumpadSubtract: 0x6d, NumpadDecimal: 0x6e, NumpadDivide: 0x6f,\012"
++    "  NumLock: 0x90, ScrollLock: 0x91, Semicolon: 0xba, Equal: 0xbb, Comma: 0xbc, Minus: 0xbd, Period: 0xbe,\012"
++    "  Slash: 0xbf, Backquote: 0xc0, BracketLeft: 0xdb, Backslash: 0xdc, BracketRight: 0xdd, Quote: 0xde,\012"
++    "  IntlBackslash: 0xe2,\012"
++    "};\012"
++    "for (let i = 0; i < 26; i++) VK[\042Key\042 + String.fromCharCode(65 + i)] = 0x41 + i;\012"
++    "for (let i = 0; i < 10; i++) { VK[\042Digit\042 + i] = 0x30 + i; VK[\042Numpad\042 + i] = 0x60 + i; }\012"
++    "for (let i = 1; i <= 24; i++) VK[\042F\042 + i] = 0x6f + i;\012"
++    "// From the console's page the browser keeps Esc, so ` (below Esc) is the game's Esc.\012"
++    "if (!HELPER) VK.Backquote = 0x1b;\012"
++    "\012"
++    "const $ = (id) => document.getElementById(id);\012"
++    "const field = $(\042field\042), go = $(\042go\042), status = $(\042status\042), notice = $(\042notice\042);\012"
++    "let ws = null, state = \042setup\042, escTimer = null, wheel = 0, connected = false, full = false, opened = false;\012"
++    "// Physical keys held now, by KeyboardEvent.code: the shortcut is recognised from these, not from the\012"
++    "// event's ctrlKey/altKey, which Right Alt (AltGr) and some keyboards report differently.\012"
++    "const held = new Set();\012"
++    "const CTRL = [\042ControlLeft\042, \042ControlRight\042], ALT = [\042AltLeft\042, \042AltRight\042];\012"
++    "\012"
++    "function isToggle(e) {\012"
++    "  if (e.code !== \042F12\042 && e.key !== \042F12\042) return false;\012"
++    "  const altGr = e.getModifierState && e.getModifierState(\042AltGraph\042);\012"
++    "  const ctrl = e.ctrlKey || altGr || CTRL.some((c) => held.has(c));\012"
++    "  const alt = e.altKey || altGr || ALT.some((c) => held.has(c));\012"
++    "  return ctrl && alt;\012"
++    "}\012"
++    "\012"
++    "// What the browser reported, so a key the laptop sends differently (F12 without Fn, AltGr) is visible.\012"
++    "function describe(e) {\012"
++    "  const mods = [e.ctrlKey && \042Ctrl\042, e.altKey && \042Alt\042, e.shiftKey && \042Shift\042, e.metaKey && \042Win\042,\012"
++    "                e.getModifierState && e.getModifierState(\042AltGraph\042) && \042AltGr\042].filter(Boolean);\012"
++    "  const key = e.key && e.key !== e.code \077 ` (${e.key === \042 \042 \077 \042Space\042 : e.key})` : \042\042;\012"
++    "  return [...mods, (e.code || \042\077\042) + key].join(\042 + \042);\012"
++    "}\012"
++    "\012"
++    "const texts = [[\042t-title\042, \042title\042], [\042t-sub\042, \042sub\042], [\042go\042, \042go\042], [\042t-step2\042, \042step2\042], [\042t-toggle\042, \042toggle\042],\012"
++    "               [\042t-field\042, HELPER \077 \042addr\042 : \042pin\042], [\042t-step1\042, HELPER \077 \042step1\042 : \042step1Ps5\042],\012"
++    "               [\042t-esc-key\042, HELPER \077 \042escKey\042 : \042escKeyPs5\042], [\042t-esc\042, HELPER \077 \042esc\042 : \042escPs5\042]];\012"
++    "for (const [id, key] of texts) $(id).textContent = T[key];\012"
++    "document.title = T.title;\012"
++    "document.documentElement.lang = pl \077 \042pl\042 : \042en\042;\012"
++    "const query = new URLSearchParams(location.search);\012"
++    "if (HELPER) {\012"
++    "  field.inputMode = \042decimal\042;\012"
++    "  field.placeholder = \042192.168.1.170\042;\012"
++    "  field.value = query.get(\042ps5\042) || localStorage.getItem(\042txin-ps5\042) || \042\042;\012"
++    "  if (!(navigator.keyboard && navigator.keyboard.lock)) showNotice(T.noLock, \042warn\042);\012"
++    "} else {\012"
++    "  field.inputMode = \042numeric\042;\012"
++    "  field.placeholder = \0421234\042;\012"
++    "  field.maxLength = 7;\012"
++    "  field.value = query.get(\042pin\042) || sessionStorage.getItem(\042txin-pin\042) || \042\042;\012"
++    "  showNotice(T.ps5Note, \042info\042);\012"
++    "}\012"
++    "\012"
++    "function showNotice(text, kind) { notice.textContent = text; notice.className = text \077 kind : \042\042; }\012"
++    "function setStatus(text, kind) { status.textContent = text; status.className = kind || \042\042; }\012"
++    "function send(text) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); }\012"
++    "\012"
++    "function connect(pin) {\012"
++    "  if (HELPER) setStatus(T.connecting);\012"
++    "  opened = false;\012"
++    "  ws = new WebSocket(`ws://${location.host}/ws` + (pin \077 `\077pin=${encodeURIComponent(pin)}` : \042\042));\012"
++    "  ws.onopen = () => { connected = opened = true; if (HELPER) setStatus(T.helper, \042good\042); };\012"
++    "  ws.onclose = () => {\012"
++    "    const wasOpen = opened;\012"
++    "    connected = false;\012"
++    "    ws = null;\012"
++    "    leave();\012"
++    "    if (HELPER) { showNotice(T.helperGone, \042bad\042); setStatus(\042\042); go.disabled = true; }\012"
++    "    else { showNotice(wasOpen \077 T.ps5Gone : T.badPin, \042bad\042); setStatus(\042\042); }\012"
++    "  };\012"
++    "  ws.onmessage = (e) => {\012"
++    "    const [verb, ...rest] = String(e.data).split(\042 \042);\012"
++    "    if (verb === \042target\042) setStatus(HELPER \077 T.target(rest[0]) : T.ps5(rest[0]), \042good\042);\012"
++    "    else if (verb === \042sent\042) setStatus(T.sent(rest[0]), \042good\042);\012"
++    "    else if (verb === \042panic\042) panic();\012"
++    "    else if (verb === \042error\042) { leave(); showNotice(T.err(rest.join(\042 \042)), \042bad\042); }\012"
++    "  };\012"
++    "}\012"
++    "// Alive while open (the console drops a silent page and releases what it held); the helper ignores it.\012"
++    "setInterval(() => send(\042h\042), 500);\012"
++    "\012"
++    "function show() {\012"
++    "  if (state !== \042ready\042) $(\042echo\042).textContent = \042\042;\012"
++    "  document.body.classList.toggle(\042fullscreen\042, state !== \042setup\042);\012"
++    "  document.body.classList.toggle(\042capturing\042, state === \042capturing\042);\012"
++    "  if (state === \042ready\042) {\012"
++    "    $(\042big\042).textContent = T.ready;\012"
++    "    $(\042small\042).textContent = !HELPER \077 T.readySmallPs5 : full \077 T.readySmall : T.noFull;\012"
++    "  }\012"
++    "  if (state === \042capturing\042) {\012"
++    "    $(\042big\042).textContent = T.capturing;\012"
++    "    $(\042small\042).textContent = HELPER \077 T.capturingSmall : T.capturingSmallPs5;\012"
++    "  }\012"
++    "}\012"
++    "\012"
++    "go.addEventListener(\042click\042, async () => {\012"
++    "  const value = field.value.trim();\012"
++    "  if (!value) { showNotice(HELPER \077 T.needAddr : T.needPin, \042bad\042); field.focus(); return; }\012"
++    "  if (HELPER) {\012"
++    "    if (!connected) return;\012"
++    "    localStorage.setItem(\042txin-ps5\042, value);\012"
++    "    showNotice(\042\042, \042\042);\012"
++    "    send(\042target \042 + value);\012"
++    "  } else {\012"
++    "    sessionStorage.setItem(\042txin-pin\042, value);\012"
++    "    showNotice(T.ps5Note, \042info\042);\012"
++    "    if (ws) ws.close();\012"
++    "    connect(value);\012"
++    "  }\012"
++    "  // Some embedded browsers never answer a full-screen request: carry on in the window after a moment.\012"
++    "  const granted = await Promise.race([\012"
++    "    document.documentElement.requestFullscreen({ navigationUI: \042hide\042 }).then(() => true, () => false),\012"
++    "    new Promise((resolve) => setTimeout(() => resolve(false), 1500)),\012"
++    "  ]);\012"
++    "  full = granted && !!document.fullscreenElement;\012"
++    "  if (full && HELPER && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }\012"
++    "  if (!HELPER && !ws) { leave(); return; }   // the PS5 already refused\012"
++    "  state = \042ready\042;\012"
++    "  show();\012"
++    "});\012"
++    "field.addEventListener(\042keydown\042, (e) => { if (e.key === \042Enter\042 && state === \042setup\042) go.click(); });\012"
++    "\012"
++    "function startCapture() {\012"
++    "  const stage = $(\042stage\042);\012"
++    "  const p = stage.requestPointerLock({ unadjustedMovement: true });\012"
++    "  if (p && p.catch) p.catch(() => stage.requestPointerLock());\012"
++    "  send(\042on\042);\012"
++    "  state = \042capturing\042;\012"
++    "  show();\012"
++    "}\012"
++    "\012"
++    "function stopCapture(text) {\012"
++    "  send(\042off\042);\012"
++    "  if (document.pointerLockElement) document.exitPointerLock();\012"
++    "  state = \042ready\042;\012"
++    "  show();\012"
++    "  if (text) $(\042big\042).textContent = text;\012"
++    "}\012"
++    "\012"
++    "// Back to the setup card: nothing captured, nothing locked, not full screen.\012"
++    "function leave(text) {\012"
++    "  if (escTimer) { clearTimeout(escTimer); escTimer = null; }\012"
++    "  document.body.classList.remove(\042holding\042);\012"
++    "  if (state === \042capturing\042) send(\042off\042);\012"
++    "  state = \042setup\042;\012"
++    "  if (document.pointerLockElement) document.exitPointerLock();\012"
++    "  if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();\012"
++    "  full = false;\012"
++    "  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});\012"
++    "  show();\012"
++    "  if (text) showNotice(text, \042warn\042);\012"
++    "}\012"
++    "\012"
++    "function panic() { leave(T.panicked); }\012"
++    "\012"
++    "window.addEventListener(\042keydown\042, (e) => {\012"
++    "  held.add(e.code);\012"
++    "  if (state === \042setup\042) return;\012"
++    "  e.preventDefault();\012"
++    "  e.stopPropagation();\012"
++    "  if (state === \042ready\042) $(\042echo\042).textContent = T.lastKey(describe(e));\012"
++    "  if (isToggle(e)) {\012"
++    "    if (!e.repeat) state === \042capturing\042 \077 stopCapture() : startCapture();\012"
++    "    return;\012"
++    "  }\012"
++    "  if (e.code === \042Escape\042 && !escTimer) {\012"
++    "    escTimer = setTimeout(panic, PANIC_MS);\012"
++    "    document.body.classList.add(\042holding\042);\012"
++    "  }\012"
++    "  if (state !== \042capturing\042 || e.repeat) return;\012"
++    "  const vk = VK[e.code];\012"
++    "  if (vk) send(`k ${vk} 1`);\012"
++    "}, true);\012"
++    "\012"
++    "window.addEventListener(\042keyup\042, (e) => {\012"
++    "  held.delete(e.code);\012"
++    "  if (e.code === \042Escape\042 && escTimer) {\012"
++    "    clearTimeout(escTimer);\012"
++    "    escTimer = null;\012"
++    "    document.body.classList.remove(\042holding\042);\012"
++    "  }\012"
++    "  if (state === \042setup\042) return;\012"
++    "  e.preventDefault();\012"
++    "  e.stopPropagation();\012"
++    "  const vk = VK[e.code];\012"
++    "  if (state === \042capturing\042 && vk) send(`k ${vk} 0`);\012"
++    "}, true);\012"
++    "\012"
++    "const BUTTON = { 0: 0, 1: 2, 2: 1 };   // left, middle, right \342\206\222 protocol's left, right, middle\012"
++    "document.addEventListener(\042mousemove\042, (e) => {\012"
++    "  if (state !== \042capturing\042 || !document.pointerLockElement) return;\012"
++    "  if (e.movementX || e.movementY) send(`m ${Math.round(e.movementX)} ${Math.round(e.movementY)}`);\012"
++    "});\012"
++    "for (const [type, down] of [[\042mousedown\042, 1], [\042mouseup\042, 0]]) {\012"
++    "  document.addEventListener(type, (e) => {\012"
++    "    if (state === \042setup\042) return;\012"
++    "    e.preventDefault();\012"
++    "    if (state === \042capturing\042 && e.button in BUTTON) send(`b ${BUTTON[e.button]} ${down}`);\012"
++    "  });\012"
++    "}\012"
++    "document.addEventListener(\042wheel\042, (e) => {\012"
++    "  if (state === \042setup\042) return;\012"
++    "  e.preventDefault();\012"
++    "  if (state !== \042capturing\042) return;\012"
++    "  wheel += e.deltaMode === 1 \077 e.deltaY * 33 : e.deltaMode === 2 \077 e.deltaY * 100 : e.deltaY;\012"
++    "  const detents = Math.trunc(-wheel / 100);\012"
++    "  if (detents) { wheel += detents * 100; send(`w ${detents}`); }\012"
++    "}, { passive: false });\012"
++    "document.addEventListener(\042contextmenu\042, (e) => { if (state !== \042setup\042) e.preventDefault(); });\012"
++    "// Ctrl+W and the like close the tab without asking the page: ask first while playing.\012"
++    "window.addEventListener(\042beforeunload\042, (e) => { if (state !== \042setup\042) { e.preventDefault(); e.returnValue = \042\042; } });\012"
++    "\012"
++    "// Anything that takes the keyboard or mouse away stops capturing, so nothing stays held on the PS5.\012"
++    "document.addEventListener(\042fullscreenchange\042, () => {\012"
++    "  if (!document.fullscreenElement && full && state !== \042setup\042) { full = false; leave(T.left); }\012"
++    "});\012"
++    "document.addEventListener(\042pointerlockchange\042, () => {\012"
++    "  if (!document.pointerLockElement && state === \042capturing\042) stopCapture(T.interrupted);\012"
++    "});\012"
++    "window.addEventListener(\042blur\042, () => { held.clear(); if (state === \042capturing\042) stopCapture(T.interrupted); });\012"
++    "document.addEventListener(\042visibilitychange\042, () => { if (document.hidden && state !== \042setup\042) leave(); });\012"
++    "\012"
++    "if (HELPER) connect();\012"
++    "</script>\012"
++    "</body>\012"
++    "</html>\012";
++const size_t pw_webinput_page_length = 19924;
+diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
+index 663682d..5dd99cd 100644
+--- a/tests/test_pw_game_profile.c
++++ b/tests/test_pw_game_profile.c
+@@ -340,6 +340,8 @@ static void test_refusals(void)
+         APP "[input]\nplayer2 = P2\n",
+         APP "[input]\nplayer2 =\n",
+         APP "[input]\nplayer2 = a\nplayer2 = b\n",
++        APP "[input]\nremote = usb\n",
++        APP "[input]\nremote = off\nremote = browser\n",
+         APP "[input]\npreset = 0123456789012345678901234567890123456789012345678901234567890123456789\n",
+         APP "[input]\ncross space\n",
+         APP "[input]\n = space\n",
+@@ -385,9 +387,16 @@ static void test_presets(void)
+     assert(!strcmp(p.input.preset, "bomb") && !strcmp(p.input.player2, "bomb-p2"));
+     assert(parse(APP "[input]\npreset = bomb\n", &p) == PW_OK && !p.input.player2[0]);
+ 
++    /* A PC's keyboard and mouse: off unless the profile says otherwise. */
++    assert(parse(APP "[input]\nmode = xinput\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_OFF);
++    assert(parse(APP "[input]\nremote = sender\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_SENDER);
++    assert(parse(APP "[input]\nremote = browser\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BROWSER);
++    assert(parse(APP "[input]\nremote = off\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_OFF);
++
+     /* A preset holds only [input] and cannot chain another preset. */
+     assert(preset("[input]\npreset = other\n", &input) == PW_ERR_MALFORMED);
+     assert(preset("[input]\nplayer2 = other\n", &input) == PW_ERR_MALFORMED);
++    assert(preset("[input]\nremote = browser\n", &input) == PW_ERR_MALFORMED);
+     assert(preset("[display]\ndesktop = 800x600\n", &input) == PW_ERR_MALFORMED);
+     assert(preset(APP, &input) == PW_ERR_MALFORMED);
+     assert(preset("; nothing\n", &input) == PW_ERR_MALFORMED);
+diff --git a/tests/test_pw_netinput_ps5.c b/tests/test_pw_netinput_ps5.c
+index adf6536..24f6430 100644
+--- a/tests/test_pw_netinput_ps5.c
++++ b/tests/test_pw_netinput_ps5.c
+@@ -31,7 +31,9 @@ static void fake_log(const char *line)
+     lines++;
+ }
+ 
+-static const PwNetInputPs5Ops ops = { fake_open, fake_receive, fake_log };
++static int closed_socket = -1;
++static void fake_close(int s) { closed_socket = s; }
++static const PwNetInputPs5Ops ops = { fake_open, fake_receive, fake_log, fake_close };
+ 
+ static void push(uint32_t sequence, unsigned vk, int down, uint32_t mx, uint32_t address)
+ {
+@@ -83,6 +85,14 @@ int main(void)
+     pw_netinput_ps5_poll(&net, 5 * MS + PW_NETINPUT_TIMEOUT_NS, &poll);
+     assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'D');
+     assert(strstr(last_line, "sender silent"));
++
++    /* Closing releases what is held and stops listening. */
++    push(201, 'D', 1, 12, 0xc0a80105u);
++    pw_netinput_ps5_poll(&net, 6 * MS + PW_NETINPUT_TIMEOUT_NS, &poll);
++    pw_netinput_ps5_close(&net, &poll);
++    assert(closed_socket == 7 && net.socket == -1 && poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'D');
++    pw_netinput_ps5_poll(&net, 7 * MS + PW_NETINPUT_TIMEOUT_NS, &poll);
++    assert(poll.count == 0);
+     puts("test_pw_netinput_ps5: ok");
+     return 0;
+ }
+diff --git a/tests/test_pw_webinput.c b/tests/test_pw_webinput.c
+new file mode 100644
+index 0000000..7399ac2
+--- /dev/null
++++ b/tests/test_pw_webinput.c
+@@ -0,0 +1,300 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "../src/pw_webinput.h"
++#include "../include/prospero_win.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++#define MS 1000000ull
++#define LAN 0xc0a801cfu            /* 192.168.1.207 */
++
++/* Fake sockets: what the client sent (in), what the server sent (out). */
++typedef struct Fake {
++    int used, closed;
++    uint8_t in[8192];
++    size_t in_used, in_read;
++    char out[65536];
++    size_t out_used;
++} Fake;
++static Fake fakes[32];
++static int pending[8], pending_count;
++static uint32_t pending_address[8];
++static size_t send_limit = 100000;
++static int closes;
++
++static int fake_accept(int listener, uint32_t *address)
++{
++    assert(listener == 99);
++    if (!pending_count) return -1;
++    *address = pending_address[0];
++    int s = pending[0];
++    memmove(pending, pending + 1, sizeof(pending[0]) * (size_t)(pending_count - 1));
++    memmove(pending_address, pending_address + 1, sizeof(pending_address[0]) * (size_t)(pending_count - 1));
++    pending_count--;
++    return s;
++}
++
++static long fake_receive(int s, void *buffer, size_t length)
++{
++    Fake *f = &fakes[s];
++    size_t n = f->in_used - f->in_read;
++    if (f->closed == 2) return 0;          /* the peer hung up */
++    if (!n) return -1;
++    if (n > length) n = length;
++    memcpy(buffer, f->in + f->in_read, n);
++    f->in_read += n;
++    return (long)n;
++}
++
++static long fake_send(int s, const void *buffer, size_t length)
++{
++    Fake *f = &fakes[s];
++    size_t n = length < send_limit ? length : send_limit;
++    if (n > sizeof(f->out) - f->out_used) n = sizeof(f->out) - f->out_used;
++    memcpy(f->out + f->out_used, buffer, n);
++    f->out_used += n;
++    return (long)n;
++}
++
++static void fake_close(int s)
++{
++    if (s != 99) fakes[s].closed = 1;
++    closes++;
++}
++
++static char last_log[160];
++static void fake_log(const char *line) { snprintf(last_log, sizeof(last_log), "%s", line); }
++
++static const PwWebInputOps ops = { fake_accept, fake_receive, fake_send, fake_close, fake_log };
++
++static int connect_client(uint32_t address, const char *request)
++{
++    static int next = 1;
++    int s = next++;
++    memset(&fakes[s], 0, sizeof(fakes[s]));
++    fakes[s].used = 1;
++    memcpy(fakes[s].in, request, strlen(request));
++    fakes[s].in_used = strlen(request);
++    pending[pending_count] = s;
++    pending_address[pending_count++] = address;
++    return s;
++}
++
++static void client_text(int s, const char *text)
++{
++    Fake *f = &fakes[s];
++    const uint8_t mask[4] = { 0x11, 0x22, 0x33, 0x44 };
++    size_t n = strlen(text);
++    f->in[f->in_used++] = 0x81;
++    f->in[f->in_used++] = (uint8_t)(0x80 | n);
++    memcpy(f->in + f->in_used, mask, 4);
++    f->in_used += 4;
++    for (size_t i = 0; i < n; i++) f->in[f->in_used++] = (uint8_t)(text[i] ^ mask[i & 3]);
++}
++
++static const char *ws_request(const char *pin, const char *host, const char *origin)
++{
++    static char r[512];
++    snprintf(r, sizeof(r),
++             "GET /ws?pin=%s HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
++             "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
++             pin, host, origin);
++    return r;
++}
++
++static int has_event(const PwNetInputPoll *p, uint8_t kind, uint16_t code, uint8_t down)
++{
++    for (size_t i = 0; i < p->count; i++)
++        if (p->events[i].kind == kind && p->events[i].code == code && p->events[i].down == down) return 1;
++    return 0;
++}
++
++static void test_crypto(void)
++{
++    uint8_t d[20];
++    char b[64], accept[29];
++    pw_webinput_sha1((const uint8_t *)"abc", 3, d);
++    pw_webinput_base64(d, 20, b, sizeof(b));
++    assert(!strcmp(b, "qZk+NkcGgWq6PiVxeFDCbJzQ2J0="));
++    /* 56 bytes: the padding spills into a second block. */
++    pw_webinput_sha1((const uint8_t *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, d);
++    pw_webinput_base64(d, 20, b, sizeof(b));
++    assert(!strcmp(b, "hJg+RBw70m66rkqh+VEp5eVGcPE="));
++    pw_webinput_base64((const uint8_t *)"fo", 2, b, sizeof(b));
++    assert(!strcmp(b, "Zm8="));
++    pw_webinput_accept_key("dGhlIHNhbXBsZSBub25jZQ==", 24, accept);
++    assert(!strcmp(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));   /* RFC 6455, section 1.3 */
++}
++
++static void test_page_and_refusals(void)
++{
++    static PwWebInput web;
++    static PwNetInputPoll poll;
++    int s;
++
++    assert(pw_webinput_open(&web, &ops, 99, "12a4") == PW_ERR_PRECONDITION);
++    assert(pw_webinput_open(&web, &ops, 99, "123") == PW_ERR_PRECONDITION);
++    assert(pw_webinput_open(&web, &ops, 99, "4821") == PW_OK);
++
++    /* The page, in pieces when the socket takes little at a time, then closed. */
++    send_limit = 1000;
++    s = connect_client(LAN, "GET /?pin=4821 HTTP/1.1\r\nHost: 192.168.1.170:8361\r\n\r\n");
++    for (int i = 0; i < 40 && !fakes[s].closed; i++) { memset(&poll, 0, sizeof(poll)); pw_webinput_poll(&web, MS, &poll); }
++    send_limit = 100000;
++    assert(fakes[s].closed && strstr(fakes[s].out, "HTTP/1.1 200 OK"));
++    assert(fakes[s].out_used > pw_webinput_page_length && strstr(fakes[s].out, "<!doctype html>"));
++    assert(!memcmp(fakes[s].out + fakes[s].out_used - pw_webinput_page_length, pw_webinput_page,
++                   pw_webinput_page_length));
++
++    /* Not from the LAN: closed unanswered. */
++    s = connect_client(0x08080808u, "GET / HTTP/1.1\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && !fakes[s].out_used);
++
++    /* Unknown paths and methods. */
++    s = connect_client(LAN, "GET /etc HTTP/1.1\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && strstr(fakes[s].out, "404"));
++    s = connect_client(LAN, "POST / HTTP/1.1\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && strstr(fakes[s].out, "405"));
++
++    /* The WebSocket: a name as Host (DNS rebinding), a foreign Origin. */
++    s = connect_client(LAN, ws_request("4821", "evil.example:8361", "http://evil.example:8361"));
++    pw_webinput_poll(&web, MS, &poll);
++    assert(strstr(fakes[s].out, "403") && web.controller < 0);
++    s = connect_client(LAN, ws_request("4821", "192.168.1.170:8361", "http://evil.example"));
++    pw_webinput_poll(&web, MS, &poll);
++    assert(strstr(fakes[s].out, "403") && web.controller < 0);
++
++    /* Wrong PINs, then a lockout that even the right PIN waits out. */
++    for (int i = 0; i < PW_WEBINPUT_PIN_FREE; i++) {
++        s = connect_client(LAN, ws_request("0000", "192.168.1.170:8361", "http://192.168.1.170:8361"));
++        pw_webinput_poll(&web, 2 * MS, &poll);
++        assert(strstr(fakes[s].out, "403"));
++    }
++    assert(strstr(last_log, "wrong PIN"));
++    s = connect_client(LAN, ws_request("4821", "192.168.1.170:8361", "http://192.168.1.170:8361"));
++    pw_webinput_poll(&web, 3 * MS, &poll);
++    assert(strstr(fakes[s].out, "429") && web.controller < 0);
++    s = connect_client(LAN, ws_request("4821", "192.168.1.170:8361", "http://192.168.1.170:8361"));
++    pw_webinput_poll(&web, 3 * MS + PW_WEBINPUT_LOCKOUT_NS, &poll);
++    assert(strstr(fakes[s].out, "101 Switching Protocols") && web.controller >= 0);
++    assert(strstr(fakes[s].out, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
++    assert(strstr(fakes[s].out, "target 192.168.1.170:8361"));
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_close(&web, &poll);
++    assert(fakes[s].closed);
++}
++
++static void test_input(void)
++{
++    static PwWebInput web;
++    static PwNetInputPoll poll;
++    const char *ok = ws_request("4821", "192.168.1.170:8361", "http://192.168.1.170:8361");
++    uint64_t t = 10 * MS;
++    int a, b;
++
++    assert(pw_webinput_open(&web, &ops, 99, "4821") == PW_OK);
++    a = connect_client(LAN, ok);
++    pw_webinput_poll(&web, t, &poll);
++    assert(web.controller >= 0);
++
++    /* Input before "on" is dropped. */
++    client_text(a, "k 87 1");
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(poll.count == 0);
++
++    client_text(a, "on");
++    client_text(a, "k 160 1");       /* left Shift: the generic key */
++    client_text(a, "k 87 1");
++    client_text(a, "b 0 1");
++    client_text(a, "m 5 -3");
++    client_text(a, "m 1 1");
++    client_text(a, "w 2");
++    client_text(a, "k 999 1");       /* not a key: ignored */
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(web.capturing && poll.count == 3);
++    assert(has_event(&poll, PW_HID_EVENT_KEY, 0x10, 1) && has_event(&poll, PW_HID_EVENT_KEY, 'W', 1));
++    assert(has_event(&poll, PW_HID_EVENT_BUTTON, 0, 1));
++    assert(poll.dx == 6 && poll.dy == -2 && poll.wheel == 2);
++
++    /* Ping gets a pong; heartbeats keep a capturing page alive. */
++    {
++        Fake *f = &fakes[a];
++        size_t before = f->out_used;
++        f->in[f->in_used++] = 0x89; f->in[f->in_used++] = 0x80;
++        f->in[f->in_used++] = 1; f->in[f->in_used++] = 2; f->in[f->in_used++] = 3; f->in[f->in_used++] = 4;
++        memset(&poll, 0, sizeof(poll));
++        pw_webinput_poll(&web, t += MS, &poll);
++        assert(f->out_used == before + 2 && (uint8_t)f->out[before] == 0x8a);
++    }
++    for (int i = 0; i < 4; i++) {
++        client_text(a, "h");
++        memset(&poll, 0, sizeof(poll));
++        pw_webinput_poll(&web, t += PW_WEBINPUT_IDLE_NS / 2, &poll);
++        assert(web.capturing && poll.count == 0);
++    }
++
++    /* "off" releases everything. */
++    client_text(a, "off");
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(!web.capturing && poll.count == 3);
++    assert(has_event(&poll, PW_HID_EVENT_KEY, 0x10, 0) && has_event(&poll, PW_HID_EVENT_KEY, 'W', 0));
++    assert(has_event(&poll, PW_HID_EVENT_BUTTON, 0, 0));
++
++    /* A silent capturing page is released. */
++    client_text(a, "on");
++    client_text(a, "k 65 1");
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(has_event(&poll, PW_HID_EVENT_KEY, 'A', 1));
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += PW_WEBINPUT_IDLE_NS + MS, &poll);
++    assert(!web.capturing && has_event(&poll, PW_HID_EVENT_KEY, 'A', 0) && strstr(last_log, "silent"));
++
++    /* Another page takes over: the first is closed and what it held is released. */
++    client_text(a, "on");
++    client_text(a, "k 68 1");
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    b = connect_client(LAN, ok);
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(fakes[a].closed && !fakes[b].closed && has_event(&poll, PW_HID_EVENT_KEY, 'D', 0));
++    assert(web.controller >= 0 && web.clients[web.controller].socket == b);
++
++    /* The page goes away (TCP closed): released too. */
++    client_text(b, "on");
++    client_text(b, "b 1 1");
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(has_event(&poll, PW_HID_EVENT_BUTTON, 1, 1));
++    fakes[b].closed = 2;
++    memset(&poll, 0, sizeof(poll));
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(web.controller < 0 && has_event(&poll, PW_HID_EVENT_BUTTON, 1, 0));
++
++    /* An unmasked frame ends the connection. */
++    a = connect_client(LAN, ok);
++    pw_webinput_poll(&web, t += MS, &poll);
++    fakes[a].in[fakes[a].in_used++] = 0x81;
++    fakes[a].in[fakes[a].in_used++] = 0x02;
++    fakes[a].in[fakes[a].in_used++] = 'o';
++    fakes[a].in[fakes[a].in_used++] = 'n';
++    pw_webinput_poll(&web, t += MS, &poll);
++    assert(fakes[a].closed && web.controller < 0);
++    pw_webinput_close(&web, &poll);
++}
++
++int main(void)
++{
++    test_crypto();
++    test_page_and_refusals();
++    test_input();
++    puts("test_pw_webinput: ok");
++    return 0;
++}
+diff --git a/tools/build_native.sh b/tools/build_native.sh
+index 49735d2..f4b6579 100755
+--- a/tools/build_native.sh
++++ b/tools/build_native.sh
+@@ -193,11 +193,11 @@ sources=(
+     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
+     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
+     native/pw_lapy_elevation.c
+-    native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_netinput_ps5.c native/pw_osk_ps5.c
++    native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_netinput_ps5.c native/pw_webinput_ps5.c native/pw_osk_ps5.c
+     native/pw_wine_prefix.c
+     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
+     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
+-    src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_netinput.c src/pw_spinner.c src/pw_script_input.c
++    src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_netinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_spinner.c src/pw_script_input.c
+     src/pw_tsc_calibrate.c
+     wine/ps5/pw_wine_prx.c
+ )
+-- 
+2.48.1.windows.1
+

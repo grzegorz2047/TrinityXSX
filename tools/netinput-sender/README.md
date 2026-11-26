@@ -1,51 +1,54 @@
-# txin-sender
+# PC keyboard & mouse for TrinityXSX
 
-Lets you play a game running in TrinityXSX on a PS5 with a Windows PC's keyboard and mouse, over the LAN.
-The PS5 side is `patches/prospero-win/0012-Add-network-keyboard-and-mouse-input.patch`: while a game runs, the
-title listens on UDP port 9396 and posts what arrives into Wine, the same way it posts a USB keyboard and mouse.
+TrinityXSX can take a Windows PC's keyboard and mouse over the LAN, as well as a USB keyboard and mouse plugged
+into the PS5. Pick how in the library: **Settings → PC keyboard & mouse**. The setting is
+`[input] remote = off | browser | sender` in the runtime profile, and the PS5 applies a change within two seconds.
 
-Every release includes a ready-made `txin-sender-<tag>.exe`, so you do not need to build it.
+| Setting | On the PC | Captures |
+|---|---|---|
+| **Off** (default) | nothing: plug a USB keyboard and mouse into the PS5 | everything; no port is open on the console |
+| **Web browser** | open the address the Touchpad menu (and the setting) shows, e.g. `http://192.168.1.170:8361`, and enter the PIN | everything except Esc, Alt+Tab and the Windows key, which the browser keeps; the `` ` `` key (below Esc) sends Esc to the game |
+| **txin-sender program** | run `txin-sender.exe` (every release ships `txin-sender-<tag>.exe`) | everything, Esc, Alt+Tab and the Windows key included |
 
-## Use: the page in the browser
+A USB keyboard and mouse plugged into the PS5 work in every mode.
 
-Double-click `txin-sender.exe`, or run it with no arguments. It opens http://127.0.0.1:9397/ in your browser.
+## Web browser: nothing to install
+
+1. In TrinityXSX, set **PC keyboard & mouse** to **Web browser**. The setting row, and the Touchpad menu in a game,
+   show the address and a PIN (for example `http://192.168.1.170:8361  PIN 4821`). The PIN changes each time
+   TrinityXSX starts.
+2. On the PC, open that address, enter the PIN and click **Full screen**.
+3. Press **Ctrl+Alt+F12** to start capturing, and again to stop.
+4. **Esc** stops at once and leaves full screen. In the game, `` ` `` is Esc.
+
+The page is served by the PS5 itself (`patches/prospero-win/0013`). Only private (LAN) addresses get an answer.
+The WebSocket wants the PIN, an IP address as the host name (no DNS rebinding) and the page's own origin. Five
+wrong PINs lock it for 30 s, doubling after each further wrong one. One page drives input at a time, and a new
+one takes over. Everything held is released when the page stops, closes, or goes silent for 1.5 s.
+
+A page from the console is plain `http://`, so the browser does not let it lock the keyboard: that is why Esc,
+Alt+Tab and the Windows key stay with the PC. Closing the tab (Ctrl+W) asks first while you play.
+
+## txin-sender program: full capture
+
+Double-click `txin-sender.exe`, or run it with no arguments. It serves the same page on http://127.0.0.1:9397/ and
+opens it in the browser. Served from this computer, the page may lock the keyboard (Keyboard Lock), so the game
+gets Esc, Alt+Tab and the Windows key too. Chrome or Edge work best.
 
 1. Enter the PS5's address and click **Full screen**.
-2. A full-screen message asks you to press **Ctrl+Alt+F12**. Press it to start capturing. The keyboard and mouse
-   then go to the game; the mouse pointer is locked and hidden.
-3. Press **Ctrl+Alt+F12** again to stop capturing. You stay in full screen.
-4. **Panic:** hold **Esc** for 1.5 s, at any time. Capture stops, the keyboard and mouse are released and the page
-   leaves full screen. A short Esc still goes to the game. A red bar along the bottom fills up while you hold it.
+2. Press **Ctrl+Alt+F12** to start capturing, and again to stop.
+3. **Panic:** hold **Esc** for 1.5 s. Capture stops and the page leaves full screen. A short Esc goes to the game.
+   A red bar along the bottom fills up while you hold it.
 
-Capture also stops if you leave full screen, switch window, or close the page or the console window.
+Keep the console window open while you play. `txin-sender --web 192.168.1.170` fills in the address.
 
-Chrome or Edge work best: in full screen they let the page take Esc, Alt+Tab and the Windows key (Keyboard Lock),
-which games often need. Other browsers still work, but those keys stay with Windows and Esc frees the mouse.
-Keyboard Lock only works on a page from this computer, which is why the helper serves the page itself.
+Without a browser, `txin-sender 192.168.1.170` captures with low-level hooks: **Ctrl+Alt+F12** starts and stops
+everywhere in Windows, and holding **Esc** for 1.5 s stops it. `txin-sender 192.168.1.170 --test` sends a short
+pattern (W held for 0.3 s, the mouse in a circle) without capturing anything, to check that the PS5 receives.
 
-Keep the console window open while you play. `txin-sender --web 192.168.1.170` opens the page with the address
-filled in.
-
-## Use: without a browser
-
-```powershell
-txin-sender 192.168.1.170
-```
-
-**Ctrl+Alt+F12** starts and stops capturing everywhere in Windows (low-level hooks), and holding **Esc** for 1.5 s
-also stops it. Ctrl+C in the console quits.
-
-`txin-sender 192.168.1.170 --test` sends a short pattern (W held for 0.3 s, then the mouse in a circle) without
-capturing anything. Use it to check that the PS5 receives. `--port N` sets another port.
-
-## Safety
-
-- The page and its WebSocket only answer on 127.0.0.1, and only to the page itself (the Host and Origin headers
-  are checked), so another website open in the browser cannot type into the PS5.
-- Datagrams only go to private (LAN) addresses, and the PS5 only accepts them from those.
-- The PS5 follows one sender at a time and releases everything after 0.5 s with no datagrams. A second PC can
-  take over after that.
-- There is no pairing yet, so anyone on the LAN can type into the game while it runs.
+The helper's page and WebSocket only answer on 127.0.0.1 and only to the page itself (Host and Origin checked).
+Datagrams go only to private (LAN) addresses, and the PS5 follows one sender at a time, releasing everything after
+0.5 s with no datagrams.
 
 ## Build
 
@@ -56,8 +59,17 @@ cargo build --release --manifest-path tools/netinput-sender/Cargo.toml
 There are no dependencies, so the build works offline. CI runs `cargo fmt --check`, `cargo clippy` and
 `cargo test` and builds the exe for every release.
 
-## Protocol
+The page is one file, `src/web/index.html`, for both homes. After changing it, regenerate the console's copy and
+refresh `patches/prospero-win/0013`:
 
-TXIN v1 is a 64-byte datagram that carries the whole state: held virtual keys, buttons, and motion and wheel as
-running totals. A lost datagram is therefore mended by the next one. See `src/protocol.rs` and prospero-win's
-`src/pw_netinput.h`. The page talks to the helper in short text commands (`src/web.rs`).
+```powershell
+python tools/netinput-sender/make_page_c.py <prospero-win checkout>/src/pw_webinput_page.c
+```
+
+## Protocols
+
+- **txin-sender → PS5:** TXIN v1, a 64-byte UDP datagram to port 9396 that carries the whole state (held virtual
+  keys, buttons, and motion and wheel as running totals), so a lost datagram is mended by the next one. See
+  `src/protocol.rs` and prospero-win's `src/pw_netinput.h`.
+- **Page → PS5 or helper:** short text commands over a WebSocket (`on`, `off`, `h`, `k <vk> <0|1>`,
+  `b <button> <0|1>`, `m <dx> <dy>`, `w <detents>`). See prospero-win's `src/pw_webinput.h` and `src/web.rs`.

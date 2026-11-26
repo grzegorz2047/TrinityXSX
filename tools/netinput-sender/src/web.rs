@@ -175,11 +175,16 @@ fn session(stream: TcpStream, udp_port: u16) {
 
 /// One command from the page; the reply to send back, if any.
 ///
-/// `target <host>` · `on` · `off` · `k <vk> <0|1>` · `b <button> <0|1>` · `m <dx> <dy>` · `w <detents>`
+/// `target <host>` · `on` · `off` · `k <vk> <0|1>` · `b <button> <0|1>` · `m <dx> <dy>` · `w <detents>` ·
+/// `h` (the page's heartbeat, which the PS5's own server needs and this one does not: heartbeats go out by
+/// timer here)
 pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<String> {
     let mut words = text.split_whitespace();
     let verb = words.next()?;
     let mut number = || words.next().and_then(|w| w.parse::<i32>().ok());
+    if verb == "h" {
+        return None;
+    }
     if verb == "target" {
         let host = text["target".len()..].trim();
         if let Some(old) = link.as_mut() {
@@ -248,6 +253,7 @@ mod tests {
     #[test]
     fn commands() {
         let mut link = None;
+        assert_eq!(command(&mut link, "h", 9), None, "the heartbeat needs no PS5 address");
         assert!(command(&mut link, "on", 9).unwrap().starts_with("error"));
         assert!(command(&mut link, "target 8.8.8.8", 9).unwrap().starts_with("error"));
         assert!(link.is_none());

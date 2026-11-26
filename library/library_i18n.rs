@@ -97,6 +97,33 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "ready") => "gotowe",
         (Lang::Pl, "Frame Generation") => "Generowanie klatek",
         (Lang::Pl, "FPS Counter") => "Licznik FPS",
+        (Lang::Pl, "PC keyboard & mouse") => "Klawiatura i mysz z PC",
+        (Lang::Pl, "Off (USB on the PS5 only)") => "Wyłączone (tylko USB w PS5)",
+        (Lang::Pl, "txin-sender program") => "Program txin-sender",
+        (Lang::Pl, "Web browser") => "Przeglądarka",
+        (Lang::Pl, "Plug a USB keyboard and mouse into the PS5") => "Podłącz klawiaturę i mysz USB do PS5",
+        (Lang::Pl, "Run txin-sender.exe on the PC") => "Uruchom txin-sender.exe na komputerze",
+        (Lang::Pl, "Open the address shown here or in the Touchpad menu on the PC") => {
+            "Otwórz na komputerze adres widoczny tutaj lub w menu Touchpada"
+        }
+        (Lang::Pt, "PC keyboard & mouse") => "Teclado e mouse do PC",
+        (Lang::Pt, "Off (USB on the PS5 only)") => "Desligado (só USB no PS5)",
+        (Lang::Pt, "txin-sender program") => "Programa txin-sender",
+        (Lang::Pt, "Web browser") => "Navegador",
+        (Lang::Pt, "Plug a USB keyboard and mouse into the PS5") => "Conecte um teclado e mouse USB ao PS5",
+        (Lang::Pt, "Run txin-sender.exe on the PC") => "Execute o txin-sender.exe no PC",
+        (Lang::Pt, "Open the address shown here or in the Touchpad menu on the PC") => {
+            "Abra no PC o endereço mostrado aqui ou no menu do Touchpad"
+        }
+        (Lang::Es, "PC keyboard & mouse") => "Teclado y ratón del PC",
+        (Lang::Es, "Off (USB on the PS5 only)") => "Desactivado (solo USB en la PS5)",
+        (Lang::Es, "txin-sender program") => "Programa txin-sender",
+        (Lang::Es, "Web browser") => "Navegador web",
+        (Lang::Es, "Plug a USB keyboard and mouse into the PS5") => "Conecta un teclado y ratón USB a la PS5",
+        (Lang::Es, "Run txin-sender.exe on the PC") => "Ejecuta txin-sender.exe en el PC",
+        (Lang::Es, "Open the address shown here or in the Touchpad menu on the PC") => {
+            "Abre en el PC la dirección que se ve aquí o en el menú del Touchpad"
+        }
         (Lang::Pl, "Frame Generation creates smoother motion (requires restarting TrinityXSX).") => {
             "Generowanie klatek poprawia płynność obrazu (wymaga restartu aplikacji)."
         }

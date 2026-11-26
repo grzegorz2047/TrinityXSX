@@ -23,6 +23,8 @@ const GAME_ROWS: usize = 6;
 const PATH_ROWS: usize = 6;
 const BROWSER_ROWS: usize = 7;
 const SETTINGS_ROWS: usize = 8;
+/// Rows of the app settings screen; the last one restarts TrinityXSX.
+const APP_ROWS: usize = 7;
 const SETTINGS_COUNT: usize = 13;
 
 const UP: u16 = 0x0001;
@@ -104,6 +106,8 @@ struct Menu {
     active_framegen: u8,
     show_fps: bool,
     active_show_fps: bool,
+    /// `[input] remote` in the runtime profile; the runner applies it within two seconds.
+    remote: library::RemoteInput,
     storage_line: String,
     app_row: usize,
     paths: Vec<String>,
@@ -180,6 +184,7 @@ impl Menu {
         self.ui = library::load_ui_settings(&self.ui_file);
         self.framegen = library::read_framegen_setting(&self.profile_file);
         self.show_fps = library::read_show_fps_setting(&self.profile_file);
+        self.remote = library::read_remote_input_setting(&self.profile_file);
         self.storage_line = library::format_storage_line(&library::storage_space_summary());
         self.catalog = library::scan_paths(&self.paths);
         self.ui.sort_games(&mut self.catalog.games);
@@ -637,10 +642,10 @@ impl Menu {
             }
         }
         if buttons & UP != 0 {
-            self.app_row = wrap_up(self.app_row, 6);
+            self.app_row = wrap_up(self.app_row, APP_ROWS);
         }
         if buttons & DOWN != 0 {
-            self.app_row = wrap_down(self.app_row, 6);
+            self.app_row = wrap_down(self.app_row, APP_ROWS);
         }
         if buttons & (CROSS | RIGHT | LEFT) != 0 {
             let forward = (buttons & LEFT) == 0;
@@ -719,6 +724,27 @@ impl Menu {
                             } else {
                                 format!("{}: {label}", tr(self.ui.language, "FPS Counter"))
                             };
+                        }
+                        Err(e) => self.status = format!("Cannot save profile: {e}"),
+                    }
+                }
+                5 => {
+                    self.remote = if forward { self.remote.next() } else { self.remote.prev() };
+                    match library::save_remote_input_setting(&self.profile_file, self.remote) {
+                        Ok(()) => {
+                            let hint = match self.remote {
+                                library::RemoteInput::Off => "Plug a USB keyboard and mouse into the PS5",
+                                library::RemoteInput::Sender => "Run txin-sender.exe on the PC",
+                                library::RemoteInput::Browser => {
+                                    "Open the address shown here or in the Touchpad menu on the PC"
+                                }
+                            };
+                            self.status = format!(
+                                "{}: {}  ·  {}",
+                                tr(self.ui.language, "PC keyboard & mouse"),
+                                tr(self.ui.language, self.remote.label_key()),
+                                tr(self.ui.language, hint)
+                            );
                         }
                         Err(e) => self.status = format!("Cannot save profile: {e}"),
                     }
@@ -1600,27 +1626,39 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             } else {
                 format!("{} {}  [X]", menu.installers.len(), t("ready"))
             };
+            let remote_status = library::read_remote_input_status().unwrap_or_default();
+            let remote_val = match menu.remote {
+                library::RemoteInput::Browser if remote_status.mode == "browser" => {
+                    format!("{}  PIN {}", remote_status.url, remote_status.pin)
+                }
+                library::RemoteInput::Sender if remote_status.mode == "sender" => {
+                    format!("{}  ·  {}", t(menu.remote.label_key()), remote_status.address)
+                }
+                other => t(other.label_key()).to_owned(),
+            };
             let rows = [
                 (t("Install GOG Games"), gog_val),
                 (t("Interface language"), menu.ui.language.display_name().to_owned()),
                 (t("Active offline profile"), format!("{}  (XUID {})", profile.name, profile.user_id)),
                 (t("Frame Generation"), fg_val),
                 (t("FPS Counter"), fps_val),
+                (t("PC keyboard & mouse"), remote_val),
                 (t("Restart TrinityXSX now"), restart_val),
             ];
+            let restart_row = rows.len() - 1;
             for (idx, (label, val)) in rows.iter().enumerate() {
-                let top = 200 + (idx as i32) * 78;
+                let top = 200 + (idx as i32) * 70;
                 let selected = idx == menu.app_row;
                 fill(dc, region(left, top, right, 68), if selected { card_sel } else { card_bg });
                 if selected {
                     fill(
                         dc,
                         region(left, top, left + scale(6), 68),
-                        if idx == 5 && any_pending { amber } else { mint },
+                        if idx == restart_row && any_pending { amber } else { mint },
                     );
                 }
                 text(dc, label, region(left + scale(26), top + 16, right - scale(500), 36), scale(26), 600, snow);
-                let val_color = if idx == 5 && any_pending {
+                let val_color = if idx == restart_row && any_pending {
                     amber
                 } else if (idx == 0 && !menu.installers.is_empty()) || selected {
                     mint
@@ -1641,7 +1679,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             text(
                 dc,
                 t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
-                region(left, 682, right, 42),
+                region(left, 704, right, 42),
                 scale(23),
                 400,
                 snow,
@@ -1649,7 +1687,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             text(
                 dc,
                 t("Custom gamertags can also be added from the Phone/PC Web Companion (L1)."),
-                region(left, 730, right, 42),
+                region(left, 750, right, 42),
                 scale(23),
                 400,
                 muted,
@@ -2191,6 +2229,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
     let ui = library::load_ui_settings(&ui_file);
     let framegen = library::read_framegen_setting(&profile_file);
     let show_fps = library::read_show_fps_setting(&profile_file);
+    let remote = library::read_remote_input_setting(&profile_file);
     let active_framegen = std::env::var("PW_FRAMEGEN")
         .ok()
         .and_then(|v| v.trim().parse::<u8>().ok())
@@ -2213,6 +2252,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
         active_framegen,
         show_fps,
         active_show_fps,
+        remote,
         storage_line: String::new(),
         app_row: 0,
         paths,

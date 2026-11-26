@@ -1531,6 +1531,11 @@ pub fn runtime_profile_file() -> PathBuf {
 
 /// Read a key from `[display]` inside a prospero-win `.profile` file.
 fn read_display_profile_value(profile_path: &Path, key: &str) -> Option<String> {
+    read_profile_value(profile_path, "display", key)
+}
+
+/// Read a key from a section of a prospero-win `.profile` file.
+fn read_profile_value(profile_path: &Path, section: &str, key: &str) -> Option<String> {
     let text = fs::read_to_string(profile_path).ok()?;
     let mut in_display = false;
     for raw in text.lines() {
@@ -1539,7 +1544,7 @@ fn read_display_profile_value(profile_path: &Path, key: &str) -> Option<String> 
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            in_display = line[1..line.len() - 1].trim().eq_ignore_ascii_case("display");
+            in_display = line[1..line.len() - 1].trim().eq_ignore_ascii_case(section);
             continue;
         }
         if in_display {
@@ -1553,9 +1558,14 @@ fn read_display_profile_value(profile_path: &Path, key: &str) -> Option<String> 
     None
 }
 
-/// Atomically update `key = value` inside `[display]` of a prospero-win `.profile` file,
-/// preserving all other sections, keys, and comments, and never emitting duplicate keys.
+/// Atomically update `key = value` inside `[display]` of a prospero-win `.profile` file.
 fn save_display_profile_value(profile_path: &Path, key: &str, value: &str) -> io::Result<()> {
+    save_profile_value(profile_path, "display", key, value)
+}
+
+/// Atomically update `key = value` inside a section of a prospero-win `.profile` file,
+/// preserving all other sections, keys, and comments, and never emitting duplicate keys.
+fn save_profile_value(profile_path: &Path, section: &str, key: &str, value: &str) -> io::Result<()> {
     let new_line = format!("{key} = {value}");
     let existing = fs::read_to_string(profile_path).unwrap_or_default();
     let eol = if existing.contains("\r\n") { "\r\n" } else { "\n" };
@@ -1574,7 +1584,7 @@ fn save_display_profile_value(profile_path: &Path, key: &str, value: &str) -> io
                 out.insert(pos, new_line.clone());
                 replaced = true;
             }
-            in_display = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("display");
+            in_display = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case(section);
             if in_display {
                 saw_display = true;
                 display_insert_at = Some(out.len() + 1);
@@ -1609,7 +1619,7 @@ fn save_display_profile_value(profile_path: &Path, key: &str, value: &str) -> io
             if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
                 out.push(String::new());
             }
-            out.push("[display]".into());
+            out.push(format!("[{section}]"));
             out.push(new_line);
         }
     }
@@ -1662,6 +1672,104 @@ pub fn save_framegen_setting(profile_path: &Path, factor: u8) -> io::Result<()> 
         _ => "off",
     };
     save_display_profile_value(profile_path, "framegen", value)
+}
+
+/// How a PC's keyboard and mouse reach the game (`[input] remote` in the runtime profile). The PS5 runner
+/// reads it again every two seconds, so a change applies without a restart. A USB keyboard and mouse plugged
+/// into the console always work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemoteInput {
+    /// No listening port: only what is plugged into the PS5.
+    #[default]
+    Off,
+    /// `txin-sender.exe` on the PC sends UDP datagrams (port 9396).
+    Sender,
+    /// The PS5 serves a page on port 8361; the PIN is in the Touchpad menu.
+    Browser,
+}
+
+impl RemoteInput {
+    pub fn code(self) -> &'static str {
+        match self {
+            RemoteInput::Off => "off",
+            RemoteInput::Sender => "sender",
+            RemoteInput::Browser => "browser",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "sender" => RemoteInput::Sender,
+            "browser" => RemoteInput::Browser,
+            _ => RemoteInput::Off,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            RemoteInput::Off => "Off (USB on the PS5 only)",
+            RemoteInput::Sender => "txin-sender program",
+            RemoteInput::Browser => "Web browser",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            RemoteInput::Off => RemoteInput::Browser,
+            RemoteInput::Browser => RemoteInput::Sender,
+            RemoteInput::Sender => RemoteInput::Off,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            RemoteInput::Off => RemoteInput::Sender,
+            RemoteInput::Sender => RemoteInput::Browser,
+            RemoteInput::Browser => RemoteInput::Off,
+        }
+    }
+}
+
+/// Read `[input] remote` from a prospero-win `.profile` file (defaults to off).
+pub fn read_remote_input_setting(profile_path: &Path) -> RemoteInput {
+    read_profile_value(profile_path, "input", "remote").map(|v| RemoteInput::parse(&v)).unwrap_or_default()
+}
+
+/// Update `[input] remote = off | sender | browser` inside a prospero-win `.profile` file.
+pub fn save_remote_input_setting(profile_path: &Path, mode: RemoteInput) -> io::Result<()> {
+    save_profile_value(profile_path, "input", "remote", mode.code())
+}
+
+/// What the PS5 runner says it opened for the PC keyboard and mouse (`<storage>/netinput.txt`): the mode in
+/// use and, for the browser, the page's address and PIN.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RemoteInputStatus {
+    pub mode: String,
+    pub url: String,
+    pub pin: String,
+    pub address: String,
+}
+
+pub fn parse_remote_input_status(text: &str) -> RemoteInputStatus {
+    let mut status = RemoteInputStatus::default();
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim().to_owned();
+            match k.trim() {
+                "mode" => status.mode = v,
+                "url" => status.url = v,
+                "pin" => status.pin = v,
+                "address" => status.address = v,
+                _ => {}
+            }
+        }
+    }
+    status
+}
+
+pub fn read_remote_input_status() -> Option<RemoteInputStatus> {
+    let text = fs::read_to_string(Path::new(PS5_STORAGE_ROOT).join("netinput.txt")).ok()?;
+    Some(parse_remote_input_status(&text))
 }
 
 /// Read `[display] show_fps` from a prospero-win `.profile` file (defaults to `true`).
@@ -2203,6 +2311,52 @@ mod tests {
         // The atomic write (tmp + rename) leaves no temporary file behind.
         assert!(!PathBuf::from(format!("{}.tmp", profile.display())).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_input_defaults_to_off_and_is_saved_in_the_input_section() {
+        let dir = temp_dir("profile-remote");
+        let profile = dir.join("trinityxsx-library.profile");
+        fs::write(&profile, SAMPLE_PROFILE).unwrap();
+        assert_eq!(read_remote_input_setting(&profile), RemoteInput::Off);
+        assert_eq!(read_remote_input_setting(&dir.join("missing.profile")), RemoteInput::Off);
+
+        save_remote_input_setting(&profile, RemoteInput::Browser).unwrap();
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            SAMPLE_PROFILE.replace("mode = xinput\n", "mode = xinput\nremote = browser\n")
+        );
+        assert_eq!(read_remote_input_setting(&profile), RemoteInput::Browser);
+        save_remote_input_setting(&profile, RemoteInput::Sender).unwrap();
+        assert_eq!(read_remote_input_setting(&profile), RemoteInput::Sender);
+        assert_eq!(fs::read_to_string(&profile).unwrap().matches("remote =").count(), 1);
+        // [display] keys are untouched by [input] ones, and the other way round.
+        save_framegen_setting(&profile, 2).unwrap();
+        assert_eq!(read_remote_input_setting(&profile), RemoteInput::Sender);
+        assert_eq!(read_framegen_setting(&profile), 2);
+
+        // A profile without [input] gets one.
+        let bare = dir.join("bare.profile");
+        fs::write(&bare, "[display]\nframegen = off\n").unwrap();
+        save_remote_input_setting(&bare, RemoteInput::Off).unwrap();
+        assert_eq!(fs::read_to_string(&bare).unwrap(), "[display]\nframegen = off\n\n[input]\nremote = off\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_input_cycles_and_reads_the_runner_status() {
+        let mut m = RemoteInput::Off;
+        for _ in 0..3 {
+            m = m.next();
+        }
+        assert_eq!(m, RemoteInput::Off);
+        assert_eq!(RemoteInput::Off.next().prev(), RemoteInput::Off);
+        assert_eq!(RemoteInput::parse(" Browser "), RemoteInput::Browser);
+        assert_eq!(RemoteInput::parse("usb"), RemoteInput::Off);
+        let s = parse_remote_input_status("mode=browser\nurl=http://192.168.1.170:8361\npin=4821\n");
+        assert_eq!((s.mode.as_str(), s.url.as_str(), s.pin.as_str()), ("browser", "http://192.168.1.170:8361", "4821"));
+        let s = parse_remote_input_status("mode=sender\naddress=192.168.1.170\nport=9396\n");
+        assert_eq!((s.mode.as_str(), s.address.as_str()), ("sender", "192.168.1.170"));
     }
 
     #[test]

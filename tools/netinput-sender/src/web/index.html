@@ -35,6 +35,7 @@
   #notice { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; display: none; }
   #notice.warn { display: block; background: #3a2b10; color: var(--warn); }
   #notice.bad { display: block; background: #3a1717; color: var(--bad); }
+  #notice.info { display: block; background: #13243a; color: #a9cdf5; }
 
   #stage { position: fixed; inset: 0; display: none; place-items: center; background: #000; cursor: none; user-select: none; }
   body.fullscreen #setup { display: none; }
@@ -56,9 +57,9 @@
   <div class="card">
     <h1 id="t-title"></h1>
     <p class="sub" id="t-sub"></p>
-    <label for="ps5" id="t-addr"></label>
+    <label for="field" id="t-field"></label>
     <div class="row">
-      <input id="ps5" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.170">
+      <input id="field" autocomplete="off" spellcheck="false">
       <button id="go" type="button"></button>
     </div>
     <ol class="steps">
@@ -83,51 +84,75 @@
 </div>
 <script>
 "use strict";
+// Two homes, one page: txin-sender serves it on 127.0.0.1 (a secure context, so Keyboard Lock gives the
+// game Esc, Alt+Tab and the Windows key), and the PS5 serves it on the LAN behind a PIN (plain http: the
+// browser keeps those keys, Esc leaves at once, and the ` key stands in for Esc).
+const HELPER = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
 const PANIC_MS = 1500;
 const pl = (navigator.languages || [navigator.language || ""]).some((l) => String(l).toLowerCase().startsWith("pl"));
 const T = pl ? {
   title: "TrinityXSX · klawiatura i mysz",
   sub: "Steruj grą na PS5 klawiaturą i myszą tego komputera.",
-  addr: "Adres PS5", go: "Pełny ekran",
+  go: "Pełny ekran",
+  addr: "Adres PS5",
   step1: "Wpisz adres PS5 i kliknij Pełny ekran.",
+  pin: "PIN z menu Touchpada na PS5",
+  step1Ps5: "Wpisz PIN, który pokazuje menu Touchpada na PS5, i kliknij Pełny ekran.",
   step2: "Na czarnym ekranie naciśnij Ctrl+Alt+F12: dopiero wtedy zaczyna się przechwytywanie (na laptopie może być potrzebny Fn).",
-  toggle: "zaczyna i kończy przechwytywanie", escKey: "Esc ×1,5 s",
-  esc: "tryb awaryjny: zatrzymuje wszystko i wychodzi z pełnego ekranu",
+  toggle: "zaczyna i kończy przechwytywanie",
+  escKey: "Esc ×1,5 s", esc: "tryb awaryjny: zatrzymuje wszystko i wychodzi z pełnego ekranu",
+  escKeyPs5: "Esc", escPs5: "zatrzymuje wszystko i wychodzi z pełnego ekranu; do gry Esc wysyła klawisz ` (pod Esc)",
   ready: "Naciśnij Ctrl+Alt+F12, aby zacząć przechwytywanie",
   readySmall: "Przytrzymaj Esc, aby wyjść",
+  readySmallPs5: "Esc wychodzi · w grze Esc to klawisz `",
   capturing: "Przechwytywanie · Ctrl+Alt+F12 zatrzymuje",
   capturingSmall: "przytrzymaj Esc, aby wyjść",
+  capturingSmallPs5: "Esc wychodzi · w grze Esc to klawisz `",
   interrupted: "Przechwytywanie przerwane. Naciśnij Ctrl+Alt+F12, aby wrócić",
   noLock: "Ta przeglądarka nie blokuje klawiatury: Esc, Alt+Tab i klawisz Windows nie trafią do gry. Najlepiej działa Chrome lub Edge.",
+  ps5Note: "Strona z konsoli nie może przejąć Esc, Alt+Tab ani klawisza Windows. Pełne przechwytywanie daje program txin-sender.exe.",
   panicked: "Tryb awaryjny: przechwytywanie zatrzymane, klawiatura i mysz wróciły do komputera.",
   left: "Wyszedłeś z pełnego ekranu, przechwytywanie zatrzymane.",
-  needAddr: "Wpisz adres PS5 (np. 192.168.1.170).",
+  needAddr: "Wpisz adres PS5 (np. 192.168.1.170).", needPin: "Wpisz PIN z menu Touchpada na PS5.",
   connecting: "Łączenie z pomocnikiem…", helper: "Pomocnik działa.",
   helperGone: "Pomocnik txin-sender nie działa. Uruchom go ponownie i odśwież stronę.",
+  badPin: "PS5 nie przyjął połączenia: zły PIN, zbyt wiele prób albo w ustawieniach TrinityXSX nie wybrano trybu Przeglądarka.",
+  ps5Gone: "Połączenie z PS5 przerwane.",
   lastKey: (k) => `Ostatni odebrany klawisz: ${k}`,
   target: (a) => `Cel: ${a}`, sent: (n) => `Wysłano ${n} pakietów`, err: (e) => `Błąd: ${e}`,
+  ps5: (a) => `Połączono z PS5 (${a})`,
   noFull: "Bez pełnego ekranu: Esc zwalnia mysz, a Alt+Tab i klawisz Windows zostają na komputerze. Przytrzymaj Esc, aby wyjść",
 } : {
   title: "TrinityXSX · keyboard & mouse",
   sub: "Play the game on your PS5 with this computer's keyboard and mouse.",
-  addr: "PS5 address", go: "Full screen",
+  go: "Full screen",
+  addr: "PS5 address",
   step1: "Enter the PS5's address and click Full screen.",
+  pin: "PIN from the PS5's Touchpad menu",
+  step1Ps5: "Enter the PIN the PS5's Touchpad menu shows and click Full screen.",
   step2: "On the black screen press Ctrl+Alt+F12: only then does capturing start (a laptop may need Fn).",
-  toggle: "starts and stops capturing", escKey: "Esc ×1.5 s",
-  esc: "panic: stops everything and leaves full screen",
+  toggle: "starts and stops capturing",
+  escKey: "Esc ×1.5 s", esc: "panic: stops everything and leaves full screen",
+  escKeyPs5: "Esc", escPs5: "stops everything and leaves full screen; the ` key (below Esc) sends Esc to the game",
   ready: "Press Ctrl+Alt+F12 to start capturing",
   readySmall: "Hold Esc to leave",
+  readySmallPs5: "Esc leaves · in the game, ` is Esc",
   capturing: "Capturing · Ctrl+Alt+F12 stops",
   capturingSmall: "hold Esc to leave",
+  capturingSmallPs5: "Esc leaves · in the game, ` is Esc",
   interrupted: "Capture interrupted. Press Ctrl+Alt+F12 to resume",
   noLock: "This browser cannot lock the keyboard: Esc, Alt+Tab and the Windows key will not reach the game. Chrome or Edge work best.",
+  ps5Note: "A page from the console cannot take Esc, Alt+Tab or the Windows key. txin-sender.exe captures everything.",
   panicked: "Panic: capture stopped, the keyboard and mouse are this computer's again.",
   left: "You left full screen, so capture stopped.",
-  needAddr: "Enter the PS5's address (e.g. 192.168.1.170).",
+  needAddr: "Enter the PS5's address (e.g. 192.168.1.170).", needPin: "Enter the PIN from the PS5's Touchpad menu.",
   connecting: "Connecting to the helper…", helper: "Helper running.",
   helperGone: "The txin-sender helper is not running. Start it again and reload this page.",
+  badPin: "The PS5 refused: wrong PIN, too many tries, or TrinityXSX's settings do not have Browser selected.",
+  ps5Gone: "The connection to the PS5 was lost.",
   lastKey: (k) => `Last key received: ${k}`,
   target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,
+  ps5: (a) => `Connected to the PS5 (${a})`,
   noFull: "Not full screen: Esc frees the mouse, and Alt+Tab and the Windows key stay on this computer. Hold Esc to leave",
 };
 
@@ -146,10 +171,12 @@ const VK = {
 for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 0x41 + i;
 for (let i = 0; i < 10; i++) { VK["Digit" + i] = 0x30 + i; VK["Numpad" + i] = 0x60 + i; }
 for (let i = 1; i <= 24; i++) VK["F" + i] = 0x6f + i;
+// From the console's page the browser keeps Esc, so ` (below Esc) is the game's Esc.
+if (!HELPER) VK.Backquote = 0x1b;
 
 const $ = (id) => document.getElementById(id);
-const input = $("ps5"), go = $("go"), status = $("status"), notice = $("notice");
-let ws = null, state = "setup", escTimer = null, wheel = 0, connected = false, full = false;
+const field = $("field"), go = $("go"), status = $("status"), notice = $("notice");
+let ws = null, state = "setup", escTimer = null, wheel = 0, connected = false, full = false, opened = false;
 // Physical keys held now, by KeyboardEvent.code: the shortcut is recognised from these, not from the
 // event's ctrlKey/altKey, which Right Alt (AltGr) and some keyboards report differently.
 const held = new Set();
@@ -171,58 +198,94 @@ function describe(e) {
   return [...mods, (e.code || "?") + key].join(" + ");
 }
 
-for (const [id, key] of [["t-title", "title"], ["t-sub", "sub"], ["t-addr", "addr"], ["go", "go"],
-                         ["t-toggle", "toggle"], ["t-esc-key", "escKey"], ["t-esc", "esc"],
-                         ["t-step1", "step1"], ["t-step2", "step2"]]) $(id).textContent = T[key];
+const texts = [["t-title", "title"], ["t-sub", "sub"], ["go", "go"], ["t-step2", "step2"], ["t-toggle", "toggle"],
+               ["t-field", HELPER ? "addr" : "pin"], ["t-step1", HELPER ? "step1" : "step1Ps5"],
+               ["t-esc-key", HELPER ? "escKey" : "escKeyPs5"], ["t-esc", HELPER ? "esc" : "escPs5"]];
+for (const [id, key] of texts) $(id).textContent = T[key];
 document.title = T.title;
 document.documentElement.lang = pl ? "pl" : "en";
-input.value = new URLSearchParams(location.search).get("ps5") || localStorage.getItem("txin-ps5") || "";
-if (!(navigator.keyboard && navigator.keyboard.lock)) showNotice(T.noLock, "warn");
+const query = new URLSearchParams(location.search);
+if (HELPER) {
+  field.inputMode = "decimal";
+  field.placeholder = "192.168.1.170";
+  field.value = query.get("ps5") || localStorage.getItem("txin-ps5") || "";
+  if (!(navigator.keyboard && navigator.keyboard.lock)) showNotice(T.noLock, "warn");
+} else {
+  field.inputMode = "numeric";
+  field.placeholder = "1234";
+  field.maxLength = 7;
+  field.value = query.get("pin") || sessionStorage.getItem("txin-pin") || "";
+  showNotice(T.ps5Note, "info");
+}
 
 function showNotice(text, kind) { notice.textContent = text; notice.className = text ? kind : ""; }
 function setStatus(text, kind) { status.textContent = text; status.className = kind || ""; }
 function send(text) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); }
 
-function connect() {
-  setStatus(T.connecting);
-  ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { connected = true; setStatus(T.helper, "good"); };
-  ws.onclose = () => { connected = false; leave(); showNotice(T.helperGone, "bad"); setStatus(""); go.disabled = true; };
+function connect(pin) {
+  if (HELPER) setStatus(T.connecting);
+  opened = false;
+  ws = new WebSocket(`ws://${location.host}/ws` + (pin ? `?pin=${encodeURIComponent(pin)}` : ""));
+  ws.onopen = () => { connected = opened = true; if (HELPER) setStatus(T.helper, "good"); };
+  ws.onclose = () => {
+    const wasOpen = opened;
+    connected = false;
+    ws = null;
+    leave();
+    if (HELPER) { showNotice(T.helperGone, "bad"); setStatus(""); go.disabled = true; }
+    else { showNotice(wasOpen ? T.ps5Gone : T.badPin, "bad"); setStatus(""); }
+  };
   ws.onmessage = (e) => {
     const [verb, ...rest] = String(e.data).split(" ");
-    if (verb === "target") setStatus(T.target(rest[0]), "good");
+    if (verb === "target") setStatus(HELPER ? T.target(rest[0]) : T.ps5(rest[0]), "good");
     else if (verb === "sent") setStatus(T.sent(rest[0]), "good");
     else if (verb === "panic") panic();
     else if (verb === "error") { leave(); showNotice(T.err(rest.join(" ")), "bad"); }
   };
 }
+// Alive while open (the console drops a silent page and releases what it held); the helper ignores it.
+setInterval(() => send("h"), 500);
 
 function show() {
   if (state !== "ready") $("echo").textContent = "";
   document.body.classList.toggle("fullscreen", state !== "setup");
   document.body.classList.toggle("capturing", state === "capturing");
-  if (state === "ready") { $("big").textContent = T.ready; $("small").textContent = full ? T.readySmall : T.noFull; }
-  if (state === "capturing") { $("big").textContent = T.capturing; $("small").textContent = T.capturingSmall; }
+  if (state === "ready") {
+    $("big").textContent = T.ready;
+    $("small").textContent = !HELPER ? T.readySmallPs5 : full ? T.readySmall : T.noFull;
+  }
+  if (state === "capturing") {
+    $("big").textContent = T.capturing;
+    $("small").textContent = HELPER ? T.capturingSmall : T.capturingSmallPs5;
+  }
 }
 
 go.addEventListener("click", async () => {
-  const address = input.value.trim();
-  if (!address) { showNotice(T.needAddr, "bad"); input.focus(); return; }
-  if (!connected) return;
-  localStorage.setItem("txin-ps5", address);
-  showNotice("", "");
-  send("target " + address);
+  const value = field.value.trim();
+  if (!value) { showNotice(HELPER ? T.needAddr : T.needPin, "bad"); field.focus(); return; }
+  if (HELPER) {
+    if (!connected) return;
+    localStorage.setItem("txin-ps5", value);
+    showNotice("", "");
+    send("target " + value);
+  } else {
+    sessionStorage.setItem("txin-pin", value);
+    showNotice(T.ps5Note, "info");
+    if (ws) ws.close();
+    connect(value);
+  }
   // Some embedded browsers never answer a full-screen request: carry on in the window after a moment.
   const granted = await Promise.race([
     document.documentElement.requestFullscreen({ navigationUI: "hide" }).then(() => true, () => false),
     new Promise((resolve) => setTimeout(() => resolve(false), 1500)),
   ]);
   full = granted && !!document.fullscreenElement;
-  if (full && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }
+  if (full && HELPER && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }
+  if (!HELPER && !ws) { leave(); return; }   // the PS5 already refused
   state = "ready";
   show();
 });
-input.addEventListener("keydown", (e) => { if (e.key === "Enter" && state === "setup") go.click(); });
+field.addEventListener("keydown", (e) => { if (e.key === "Enter" && state === "setup") go.click(); });
 
 function startCapture() {
   const stage = $("stage");
@@ -311,6 +374,8 @@ document.addEventListener("wheel", (e) => {
   if (detents) { wheel += detents * 100; send(`w ${detents}`); }
 }, { passive: false });
 document.addEventListener("contextmenu", (e) => { if (state !== "setup") e.preventDefault(); });
+// Ctrl+W and the like close the tab without asking the page: ask first while playing.
+window.addEventListener("beforeunload", (e) => { if (state !== "setup") { e.preventDefault(); e.returnValue = ""; } });
 
 // Anything that takes the keyboard or mouse away stops capturing, so nothing stays held on the PS5.
 document.addEventListener("fullscreenchange", () => {
@@ -322,7 +387,7 @@ document.addEventListener("pointerlockchange", () => {
 window.addEventListener("blur", () => { held.clear(); if (state === "capturing") stopCapture(T.interrupted); });
 document.addEventListener("visibilitychange", () => { if (document.hidden && state !== "setup") leave(); });
 
-connect();
+if (HELPER) connect();
 </script>
 </body>
 </html>

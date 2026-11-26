@@ -121,6 +121,14 @@ jobs:
             echo "Applying $p"
             git -C "$tmp/pw" apply --whitespace=nowarn "$PWD/$p"
           done
+          # The capture page the PS5 serves is generated from tools/netinput-sender/src/web/index.html.
+          python3 tools/netinput-sender/make_page_c.py --check "$tmp/pw/src/pw_webinput_page.c"
+          # The network keyboard and mouse's own host tests (patches 0012 and 0013).
+          (cd "$tmp/pw" && for t in "tests/test_pw_netinput.c src/pw_netinput.c" \
+               "tests/test_pw_webinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_netinput.c" \
+               "-DPW_NETINPUT_PS5_HOST_TEST tests/test_pw_netinput_ps5.c native/pw_netinput_ps5.c src/pw_netinput.c" \
+               "tests/test_pw_game_profile.c src/pw_game_profile.c src/pw_app_profile.c"; do
+             cc -std=c11 -O1 -Wall -Wextra -Werror $t -o test && ./test; done)
           rm -rf "$tmp"
 
   xcl:
