@@ -1728,4 +1728,296 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // Copy of configs/trinityxsx-library.profile: a comment, four sections, and repeated `env` keys in [debug].
+    const SAMPLE_PROFILE: &str = concat!(
+        "; TrinityXSX catalog inside the existing PS5 Wine runtime.\n",
+        "[application]\n",
+        "id = trinityxsx-library\n",
+        "name = TrinityXSX\n",
+        "executable = C:\\XCL\\xcl-library.exe\n",
+        "working_directory = C:\\XCL\n",
+        "arguments = library C:\\XCL\\games\n",
+        "dll_overrides = d3d12,d3d12core,dxgi,d3d11=n\n",
+        "prefix = default\n",
+        "runtime = wine-wow64\n",
+        "architecture = pe64\n",
+        "graphics = dxvk\n",
+        "\n",
+        "[display]\n",
+        "desktop = 1920x1080\n",
+        "\n",
+        "[input]\n",
+        "mode = xinput\n",
+        "\n",
+        "[debug]\n",
+        "winedebug = err+all\n",
+        "env = VKD3D_SHADER_CACHE_PATH=C:/XCL/cache/trinityxsx-library\n",
+        "env = VKD3D_DEBUG=warn\n",
+        "env = VKD3D_LOG_FILE=C:/XCL/vkd3d-trinityxsx-library.log\n",
+        "env = DXVK_LOG_PATH=C:/XCL\n",
+    );
+
+    #[test]
+    fn show_fps_defaults_to_true_when_file_section_or_key_is_missing() {
+        let dir = temp_dir("fps-default");
+        assert!(read_show_fps_setting(&dir.join("absent.profile")));
+
+        let profile = dir.join("t.profile");
+        let cases = [
+            "",
+            "[application]\nid = trinityxsx-library\n",
+            "[display]\ndesktop = 1920x1080\n",
+            // Commented-out keys are not values.
+            "[display]\n; show_fps = false\n# show_fps = off\n",
+            // The same key in another section does not count.
+            "[input]\nshow_fps = false\n[display]\ndesktop = 1920x1080\n",
+        ];
+        for body in cases {
+            fs::write(&profile, body).unwrap();
+            assert!(read_show_fps_setting(&profile), "{body:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn show_fps_reads_false_zero_off_case_insensitively_and_anything_else_as_true() {
+        let dir = temp_dir("fps-values");
+        let profile = dir.join("t.profile");
+        for v in ["false", "FALSE", "False", "0", "off", "OFF", "Off"] {
+            fs::write(&profile, format!("[display]\nshow_fps = {v}\n")).unwrap();
+            assert!(!read_show_fps_setting(&profile), "{v:?}");
+        }
+        // Only false/0/off turn the HUD off: even "no" or an empty value keeps it on.
+        for v in ["true", "TRUE", "1", "on", "yes", "no", "2", ""] {
+            fs::write(&profile, format!("[display]\nshow_fps = {v}\n")).unwrap();
+            assert!(read_show_fps_setting(&profile), "{v:?}");
+        }
+        // Section name, key name and surrounding whitespace are matched loosely.
+        fs::write(&profile, "[ Display ]\n  SHOW_FPS   =   Off  \n").unwrap();
+        assert!(!read_show_fps_setting(&profile));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_show_fps_round_trips_and_creates_missing_file_and_parent_dirs() {
+        let dir = temp_dir("fps-roundtrip");
+        let profile = dir.join("profiles").join("trinityxsx-library.profile");
+
+        save_show_fps_setting(&profile, false).unwrap();
+        assert!(!read_show_fps_setting(&profile));
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[display]\nshow_fps = false\n");
+
+        save_show_fps_setting(&profile, true).unwrap();
+        assert!(read_show_fps_setting(&profile));
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[display]\nshow_fps = true\n");
+
+        save_show_fps_setting(&profile, false).unwrap();
+        assert!(!read_show_fps_setting(&profile));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn framegen_defaults_to_off_and_round_trips_supported_factors() {
+        let dir = temp_dir("framegen-roundtrip");
+        let profile = dir.join("t.profile");
+        assert_eq!(read_framegen_setting(&profile), 0);
+
+        for factor in [2u8, 3, 4] {
+            save_framegen_setting(&profile, factor).unwrap();
+            assert_eq!(read_framegen_setting(&profile), factor);
+            assert_eq!(fs::read_to_string(&profile).unwrap(), format!("[display]\nframegen = {factor}\n"));
+        }
+        // Any factor outside 2..=4 is stored as `off` and reads back as 0.
+        for factor in [0u8, 1, 5, 255] {
+            save_framegen_setting(&profile, 4).unwrap();
+            save_framegen_setting(&profile, factor).unwrap();
+            assert_eq!(read_framegen_setting(&profile), 0, "{factor}");
+            assert_eq!(fs::read_to_string(&profile).unwrap(), "[display]\nframegen = off\n");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn framegen_reads_only_known_factors_from_the_display_section() {
+        let dir = temp_dir("framegen-values");
+        let profile = dir.join("t.profile");
+        let cases: [(&str, u8); 9] = [
+            ("[display]\nframegen = 3\n", 3),
+            ("[DISPLAY]\nFrameGen=4\n", 4),
+            ("[display]\nframegen = off\n", 0),
+            ("[display]\nframegen = 1\n", 0),
+            ("[display]\nframegen = 8\n", 0),
+            ("[display]\nframegen = x2\n", 0),
+            ("[display]\nframegen =\n", 0),
+            ("[application]\nframegen = 2\n", 0),
+            ("[display]\n; framegen = 2\n", 0),
+        ];
+        for (body, expected) in cases {
+            fs::write(&profile, body).unwrap();
+            assert_eq!(read_framegen_setting(&profile), expected, "{body:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_display_keys_preserves_the_rest_of_a_realistic_profile() {
+        let dir = temp_dir("profile-preserve");
+        let profile = dir.join("trinityxsx-library.profile");
+        fs::write(&profile, SAMPLE_PROFILE).unwrap();
+
+        save_framegen_setting(&profile, 3).unwrap();
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            SAMPLE_PROFILE.replace("desktop = 1920x1080\n", "desktop = 1920x1080\nframegen = 3\n")
+        );
+
+        save_show_fps_setting(&profile, false).unwrap();
+        save_framegen_setting(&profile, 4).unwrap();
+        // New keys go after the last key of [display]; an existing key is rewritten in place.
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap(),
+            SAMPLE_PROFILE.replace("desktop = 1920x1080\n", "desktop = 1920x1080\nframegen = 4\nshow_fps = false\n")
+        );
+        assert_eq!(read_framegen_setting(&profile), 4);
+        assert!(!read_show_fps_setting(&profile));
+        assert_eq!(read_display_profile_value(&profile, "desktop").as_deref(), Some("1920x1080"));
+        // The atomic write (tmp + rename) leaves no temporary file behind.
+        assert!(!PathBuf::from(format!("{}.tmp", profile.display())).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_display_section_is_appended_after_a_blank_line() {
+        let dir = temp_dir("profile-no-display");
+        let profile = dir.join("t.profile");
+
+        let body = "; comment\n[application]\nid = trinityxsx-library\n\n[input]\nmode = xinput\n";
+        fs::write(&profile, body).unwrap();
+        save_show_fps_setting(&profile, false).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), format!("{body}\n[display]\nshow_fps = false\n"));
+        assert!(!read_show_fps_setting(&profile));
+
+        // No second blank line when the file already ends with one.
+        fs::write(&profile, "[input]\nmode = xinput\n\n").unwrap();
+        save_framegen_setting(&profile, 2).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[input]\nmode = xinput\n\n[display]\nframegen = 2\n");
+        assert_eq!(read_framegen_setting(&profile), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_named_key_in_another_section_is_left_untouched() {
+        let dir = temp_dir("profile-other-section");
+        let profile = dir.join("t.profile");
+        fs::write(&profile, "[debug]\nshow_fps = off\n").unwrap();
+        assert!(read_show_fps_setting(&profile));
+
+        save_show_fps_setting(&profile, true).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[debug]\nshow_fps = off\n\n[display]\nshow_fps = true\n");
+        assert!(read_show_fps_setting(&profile));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_display_key_goes_after_last_key_before_trailing_comments_and_blanks() {
+        let dir = temp_dir("profile-insert-pos");
+        let profile = dir.join("t.profile");
+        let cases = [
+            (
+                "[display]\ndesktop = 1920x1080\n; note\n\n[input]\nmode = xinput\n",
+                "[display]\ndesktop = 1920x1080\nframegen = 2\n; note\n\n[input]\nmode = xinput\n",
+            ),
+            // Empty [display] directly followed by another header.
+            ("[display]\n[input]\nmode = xinput\n", "[display]\nframegen = 2\n[input]\nmode = xinput\n"),
+            // [display] is the last section of the file.
+            (
+                "[application]\nid = a\n\n[display]\ndesktop = 1920x1080\n",
+                "[application]\nid = a\n\n[display]\ndesktop = 1920x1080\nframegen = 2\n",
+            ),
+        ];
+        for (before, after) in cases {
+            fs::write(&profile, before).unwrap();
+            save_framegen_setting(&profile, 2).unwrap();
+            assert_eq!(fs::read_to_string(&profile).unwrap(), after, "{before:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_rewrites_key_case_insensitively_and_drops_duplicates() {
+        let dir = temp_dir("profile-dedupe");
+        let profile = dir.join("t.profile");
+        fs::write(&profile, "[Display]\nFrameGen = 2\nframegen = 3\nshow_fps = off\nshow_fps = on\n").unwrap();
+        // Reading takes the first occurrence.
+        assert_eq!(read_framegen_setting(&profile), 2);
+        assert!(!read_show_fps_setting(&profile));
+
+        save_framegen_setting(&profile, 4).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[Display]\nframegen = 4\nshow_fps = off\nshow_fps = on\n");
+
+        save_show_fps_setting(&profile, true).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "[Display]\nframegen = 4\nshow_fps = true\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_keeps_crlf_line_endings() {
+        let dir = temp_dir("profile-crlf");
+        let profile = dir.join("t.profile");
+        let body = "; c\r\n[application]\r\nid = a\r\n\r\n[display]\r\ndesktop = 1920x1080\r\n";
+        fs::write(&profile, body).unwrap();
+
+        save_framegen_setting(&profile, 3).unwrap();
+        assert_eq!(fs::read_to_string(&profile).unwrap(), format!("{body}framegen = 3\r\n"));
+        assert_eq!(read_framegen_setting(&profile), 3);
+        // Values are read without a stray '\r'.
+        assert_eq!(read_display_profile_value(&profile, "desktop").as_deref(), Some("1920x1080"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_storage_line_shows_free_gib_per_mount_joined_by_middle_dots() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(format_storage_line(&[]), "");
+
+        let one = StorageSpace { label: "C:".into(), free_bytes: 5 * GIB + GIB / 2, total_bytes: 100 * GIB };
+        assert_eq!(format_storage_line(&[one]), "C: 5.5 GB free");
+
+        let items = vec![
+            // 1 TB (decimal) is shown in binary units with one decimal place.
+            StorageSpace { label: "/mnt/ext1".into(), free_bytes: 1_000_000_000_000, total_bytes: 2_000_000_000_000 },
+            // Rounded, not truncated.
+            StorageSpace { label: "/data".into(), free_bytes: 2 * GIB - 1, total_bytes: 4 * GIB },
+            StorageSpace { label: "/mnt/usb0".into(), free_bytes: 0, total_bytes: GIB },
+        ];
+        assert_eq!(
+            format_storage_line(&items),
+            "/mnt/ext1 931.3 GB free  \u{b7}  /data 2.0 GB free  \u{b7}  /mnt/usb0 0.0 GB free"
+        );
+    }
+
+    #[test]
+    fn query_disk_space_reports_existing_directory_and_rejects_missing_or_file_paths() {
+        let dir = temp_dir("disk-space");
+        let (free, total) = query_disk_space(&dir).expect("temp dir is on a mounted volume");
+        assert!(total > 0);
+        assert!(free <= total);
+
+        assert_eq!(query_disk_space(&dir.join("missing")), None);
+        let file = dir.join("f.bin");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(query_disk_space(&file), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn storage_space_summary_only_reports_known_mounts_with_consistent_sizes() {
+        let known = ["C:", "/mnt/ext1", "/data", "/mnt/usb0"];
+        for s in storage_space_summary() {
+            assert!(known.contains(&s.label.as_str()), "{}", s.label);
+            assert!(s.total_bytes > 0);
+            assert!(s.free_bytes <= s.total_bytes);
+        }
+    }
 }

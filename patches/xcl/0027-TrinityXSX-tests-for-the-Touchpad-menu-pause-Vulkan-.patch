@@ -1,0 +1,827 @@
+From 42e91905f845823a770188951a5ff9c4dca86fc4 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 14:08:48 +0100
+Subject: [PATCH] TrinityXSX: tests for the Touchpad menu pause, Vulkan hooks,
+ root  argument replay and VKD3D feature level
+
+Unit tests for the XCL-side changes of patches 0020, 0022, 0023 and
+0026, each in a trinityxsx_tests module at the end of the file so they
+stay out of the way of upstream's own tests on rebase:
+
+- present.rs: title_menu_open() is false (and stays false) on stock
+  Windows, where ntdll rejects the PS5 runner's info class; the
+  PwTitleMenuSnapshot layout matches the runner's C struct
+  pw_title_menu (offsets, 836 bytes); wrap_vulkan_proc and the
+  vkGetInstanceProcAddr / vkGetDeviceProcAddr / vkQueuePresentKHR
+  hooks forward to fake loader entry points and fail safe before they
+  are resolved.
+- bind.rs: PC graphics root arguments are recorded per index and kind,
+  constants in call order, cleared on signature change / ClearState /
+  Reset, copied to split lists, and replayed after the root signature
+  on a PC-pipeline draw.
+- console_heap.rs: pc_gpu_handle for views, samplers, CPU-only heaps,
+  32-bit console addresses and the shared heap.
+- config.rs: vkd3d_feature_level defaults to empty, is read from
+  xcl.toml and is optional.
+---
+ crates/xcl/src/config.rs                  |  56 ++++
+ crates/xcl/src/hle/d3d12x/bind.rs         | 315 ++++++++++++++++++++++
+ crates/xcl/src/hle/d3d12x/console_heap.rs | 154 +++++++++++
+ crates/xcl/src/hle/d3d12x/present.rs      | 235 ++++++++++++++++
+ 4 files changed, 760 insertions(+)
+
+diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
+index 46f5f45..3a4b834 100644
+--- a/crates/xcl/src/config.rs
++++ b/crates/xcl/src/config.rs
+@@ -464,3 +464,59 @@ mod tests {
+         assert_eq!(parse_raytracing_tier("11"), Some(11));
+     }
+ }
++
++#[cfg(test)]
++mod trinityxsx_tests {
++    use super::*;
++
++    #[test]
++    fn default_has_no_vkd3d_feature_level() {
++        assert!(Config::default().vkd3d_feature_level.is_empty());
++    }
++
++    #[test]
++    fn vkd3d_feature_level_is_read_from_xcl_toml() {
++        let c: Config = toml::from_str("vkd3d_feature_level = \"12_0\"\n").unwrap();
++        assert_eq!(c.vkd3d_feature_level, "12_0");
++        // the other keys keep their defaults
++        assert_eq!(c.raytracing, "auto");
++        assert_eq!(c.gamertag, "Player1");
++    }
++
++    #[test]
++    fn xcl_toml_without_vkd3d_feature_level_still_parses() {
++        let c: Config = toml::from_str("device_type = \"lockhart\"\ndirect_dxil = \"1\"\n").unwrap();
++        assert_eq!(c.vkd3d_feature_level, "");
++        assert_eq!(c.direct_dxil, "1");
++        assert!(c.is_series_s());
++    }
++
++    #[test]
++    fn vkd3d_feature_level_is_kept_verbatim_by_the_config() {
++        // trimming is host_main's job (host.rs), not the parser's
++        let c: Config = toml::from_str("vkd3d_feature_level = \" 12_1 \"\n").unwrap();
++        assert_eq!(c.vkd3d_feature_level, " 12_1 ");
++    }
++
++    #[test]
++    fn load_or_create_writes_reads_and_tolerates_a_missing_vkd3d_feature_level() {
++        let dir = std::env::temp_dir().join(format!(
++            "xcl_trinityxsx_cfg_load_or_create_vkd3d_feature_level_{}",
++            std::process::id()
++        ));
++        let _ = std::fs::remove_dir_all(&dir);
++        let path = dir.join("xcl.toml");
++        // a missing file is created with the defaults, the new key among them
++        assert_eq!(Config::load_or_create(&path).unwrap().vkd3d_feature_level, "");
++        let written = std::fs::read_to_string(&path).unwrap();
++        assert!(written.contains("vkd3d_feature_level"), "{written}");
++        // a user's value is read back
++        std::fs::write(&path, "vkd3d_feature_level = \"12_0\"\n").unwrap();
++        assert_eq!(Config::load_or_create(&path).unwrap().vkd3d_feature_level, "12_0");
++        // an xcl.toml written before the key existed loads with it empty
++        std::fs::write(&path, "gamertag = \"P2\"\n").unwrap();
++        let c = Config::load_or_create(&path).unwrap();
++        assert_eq!((c.gamertag.as_str(), c.vkd3d_feature_level.as_str()), ("P2", ""));
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++}
+diff --git a/crates/xcl/src/hle/d3d12x/bind.rs b/crates/xcl/src/hle/d3d12x/bind.rs
+index ecb45a3..610c6b3 100644
+--- a/crates/xcl/src/hle/d3d12x/bind.rs
++++ b/crates/xcl/src/hle/d3d12x/bind.rs
+@@ -1917,3 +1917,318 @@ void main(uint t : SV_GroupIndex) {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod trinityxsx_tests {
++    use super::*;
++
++    /// GPU addresses far above user-mode space (UMA is reserved below 1 TiB): never unified
++    /// memory, so `list_x::pc_va_of` passes them through unchanged whatever the UMA state.
++    const VA: u64 = 0x00AB_0022_0000_0000;
++
++    /// A graphics root call, as recorded in `pc_gfx_ops` or as made on the PC list.
++    #[derive(Debug, Clone, PartialEq)]
++    enum PcCall {
++        Rs(usize),
++        Table(u32, u64),
++        Constant(u32, u32, u32),
++        Constants(u32, Vec<u32>, u32),
++        Cbv(u32, u64),
++        Srv(u32, u64),
++        Uav(u32, u64),
++    }
++
++    fn recorded(list: *mut c_void) -> Vec<PcCall> {
++        with(list, |s| {
++            s.pc_gfx_ops
++                .iter()
++                .map(|op| match op {
++                    PcGfxOp::Table(i, h) => PcCall::Table(*i, *h),
++                    PcGfxOp::Constant(i, v, o) => PcCall::Constant(*i, *v, *o),
++                    PcGfxOp::Constants(i, w, o) => PcCall::Constants(*i, w.clone(), *o),
++                    PcGfxOp::Cbv(i, va) => PcCall::Cbv(*i, *va),
++                    PcGfxOp::Srv(i, va) => PcCall::Srv(*i, *va),
++                    PcGfxOp::Uav(i, va) => PcCall::Uav(*i, *va),
++                })
++                .collect()
++        })
++    }
++
++    /// A unique state key (a live heap address, so no other test's list shares it); its bind
++    /// state is forgotten on drop (no UMA blocks, so `forget` hands nothing to console_list).
++    struct TestList(Box<u64>);
++
++    impl TestList {
++        fn new() -> Self {
++            let l = TestList(Box::new(0));
++            // a list object freed elsewhere without `forget` may have left state at this address
++            remove_state_for_test(l.ptr());
++            l
++        }
++        fn ptr(&self) -> *mut c_void {
++            &*self.0 as *const u64 as *mut c_void
++        }
++    }
++
++    impl Drop for TestList {
++        fn drop(&mut self) {
++            forget(self.ptr());
++        }
++    }
++
++    /// A PC graphics command list whose root-argument methods (PC vtable #30, #34…#42) record
++    /// their calls. Its address is also the console list's state key in these tests.
++    #[repr(C)]
++    struct FakePcList {
++        #[allow(dead_code)] // read through the COM pointer
++        vt: *const usize,
++        calls: Mutex<Vec<PcCall>>,
++    }
++
++    unsafe fn push_call(this: *mut c_void, c: PcCall) {
++        (*(this as *const FakePcList)).calls.lock().unwrap().push(c);
++    }
++    unsafe extern "system" fn pc_ref(_this: *mut c_void) -> u32 {
++        1
++    }
++    unsafe extern "system" fn pc_set_rs(this: *mut c_void, rs: *mut c_void) {
++        push_call(this, PcCall::Rs(rs as usize));
++    }
++    unsafe extern "system" fn pc_set_constant(this: *mut c_void, i: u32, v: u32, o: u32) {
++        push_call(this, PcCall::Constant(i, v, o));
++    }
++    unsafe extern "system" fn pc_set_constants(this: *mut c_void, i: u32, n: u32, data: *const c_void, o: u32) {
++        let words = std::slice::from_raw_parts(data as *const u32, n as usize).to_vec();
++        push_call(this, PcCall::Constants(i, words, o));
++    }
++    unsafe extern "system" fn pc_set_cbv(this: *mut c_void, i: u32, va: u64) {
++        push_call(this, PcCall::Cbv(i, va));
++    }
++    unsafe extern "system" fn pc_set_srv(this: *mut c_void, i: u32, va: u64) {
++        push_call(this, PcCall::Srv(i, va));
++    }
++    unsafe extern "system" fn pc_set_uav(this: *mut c_void, i: u32, va: u64) {
++        push_call(this, PcCall::Uav(i, va));
++    }
++
++    struct PcList {
++        _vt: Box<[usize; 64]>,
++        obj: Box<FakePcList>,
++    }
++
++    impl PcList {
++        fn new() -> Self {
++            let mut vt = Box::new([0usize; 64]);
++            vt[1] = pc_ref as usize;
++            vt[2] = pc_ref as usize;
++            vt[30] = pc_set_rs as usize;
++            vt[34] = pc_set_constant as usize;
++            vt[36] = pc_set_constants as usize;
++            vt[38] = pc_set_cbv as usize;
++            vt[40] = pc_set_srv as usize;
++            vt[42] = pc_set_uav as usize;
++            let obj = Box::new(FakePcList { vt: vt.as_ptr(), calls: Mutex::new(Vec::new()) });
++            let pc = PcList { _vt: vt, obj };
++            // a list object freed elsewhere without `forget` may have left state at this address
++            remove_state_for_test(pc.ptr());
++            pc
++        }
++        fn ptr(&self) -> *mut c_void {
++            &*self.obj as *const FakePcList as *mut c_void
++        }
++        fn calls(&self) -> Vec<PcCall> {
++            self.obj.calls.lock().unwrap().clone()
++        }
++        /// What a draw with an untranslated PC pipeline does before drawing (`graphics_bound`).
++        unsafe fn replay(&self) {
++            let p = self.ptr();
++            let list = ID3D12GraphicsCommandList::from_raw_borrowed(&p).unwrap();
++            bind_pc_graphics_args(p, list);
++        }
++    }
++
++    impl Drop for PcList {
++        fn drop(&mut self) {
++            forget(self.ptr());
++        }
++    }
++
++    #[test]
++    fn root_tables_and_views_keep_only_the_latest_per_index_and_kind() {
++        let l = TestList::new();
++        let list = l.ptr();
++        unsafe {
++            set_graphics_root_table(list, 0, 0x100);
++            set_graphics_root_table(list, 1, 0x200);
++            set_graphics_root_table(list, 0, 0x300);
++            set_graphics_root_cbv(list, 2, VA + 0x10);
++            set_graphics_root_srv(list, 2, VA + 0x20);
++            set_graphics_root_uav(list, 2, VA + 0x30);
++            set_graphics_root_cbv(list, 2, VA + 0x40);
++            set_graphics_root_srv(list, 3, VA + 0x50);
++            set_graphics_root_srv(list, 3, VA + 0x60);
++        }
++        // a re-set parameter moves to the end; a CBV does not replace the SRV / UAV of its index
++        assert_eq!(
++            recorded(list),
++            vec![
++                PcCall::Table(1, 0x200),
++                PcCall::Table(0, 0x300),
++                PcCall::Srv(2, VA + 0x20),
++                PcCall::Uav(2, VA + 0x30),
++                PcCall::Cbv(2, VA + 0x40),
++                PcCall::Srv(3, VA + 0x60),
++            ]
++        );
++    }
++
++    #[test]
++    fn root_constants_are_recorded_in_call_order_without_replacing_earlier_ones() {
++        let l = TestList::new();
++        let list = l.ptr();
++        let words = [7u32, 8, 9];
++        unsafe {
++            set_graphics_root_constant(list, 0, 1, 0);
++            set_graphics_root_constants(list, 1, 3, words.as_ptr(), 2);
++            set_graphics_root_constant(list, 0, 5, 0);
++            // a null source is ignored
++            set_graphics_root_constants(list, 1, 3, std::ptr::null(), 0);
++        }
++        assert_eq!(
++            recorded(list),
++            vec![PcCall::Constant(0, 1, 0), PcCall::Constants(1, vec![7, 8, 9], 2), PcCall::Constant(0, 5, 0)]
++        );
++    }
++
++    #[test]
++    fn root_signature_clear_state_and_reset_drop_recorded_root_arguments() {
++        let l = TestList::new();
++        let list = l.ptr();
++        // never noted with console_list: no layout
++        let rs = 0x00AB_0022_0000_0F00usize;
++        let record = || unsafe {
++            set_graphics_root_constant(list, 0, 1, 0);
++            set_graphics_root_cbv(list, 1, VA);
++        };
++        record();
++        assert_eq!(recorded(list).len(), 2);
++        unsafe { set_graphics_root_signature(list, rs as *mut c_void) };
++        assert!(recorded(list).is_empty());
++        assert_eq!(with(list, |s| s.rs_gfx), rs);
++        record();
++        clear_state(list, 0);
++        assert!(recorded(list).is_empty());
++        record();
++        reset(list, 0, 0);
++        assert!(recorded(list).is_empty());
++    }
++
++    #[test]
++    fn a_split_list_inherits_a_copy_of_the_recorded_root_arguments() {
++        let (a, b) = (TestList::new(), TestList::new());
++        let rs = 0x00AB_0022_0000_0F10usize;
++        let words = [3u32, 4];
++        unsafe {
++            set_graphics_root_signature(a.ptr(), rs as *mut c_void);
++            set_graphics_root_srv(a.ptr(), 0, VA);
++            set_graphics_root_constants(a.ptr(), 1, 2, words.as_ptr(), 0);
++        }
++        let before = recorded(a.ptr());
++        assert_eq!(before.len(), 2);
++        inherit_for_split(a.ptr(), b.ptr(), 0);
++        assert_eq!(recorded(b.ptr()), before);
++        assert_eq!(with(b.ptr(), |s| s.rs_gfx), rs);
++        assert_eq!(recorded(a.ptr()), before, "the source keeps its own");
++        unsafe { set_graphics_root_srv(b.ptr(), 0, VA + 8) };
++        assert_eq!(recorded(a.ptr()), before, "a later call on the new list does not reach the old one");
++    }
++
++    #[test]
++    fn root_views_and_tables_still_write_the_console_root_arguments() {
++        let l = TestList::new();
++        let list = l.ptr();
++        let layout = Layout {
++            params: vec![Param::Descriptor { at: 0 }, Param::Descriptor { at: 8 }, Param::Descriptor { at: 16 }, Param::Table { at: 24 }],
++            size: 28,
++            ..Default::default()
++        };
++        with(list, |s| {
++            s.layout_gfx = Some(Arc::new(layout));
++            s.args_gfx = vec![0; 28];
++        });
++        unsafe {
++            set_graphics_root_cbv(list, 0, VA + 0x100);
++            set_graphics_root_srv(list, 1, VA + 0x200);
++            set_graphics_root_uav(list, 2, VA + 0x300);
++            set_graphics_root_table(list, 3, 0x1_2345_6780);
++        }
++        let args = with(list, |s| s.args_gfx.clone());
++        assert_eq!(&args[0..8], &(VA + 0x100).to_le_bytes()[..]);
++        assert_eq!(&args[8..16], &(VA + 0x200).to_le_bytes()[..]);
++        assert_eq!(&args[16..24], &(VA + 0x300).to_le_bytes()[..]);
++        // a table argument is a 32-bit console address: the handle's low half
++        assert_eq!(&args[24..28], &0x2345_6780u32.to_le_bytes()[..]);
++    }
++
++    #[test]
++    fn a_pc_pipeline_draw_binds_the_root_signature_then_replays_the_arguments_in_order() {
++        let pc = PcList::new();
++        let list = pc.ptr();
++        let rs = 0x00AB_0022_0000_0F20usize;
++        let words = [1u32, 2, 3];
++        unsafe {
++            set_graphics_root_signature(list, rs as *mut c_void);
++            set_graphics_root_cbv(list, 1, VA + 0x100);
++            set_graphics_root_constant(list, 0, 42, 3);
++            set_graphics_root_constants(list, 2, 3, words.as_ptr(), 4);
++            set_graphics_root_srv(list, 3, VA + 0x200);
++            set_graphics_root_uav(list, 4, VA + 0x300);
++            set_graphics_root_cbv(list, 1, VA + 0x400);
++            pc.replay();
++        }
++        // addresses outside unified memory are PC addresses already: passed as they are
++        assert_eq!(
++            pc.calls(),
++            vec![
++                PcCall::Rs(rs),
++                PcCall::Constant(0, 42, 3),
++                PcCall::Constants(2, vec![1, 2, 3], 4),
++                PcCall::Srv(3, VA + 0x200),
++                PcCall::Uav(4, VA + 0x300),
++                PcCall::Cbv(1, VA + 0x400),
++            ]
++        );
++        // replaying does not consume the recording: the next draw binds the same again
++        unsafe { pc.replay() };
++        assert_eq!(pc.calls().len(), 12);
++        assert_eq!(pc.calls()[6..], pc.calls()[..6]);
++    }
++
++    #[test]
++    fn without_a_graphics_root_signature_nothing_is_replayed() {
++        let pc = PcList::new();
++        unsafe {
++            set_graphics_root_cbv(pc.ptr(), 0, VA);
++            set_graphics_root_constant(pc.ptr(), 1, 2, 0);
++            pc.replay();
++        }
++        assert!(pc.calls().is_empty());
++    }
++
++    #[test]
++    fn replay_skips_null_root_views_and_empty_constant_runs() {
++        let pc = PcList::new();
++        let rs = 0x00AB_0022_0000_0F30usize;
++        let words = [9u32];
++        unsafe {
++            set_graphics_root_signature(pc.ptr(), rs as *mut c_void);
++            set_graphics_root_cbv(pc.ptr(), 0, 0);
++            set_graphics_root_srv(pc.ptr(), 1, 0);
++            set_graphics_root_uav(pc.ptr(), 2, 0);
++            set_graphics_root_constants(pc.ptr(), 3, 0, words.as_ptr(), 0);
++        }
++        assert_eq!(recorded(pc.ptr()).len(), 4, "recorded, only the replay leaves them out");
++        unsafe { pc.replay() };
++        assert_eq!(pc.calls(), vec![PcCall::Rs(rs)]);
++    }
++}
+diff --git a/crates/xcl/src/hle/d3d12x/console_heap.rs b/crates/xcl/src/hle/d3d12x/console_heap.rs
+index b0ee29b..0b4b9b1 100644
+--- a/crates/xcl/src/hle/d3d12x/console_heap.rs
++++ b/crates/xcl/src/hle/d3d12x/console_heap.rs
+@@ -1203,3 +1203,157 @@ mod tests {
+         assert_eq!(sampler_own_index(&[], 42), 42);
+     }
+ }
++
++#[cfg(test)]
++mod trinityxsx_tests {
++    use super::*;
++
++    /// A console heap entry at a fake address far above user-mode space (UMA is reserved below
++    /// 1 TiB), so no real heap and no 32-bit console handle can fall into it; it is never
++    /// dereferenced on these paths. Removed by `obj` on drop - never through `unregister`,
++    /// which would free `shadow` as UMA memory. Other tests only look heaps up by their own
++    /// obj / address, so this entry is invisible to them.
++    struct FakeHeap(usize);
++
++    impl FakeHeap {
++        fn push(obj: usize, shadow: usize, n: u32, pc_gpu: u64, inc: u32, sampler: bool, pages: Vec<u32>) -> Self {
++            HEAPS.lock().unwrap().push(Heap {
++                obj,
++                shadow,
++                n,
++                pc_cpu: 0x10_0000,
++                pc_gpu,
++                inc,
++                sampler,
++                pages,
++                visible: pc_gpu != 0,
++                memory: Memory::Uma,
++            });
++            FakeHeap(obj)
++        }
++    }
++
++    impl Drop for FakeHeap {
++        fn drop(&mut self) {
++            HEAPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| h.obj != self.0);
++        }
++    }
++
++    /// A heap registered in unified memory, unregistered on drop.
++    struct Registered(usize);
++
++    impl Drop for Registered {
++        fn drop(&mut self) {
++            unregister(self.0);
++        }
++    }
++
++    #[test]
++    fn pc_gpu_handle_of_null_is_none() {
++        assert_eq!(pc_gpu_handle(0), None);
++    }
++
++    #[test]
++    fn pc_gpu_handle_of_a_view_slot_is_its_srv_in_the_heaps_own_shader_visible_heap() {
++        const SHADOW: usize = 0x00AB_0022_0000_0000;
++        // no pages: the heap is not in the shared heap
++        let _h = FakeHeap::push(0x00AB_0022_0000_00A1, SHADOW, 4, 0x5000, 32, false, Vec::new());
++        let at = |k: u64| SHADOW as u64 + k * SLOT as u64;
++        // 2 PC descriptors per view slot: the SRV at 2k (the UAV at 2k + 1)
++        assert_eq!(pc_gpu_handle(at(0)), Some(0x5000));
++        assert_eq!(pc_gpu_handle(at(1)), Some(0x5000 + 2 * 32));
++        assert_eq!(pc_gpu_handle(at(3)), Some(0x5000 + 6 * 32));
++        assert_eq!(pc_gpu_handle(at(1) + 8), Some(0x5000 + 2 * 32), "an address inside a slot is that slot");
++        assert_eq!(pc_gpu_handle(at(4)), None, "past the heap's last slot");
++    }
++
++    #[test]
++    fn pc_gpu_handle_of_a_sampler_slot_is_one_descriptor_per_slot() {
++        const SHADOW: usize = 0x00AB_0022_0001_0000;
++        let _h = FakeHeap::push(0x00AB_0022_0000_00A2, SHADOW, 2, 0x9000, 16, true, Vec::new());
++        let at = |k: u64| SHADOW as u64 + k * SAMPLER_SLOT as u64;
++        assert_eq!(pc_gpu_handle(at(0)), Some(0x9000));
++        assert_eq!(pc_gpu_handle(at(1)), Some(0x9000 + 16));
++        assert_eq!(pc_gpu_handle(at(2)), None, "past the last sampler slot");
++    }
++
++    #[test]
++    fn pc_gpu_handle_is_none_for_cpu_only_heaps_and_unknown_addresses() {
++        const VIEWS: usize = 0x00AB_0022_0002_0000;
++        const SAMPLERS: usize = 0x00AB_0022_0003_0000;
++        let _v = FakeHeap::push(0x00AB_0022_0000_00A3, VIEWS, 4, 0, 32, false, Vec::new());
++        let _s = FakeHeap::push(0x00AB_0022_0000_00A4, SAMPLERS, 4, 0, 16, true, Vec::new());
++        assert_eq!(pc_gpu_handle(VIEWS as u64 + SLOT as u64), None, "a CPU-only view heap");
++        assert_eq!(pc_gpu_handle(SAMPLERS as u64), None, "a CPU-only sampler heap");
++        assert_eq!(pc_gpu_handle(0x00AB_0022_00FF_0000), None, "no console heap there");
++    }
++
++    #[test]
++    fn pc_gpu_handle_takes_32_bit_console_addresses_relative_to_unified_memory() {
++        // same precondition as `tests::slots_copy_and_release`
++        let Some(u) = crate::gpu::uma::get() else { return };
++        let obj = 0x00AB_0022_0000_00A5;
++        assert!(register(obj, 4, 0x1000, 0x5000, 32, false, false, true));
++        let _r = Registered(obj);
++        let v = start(obj).unwrap();
++        let rel = v - u.base() as u64;
++        assert!(rel + 4 * SLOT as u64 <= 1 << 32, "view heap must live in window 0");
++        let slot2 = 2 * SLOT as u64;
++        assert_eq!(pc_gpu_handle(rel + slot2), Some(0x5000 + 4 * 32));
++        assert_eq!(pc_gpu_handle(rel + slot2), pc_gpu_handle(v + slot2), "the 32-bit and the full address agree");
++    }
++
++    #[test]
++    fn pc_gpu_handle_of_a_view_in_the_shared_heap_is_its_place_there() {
++        const CHILD: &str = "XCL_TEST_TRINITYXSX_PC_GPU_HANDLE_SHARED_CHILD";
++        // GLOBAL is process-wide: it is set only in a child process running this test alone
++        // (the env var goes to the child only, as in `tests::window_views_do_not_hold_global_during_device_calls`)
++        if std::env::var_os(CHILD).is_none() {
++            let output = std::process::Command::new(std::env::current_exe().unwrap())
++                .args([
++                    "--exact",
++                    "hle::d3d12x::console_heap::trinityxsx_tests::pc_gpu_handle_of_a_view_in_the_shared_heap_is_its_place_there",
++                    "--nocapture",
++                ])
++                .env(CHILD, "1")
++                .output()
++                .unwrap();
++            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
++            return;
++        }
++        use std::ffi::c_void;
++        #[repr(C)]
++        struct Object {
++            vt: *const usize,
++        }
++        unsafe extern "system" fn retain(_this: *mut c_void) -> u32 {
++            1
++        }
++        let mut vt = [0usize; 4];
++        vt[1] = retain as usize;
++        vt[2] = retain as usize;
++        let mut device = Object { vt: vt.as_ptr() };
++        let mut heap = Object { vt: vt.as_ptr() };
++        const SHADOW: usize = 0x00AB_0022_0004_0000;
++        unsafe {
++            *GLOBAL.lock().unwrap() = Some(Global {
++                dev: ID3D12Device::from_raw(&mut device as *mut _ as *mut c_void),
++                heap: ID3D12DescriptorHeap::from_raw(&mut heap as *mut _ as *mut c_void),
++                cpu: 0x1000,
++                gpu: 0x2000,
++                inc: 32,
++                cap: 1024,
++                next: 64,
++                free: Vec::new(),
++            });
++        }
++        {
++            // the heap also has its own shader-visible PC heap (0x5000): the shared heap wins
++            let _h = FakeHeap::push(0x00AB_0022_0000_00A6, SHADOW, 4, 0x5000, 32, false, vec![UNMAPPED]);
++            // the page gets its place at the shared heap's cursor (64): slot k's SRV is 64 + 2k
++            assert_eq!(pc_gpu_handle(SHADOW as u64), Some(0x2000 + 64 * 32));
++            assert_eq!(pc_gpu_handle((SHADOW + 2 * SLOT as usize) as u64), Some(0x2000 + 68 * 32));
++        }
++        *GLOBAL.lock().unwrap() = None;
++    }
++}
+diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
+index 39409fb..58efc3a 100644
+--- a/crates/xcl/src/hle/d3d12x/present.rs
++++ b/crates/xcl/src/hle/d3d12x/present.rs
+@@ -2013,3 +2013,238 @@ mod frame_dump_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod trinityxsx_tests {
++    use super::*;
++    use std::ffi::{c_char, CStr};
++    use std::sync::atomic::AtomicUsize;
++
++    // title_menu_open caches its answer in a function-local static (STATE). On stock Windows
++    // that answer is always "unsupported", so setting it here is what any other caller in this
++    // process would see anyway.
++    #[test]
++    fn title_menu_reports_closed_when_ntdll_rejects_the_ps5_info_class() {
++        // Stock ntdll fails class 0x50574D01 (STATUS_INVALID_INFO_CLASS). Only the PS5 Wine
++        // runner answers it. The second and third calls take the cached "unsupported" path.
++        for _ in 0..3 {
++            assert!(!title_menu_open());
++        }
++        // A closed (or absent) menu does not hold PresentX/vkQueuePresentKHR. This would
++        // otherwise poll every 16 ms forever.
++        wait_while_title_menu_open();
++    }
++
++    // Must match the C struct the PS5 runner fills in (prospero-win
++    // wine/ps5/menu/pw_title_menu.h, read with NtQueryInformationProcess):
++    //   enum { PW_TITLE_MENU_LINES=16,PW_TITLE_MENU_COLUMNS=48 };
++    //   struct pw_title_menu
++    //   {
++    //       uint32_t version;       /* PW_TITLE_MENU_VERSION */
++    //       uint32_t sequence;      /* the sink's: changes whenever the snapshot does */
++    //       uint32_t open;          /* 0: draw nothing; the rest is then zero */
++    //       uint32_t lines;         /* lines in use, at most PW_TITLE_MENU_LINES */
++    //       int32_t selected;       /* the highlighted line, or -1 */
++    //       char title[PW_TITLE_MENU_COLUMNS];
++    //       char line[PW_TITLE_MENU_LINES][PW_TITLE_MENU_COLUMNS];
++    //   };
++    //   #define PW_TITLE_MENU_PROCESS_INFO 0x50574D01u
++    //   #define PW_TITLE_MENU_VERSION 1u
++    #[test]
++    fn title_menu_snapshot_matches_the_c_wire_layout() {
++        use std::mem::{align_of, offset_of, size_of};
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, version), 0);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, sequence), 4);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, open), 8);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, lines), 12);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, selected), 16);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, title), 20);
++        assert_eq!(offset_of!(PwTitleMenuSnapshot, line), 20 + 48);
++        // 5 * 4 + 48 + 16 * 48, no tail padding (all members are 4- or 1-byte aligned)
++        assert_eq!(size_of::<PwTitleMenuSnapshot>(), 836);
++        assert_eq!(align_of::<PwTitleMenuSnapshot>(), 4);
++
++        let snap: PwTitleMenuSnapshot = unsafe { std::mem::zeroed() };
++        assert_eq!(snap.title.len(), 48);
++        assert_eq!(snap.line.len(), 16);
++        assert_eq!(snap.line[0].len(), 48);
++        let _signed_like_c: i32 = snap.selected; // int32_t, -1 = no highlighted line
++
++        assert_eq!(PW_TITLE_MENU_PROCESS_INFO, 0x5057_4D01);
++        assert_eq!(PW_TITLE_MENU_VERSION, 1);
++    }
++
++    // ---- fakes for the Vulkan loader's entry points ----
++    // Each fake has a different body, so the MSVC linker's identical-code folding (/OPT:ICF,
++    // on in release) cannot merge two of them into one address.
++
++    const FAKE_INSTANCE: usize = 0x1111_0000;
++    const FAKE_DEVICE: usize = 0x2222_0000;
++    /// a device created without VK_KHR_swapchain: its GDPA answers 0 for vkQueuePresentKHR
++    const DEVICE_WITHOUT_SWAPCHAIN: usize = 0x2222_0BAD;
++    const FAKE_QUEUE: usize = 0x3333_0000;
++    /// what the fake GIPA answers for a null name, to show the hook passes it through
++    const NULL_NAME_ANSWER: usize = 0x5555_0000;
++    const VK_SUBOPTIMAL_KHR: i32 = 1_000_001_003;
++    const VK_ERROR_OUT_OF_DATE_KHR: i32 = -1_000_001_004;
++    const VK_ERROR_UNKNOWN: i32 = -13;
++
++    // Private to this test module and touched only by the one Vulkan test below.
++    static GIPA_LAST_INSTANCE: AtomicUsize = AtomicUsize::new(0);
++    static GDPA_LAST_DEVICE: AtomicUsize = AtomicUsize::new(0);
++    static PRESENT_LAST_QUEUE: AtomicUsize = AtomicUsize::new(0);
++    static PRESENT_LAST_INFO: AtomicUsize = AtomicUsize::new(0);
++
++    unsafe extern "system" fn fake_other_command() {}
++
++    unsafe extern "system" fn fake_gipa(instance: usize, name: *const c_char) -> usize {
++        GIPA_LAST_INSTANCE.store(instance, Ordering::SeqCst);
++        if name.is_null() {
++            return NULL_NAME_ANSWER;
++        }
++        match CStr::from_ptr(name).to_bytes() {
++            b"vkGetDeviceProcAddr" => fake_gdpa as usize,
++            b"vkQueuePresentKHR" => fake_present_from_instance as usize,
++            b"vkCreateDevice" => fake_other_command as usize,
++            _ => 0,
++        }
++    }
++
++    unsafe extern "system" fn fake_gdpa(device: usize, name: *const c_char) -> usize {
++        GDPA_LAST_DEVICE.store(device, Ordering::SeqCst);
++        if name.is_null() || device == DEVICE_WITHOUT_SWAPCHAIN {
++            return 0;
++        }
++        match CStr::from_ptr(name).to_bytes() {
++            b"vkQueuePresentKHR" => fake_present_from_device as usize,
++            b"vkCmdDraw" => fake_other_command as usize,
++            _ => 0,
++        }
++    }
++
++    unsafe extern "system" fn fake_present_from_instance(queue: usize, info: *const c_void) -> i32 {
++        PRESENT_LAST_QUEUE.store(queue, Ordering::SeqCst);
++        PRESENT_LAST_INFO.store(info as usize, Ordering::SeqCst);
++        VK_SUBOPTIMAL_KHR
++    }
++
++    unsafe extern "system" fn fake_present_from_device(queue: usize, info: *const c_void) -> i32 {
++        PRESENT_LAST_QUEUE.store(queue, Ordering::SeqCst);
++        PRESENT_LAST_INFO.store(info as usize, Ordering::SeqCst);
++        VK_ERROR_OUT_OF_DATE_KHR
++    }
++
++    fn vk_name(s: &'static [u8]) -> *const c_char {
++        assert_eq!(s.last(), Some(&0), "Vulkan names are NUL-terminated");
++        s.as_ptr().cast()
++    }
++
++    unsafe fn as_proc_addr(f: usize) -> VkGetInstanceProcAddrFn {
++        std::mem::transmute::<usize, VkGetInstanceProcAddrFn>(f)
++    }
++
++    unsafe fn as_present(f: usize) -> VkQueuePresentKhrFn {
++        std::mem::transmute::<usize, VkQueuePresentKhrFn>(f)
++    }
++
++    fn reset_real_vk() {
++        REAL_VK_GIPA.store(0, Ordering::SeqCst);
++        REAL_VK_GDPA.store(0, Ordering::SeqCst);
++        REAL_VK_PRESENT.store(0, Ordering::SeqCst);
++    }
++
++    fn real_vk() -> (usize, usize, usize) {
++        (
++            REAL_VK_GIPA.load(Ordering::SeqCst),
++            REAL_VK_GDPA.load(Ordering::SeqCst),
++            REAL_VK_PRESENT.load(Ordering::SeqCst),
++        )
++    }
++
++    // REAL_VK_GIPA / REAL_VK_GDPA / REAL_VK_PRESENT are process-wide. Every check that reads or
++    // writes them is in this one test, so tests cannot race each other. Outside this test they
++    // are reached only through resolver.rs, for vulkan-1.dll / winevulkan.dll imports, and no
++    // XCL test resolves those DLLs. The test resets them to 0 at the start and at the end.
++    #[test]
++    fn vulkan_entry_points_are_wrapped_and_forward_to_the_loader() {
++        let gipa_hook = xcl_vk_get_instance_proc_addr as usize;
++        let gdpa_hook = xcl_vk_get_device_proc_addr as usize;
++        let present_hook = xcl_vk_queue_present_khr as usize;
++        let other = fake_other_command as usize;
++        reset_real_vk();
++        unsafe {
++            // Nothing resolved yet: the hooks fail safe instead of calling address 0.
++            assert_eq!(as_proc_addr(gipa_hook)(FAKE_INSTANCE, vk_name(b"vkQueuePresentKHR\0")), 0);
++            assert_eq!(as_proc_addr(gdpa_hook)(FAKE_DEVICE, vk_name(b"vkQueuePresentKHR\0")), 0);
++            assert_eq!(as_present(present_hook)(FAKE_QUEUE, std::ptr::null()), VK_ERROR_UNKNOWN);
++
++            // A missing export stays missing and is not recorded.
++            assert_eq!(wrap_vulkan_proc("vkGetInstanceProcAddr", 0), 0);
++            assert_eq!(wrap_vulkan_proc("vkGetDeviceProcAddr", 0), 0);
++            assert_eq!(wrap_vulkan_proc("vkQueuePresentKHR", 0), 0);
++            assert_eq!(real_vk(), (0, 0, 0));
++
++            // Other exports pass through untouched. Vulkan names are case-sensitive.
++            assert_eq!(wrap_vulkan_proc("vkCreateInstance", other), other);
++            assert_eq!(wrap_vulkan_proc("vkqueuepresentkhr", other), other);
++            assert_eq!(wrap_vulkan_proc("", other), other);
++            assert_eq!(real_vk(), (0, 0, 0));
++
++            // vkGetInstanceProcAddr is replaced by the hook, which asks the real one first.
++            assert_eq!(wrap_vulkan_proc("vkGetInstanceProcAddr", fake_gipa as usize), gipa_hook);
++            assert_eq!(real_vk(), (fake_gipa as usize, 0, 0));
++            let gipa = as_proc_addr(gipa_hook);
++            assert_eq!(gipa(FAKE_INSTANCE, vk_name(b"vkCreateDevice\0")), other);
++            assert_eq!(GIPA_LAST_INSTANCE.load(Ordering::SeqCst), FAKE_INSTANCE);
++            assert_eq!(gipa(FAKE_INSTANCE + 1, vk_name(b"vkNotACommand\0")), 0);
++            assert_eq!(GIPA_LAST_INSTANCE.load(Ordering::SeqCst), FAKE_INSTANCE + 1);
++            // A null name reaches the real GIPA, and its answer comes back unchanged.
++            assert_eq!(gipa(FAKE_INSTANCE, std::ptr::null()), NULL_NAME_ANSWER);
++            assert_eq!(real_vk(), (fake_gipa as usize, 0, 0));
++            // GIPA hands out the GDPA and present hooks and records the real addresses.
++            assert_eq!(gipa(FAKE_INSTANCE, vk_name(b"vkGetDeviceProcAddr\0")), gdpa_hook);
++            assert_eq!(REAL_VK_GDPA.load(Ordering::SeqCst), fake_gdpa as usize);
++            assert_eq!(gipa(FAKE_INSTANCE, vk_name(b"vkQueuePresentKHR\0")), present_hook);
++            assert_eq!(REAL_VK_PRESENT.load(Ordering::SeqCst), fake_present_from_instance as usize);
++
++            // vkGetDeviceProcAddr through the hook
++            let gdpa = as_proc_addr(gdpa_hook);
++            assert_eq!(gdpa(FAKE_DEVICE, vk_name(b"vkCmdDraw\0")), other);
++            assert_eq!(GDPA_LAST_DEVICE.load(Ordering::SeqCst), FAKE_DEVICE);
++            // The real GDPA answers 0 (no swapchain): the hook answers 0 and keeps the present it has.
++            assert_eq!(gdpa(DEVICE_WITHOUT_SWAPCHAIN, vk_name(b"vkQueuePresentKHR\0")), 0);
++            assert_eq!(REAL_VK_PRESENT.load(Ordering::SeqCst), fake_present_from_instance as usize);
++            assert_eq!(gdpa(FAKE_DEVICE, vk_name(b"vkQueuePresentKHR\0")), present_hook);
++            assert_eq!(REAL_VK_PRESENT.load(Ordering::SeqCst), fake_present_from_device as usize);
++
++            // vkGetDeviceProcAddr / vkQueuePresentKHR imported directly (resolver path)
++            assert_eq!(wrap_vulkan_proc("vkGetDeviceProcAddr", fake_gdpa as usize), gdpa_hook);
++            assert_eq!(REAL_VK_GDPA.load(Ordering::SeqCst), fake_gdpa as usize);
++            assert_eq!(wrap_vulkan_proc("vkQueuePresentKHR", fake_present_from_instance as usize), present_hook);
++            assert_eq!(REAL_VK_PRESENT.load(Ordering::SeqCst), fake_present_from_instance as usize);
++
++            // The hooked present writes PS5 HUD telemetry if this folder exists. Never do that
++            // from a test.
++            if std::path::Path::new(r"Z:\data\homebrew\PPSA83601").is_dir() {
++                eprintln!("skipping hooked-present calls: PS5 homebrew folder present on Z:");
++                reset_real_vk();
++                return;
++            }
++
++            // The hooked present calls the real one with the title's arguments and returns its
++            // result (non-success codes included). It also counts the frame.
++            let before = presents();
++            let info = 0x4444_0000usize as *const c_void; // passed through, never dereferenced
++            assert_eq!(as_present(present_hook)(FAKE_QUEUE, info), VK_SUBOPTIMAL_KHR);
++            assert_eq!(PRESENT_LAST_QUEUE.load(Ordering::SeqCst), FAKE_QUEUE);
++            assert_eq!(PRESENT_LAST_INFO.load(Ordering::SeqCst), info as usize);
++            assert!(presents() > before, "a hooked Vulkan present counts as a shown frame");
++
++            REAL_VK_PRESENT.store(fake_present_from_device as usize, Ordering::SeqCst);
++            assert_eq!(as_present(present_hook)(FAKE_QUEUE + 8, std::ptr::null()), VK_ERROR_OUT_OF_DATE_KHR);
++            assert_eq!(PRESENT_LAST_QUEUE.load(Ordering::SeqCst), FAKE_QUEUE + 8);
++            assert_eq!(PRESENT_LAST_INFO.load(Ordering::SeqCst), 0);
++        }
++        reset_real_vk();
++    }
++}
+-- 
+2.48.1.windows.1
+
