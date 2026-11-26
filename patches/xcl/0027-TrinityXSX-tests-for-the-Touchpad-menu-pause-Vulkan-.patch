@@ -1,8 +1,8 @@
-From 42e91905f845823a770188951a5ff9c4dca86fc4 Mon Sep 17 00:00:00 2001
+From e2311add232c7ca0f80951d1a34703ffca16519a Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 14:08:48 +0100
 Subject: [PATCH] TrinityXSX: tests for the Touchpad menu pause, Vulkan hooks,
- root  argument replay and VKD3D feature level
+ root argument replay and VKD3D feature level
 
 Unit tests for the XCL-side changes of patches 0020, 0022, 0023 and
 0026, each in a trinityxsx_tests module at the end of the file so they
@@ -28,7 +28,10 @@ stay out of the way of upstream's own tests on rebase:
  crates/xcl/src/hle/d3d12x/bind.rs         | 315 ++++++++++++++++++++++
  crates/xcl/src/hle/d3d12x/console_heap.rs | 154 +++++++++++
  crates/xcl/src/hle/d3d12x/present.rs      | 235 ++++++++++++++++
- 4 files changed, 760 insertions(+)
+ crates/xcl/src/host.rs                    |  15 ++
+ crates/xcl/tests/trinityxsx_no_uma.rs     |  22 ++
+ 6 files changed, 797 insertions(+)
+ create mode 100644 crates/xcl/tests/trinityxsx_no_uma.rs
 
 diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
 index 46f5f45..3a4b834 100644
@@ -580,7 +583,7 @@ index b0ee29b..0b4b9b1 100644
 +    }
 +}
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
-index 39409fb..58efc3a 100644
+index 45902b5..879d0bb 100644
 --- a/crates/xcl/src/hle/d3d12x/present.rs
 +++ b/crates/xcl/src/hle/d3d12x/present.rs
 @@ -2013,3 +2013,238 @@ mod frame_dump_tests {
@@ -821,6 +824,57 @@ index 39409fb..58efc3a 100644
 +        }
 +        reset_real_vk();
 +    }
++}
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index 55d7ccf..85f1d2b 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -306,3 +306,18 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     crate::log::flush();
+     code as i32
+ }
++
++#[cfg(test)]
++mod trinityxsx_tests {
++    use super::*;
++
++    #[test]
++    fn non_console_executables_leave_the_d3d12x_paths_and_keep_other_choices() {
++        for d3d12x in ["", "d3d12", "D3D12", "real", "Real"] {
++            assert_eq!(non_console_graphics(d3d12x), Some("null"), "{d3d12x:?}");
++        }
++        for other in ["null", "vulkan", "dxvk", "d3d12-debug"] {
++            assert_eq!(non_console_graphics(other), None, "{other:?}");
++        }
++    }
++}
+diff --git a/crates/xcl/tests/trinityxsx_no_uma.rs b/crates/xcl/tests/trinityxsx_no_uma.rs
+new file mode 100644
+index 0000000..0c13c83
+--- /dev/null
++++ b/crates/xcl/tests/trinityxsx_no_uma.rs
+@@ -0,0 +1,22 @@
++//! `XCL_NO_UMA` (TrinityXSX, set for standalone Win64 executables): the unified memory is not
++//! reserved. The UMA is a process-wide `OnceLock`, so the check runs in a child process of this
++//! test binary, where nothing else has touched it.
++
++use std::process::Command;
++
++const CHILD: &str = "XCL_TEST_NO_UMA_CHILD";
++
++#[test]
++fn no_uma_skips_the_unified_memory_reservation() {
++    if std::env::var_os(CHILD).is_some() {
++        assert!(xcl::gpu::uma::get().is_none(), "the UMA was reserved although XCL_NO_UMA is set");
++        return;
++    }
++    let status = Command::new(std::env::current_exe().unwrap())
++        .args(["no_uma_skips_the_unified_memory_reservation", "--exact", "--nocapture", "--test-threads=1"])
++        .env(CHILD, "1")
++        .env("XCL_NO_UMA", "1")
++        .status()
++        .unwrap();
++    assert!(status.success(), "child test failed: {status}");
 +}
 -- 
 2.48.1.windows.1

@@ -1,8 +1,7 @@
-From 090066b29ea19bd5c9a79831752bf3188d0af17a Mon Sep 17 00:00:00 2001
+From 29e86dbf7d6039ff092526d2956169507a4e16a6 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:41 +0100
 Subject: [PATCH] TrinityXSX: add 1-button restart, VKD3D feature level, shader
-
 
 The library part of this change (crates/xcl/src/library*.rs) now lives
 in TrinityXSX's library/ folder; see the last TrinityXSX patch.
@@ -34,10 +33,10 @@ index 7bdaa21..46f5f45 100644
              activity: false,
              trace_input: false,
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index ee30af5..032c593 100644
+index a3ecb90..55d7ccf 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -41,6 +41,11 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -49,6 +49,11 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_DIRECT_DXIL").is_none() && !boot.config.direct_dxil.is_empty() {
          std::env::set_var("XCL_DIRECT_DXIL", &boot.config.direct_dxil);
      }

@@ -1,4 +1,4 @@
-From fad89f777debb397deb397e99c08079263a80dcb Mon Sep 17 00:00:00 2001
+From d678729f9f2fa8f0649b9b344751f8803ca731b0 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:40 +0100
 Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console Win64
@@ -24,12 +24,12 @@ index 7592d04..ddb8b92 100644
              let req = configured_runtime_windows();
              let coherent = coherent_hint_for(req);
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 4684d31..ee30af5 100644
+index a2e5e20..a3ecb90 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -60,7 +60,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
-         {
-             boot.config.graphics = "null".into();
+@@ -65,7 +65,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+         if let Some(graphics) = non_console_graphics(&boot.config.graphics) {
+             boot.config.graphics = graphics.into();
          }
 -        crate::xlog_info!("non-console Win64 PE detected: disabling unused D3D12.X UMA and PresentX stall watchdog");
 +        if std::env::var_os("XCL_NO_UMA").is_none() {
