@@ -84,9 +84,37 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "X  Play     R1  Settings     Square  Folders     L1  Web/QR     OPTIONS  Profile/Lang     Triangle  Refresh     Circle  Exit") => {
             "X  Graj    R1  Ustawienia    Kwadrat  Foldery    L1  Web/QR    OPTIONS  App/FG    Trójkąt  Odśwież    Kółko  Wyjdź"
         }
-        (Lang::Pl, "X  Play    R1  Settings    Square  Folders    L1  Web/QR    OPTIONS  App/FG    L2  Fav    R2  Sort    Circle  Exit") => {
-            "X  Graj    R1  Ustawienia    Kwadrat  Foldery    L1  Web/QR    OPTIONS  App/FG    L2  Ulub.    R2  Sortuj    Kółko  Wyjdź"
+        (Lang::Pl, "X  Play    R1  Game    Square  Folders    L1  Web/QR    OPTIONS  Settings    L2  Fav    R2  Sort    Circle  Exit") => {
+            "X  Graj    R1  Opcje gry    Kwadrat  Foldery    L1  Web/QR    OPTIONS  Ustawienia    L2  Ulub.    R2  Sortuj    Kółko  Wyjdź"
         }
+        (Lang::Pl, "installer(s) ready") => "instalator(y) gotowe",
+        (Lang::Pl, "Settings") => "Ustawienia",
+        (Lang::Pl, "Install games, adjust display options, player profile and language.") => {
+            "Instaluj gry, zmieniaj ustawienia obrazu, profil gracza i język interfejsu."
+        }
+        (Lang::Pl, "Install GOG Games") => "Zainstaluj gry z GOG",
+        (Lang::Pl, "None found") => "Brak instalatorów",
+        (Lang::Pl, "ready") => "gotowe",
+        (Lang::Pl, "Frame Generation") => "Generowanie klatek",
+        (Lang::Pl, "FPS Counter") => "Licznik FPS",
+        (Lang::Pl, "Frame Generation creates smoother motion (requires restarting TrinityXSX).") => {
+            "Generowanie klatek poprawia płynność obrazu (wymaga restartu aplikacji)."
+        }
+        (Lang::Pl, "Place GOG installer files (setup_*.exe + .bin) in /mnt/ext1/xboxseries/installers/") => {
+            "Umieść pliki instalatora GOG (setup_*.exe + .bin) w /mnt/ext1/xboxseries/installers/"
+        }
+        (Lang::Pl, "Installing") => "Instalowanie",
+        (Lang::Pl, "Keep your PS5 awake until installation finishes") => {
+            "Nie wyłączaj konsoli PS5 do zakończenia instalacji"
+        }
+        (Lang::Pl, "No GOG installers found.") => "Nie znaleziono instalatorów GOG.",
+        (Lang::Pl, "Copy setup_<game>.exe (+ .bin files) to /mnt/ext1/xboxseries/installers/ and press Triangle to rescan.") => {
+            "Skopiuj pliki setup_<gra>.exe (+ pliki .bin) do /mnt/ext1/xboxseries/installers/ i wciśnij Trójkąt, aby odświeżyć."
+        }
+        (Lang::Pl, "X  Install     Triangle  Rescan     Square  Delete files after:") => {
+            "X  Zainstaluj     Trójkąt  Odśwież     Kwadrat  Usuń pliki po instalacji:"
+        }
+        (Lang::Pl, "Circle  Back") => "Kółko  Wróć",
         (Lang::Pl, "Sort: A-Z") => "Sortuj: A-Z",
         (Lang::Pl, "Sort: Recent") => "Sortuj: Ostatnie",
         (Lang::Pl, "Sort: Favorites") => "Sortuj: Ulubione",

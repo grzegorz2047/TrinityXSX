@@ -252,7 +252,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .work/wine-cache
-          key: wine-cache-v1-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'standalone/native/build_prefix_seed.py') }}
+          key: wine-cache-v2-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'standalone/native/build_prefix_seed.py') }}
 
       - name: Fetch DXVK and DXC
         run: tools/fetch-deps.sh
@@ -367,11 +367,9 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **PC/GOG Game Launch Fix (`eboot.bin` + `profiles.lst` + DXVK/vkd3d-proton sync):** Fixed PS5 `sceSystemServiceLoadExec` argument parsing (`argv[0]`), automatic `profiles.lst` registration for dynamic PC/GOG profiles, and automatic replacement of Wine's built-in DirectX stubs in `system32` so installed GOG games (like *Hollow Knight: Silksong*) launch cleanly straight from the library.
-          - **Live Speed & ETA on GOG Installer Screen:** The on-console open-source `innoextract` installer now displays real-time throughput (`MiB/s`) and estimated time remaining (`~mm:ss left`) alongside the progress bar.
-          - **Reliable In-App Restarts & PS5 Benchmark Runner:** Added `restart.flag` handling inside `pw_runner.bin` (`on_exit_report`), enabling seamless multi-title PS5 performance benchmarks (`XCL_BENCH_SECONDS` + `tools/ps5_bench.py`), Web Companion restarts, and Frame Generation restarts.
-          - **Persistent Shader Caches Across Updates:** DXC toolchain identity now hashes `dxcompiler.dll` + `dxil.dll` contents instead of `mtime`, and the `vkd3d-proton` shader cache directory is created and staged automatically so updating TrinityXSX no longer invalidates compiled shaders.
-          - **Web Companion Security & Built-in Compatibility DB:** Added brute-force PIN lockout + `HttpOnly` session cookies (removing the PIN from URLs), plus `library/compat.toml` single-source-of-truth compatibility tracking and clean `library/` Rust modules (`rustfmt` + `clippy` gated in CI).
+          - **Unity / Mono PC & GOG Games Fix (`ntdll.prx` patch `0986` + PS5 DXVK 2.6.2 preservation):** Backported upstream `prospero-win` patch `0986` into our bundled `ntdll.prx` to stop 13,000+ faults/sec and multi-threaded crashes on Mono GC/JIT pages in Unity games (such as *Hollow Knight: Silksong*), and stopped PC handoff from overwriting `prospero-win`'s PS5-patched `DXVK v2.6.2-2-g1Queue` (`d3d11.dll`/`dxgi.dll`) in `system32`.
+          - **Fast & Byte-Exact On-Console GOG Installer (`trinity_innoextract.dll`):** Replaced `boost::iostreams` file writes with direct Win32 `WriteFile` + close-time size verification, fixing Boost 1.88 4100-byte tail truncation and cutting PS5 write syscalls ~20x for noticeably faster installations.
+          - **Cleaner, Jargon-Free UI:** Renamed `OPTIONS` menu to **Settings** with **Install GOG Games** promoted to the top row and highlighted right in the library header when installers are detected; removed internal technical jargon (`innoextract`, `MihawkGen`, `Vulkan/DXVK/D3D12`, `App/FG`) and added complete Polish translations across the Settings and GOG Installer screens.
 
           ### Included CI-built assets
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.

@@ -623,13 +623,15 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
     let arch = if is_64bit { "pe64" } else { "pe32" };
     let gfx = if prefer_opengl { "zink" } else { "dxvk" };
 
-    // Ensure 64-bit DXVK / vkd3d-proton DLLs from C:\XCL are installed in system32 for PC games
-    // launched outside C:\XCL (replace Wine's built-in stubs whenever sizes differ).
+    // Ensure 64-bit vkd3d-proton D3D12 DLLs from C:\XCL are installed in system32 for PC games
+    // launched outside C:\XCL (replace Wine's built-in D3D12 stubs whenever sizes differ).
+    // Keep prospero-win's PS5-tuned DXVK v2.6.2-2-g1Queue (d3d11.dll / dxgi.dll) in system32
+    // untouched, as upstream DXVK 3.1.1 dereferences NULL vkGetMemoryWin32HandleKHR on PS5 RADV.
     if is_64bit {
         let sys32 = root.join("prefix").join("drive_c").join("windows").join("system32");
         let xcl_dir = root.join("prefix").join("drive_c").join("XCL");
         if sys32.is_dir() && xcl_dir.is_dir() {
-            for dll in ["d3d12.dll", "d3d12core.dll", "dxgi.dll", "d3d11.dll"] {
+            for dll in ["d3d12.dll", "d3d12core.dll"] {
                 let src = xcl_dir.join(dll);
                 let dst = sys32.join(dll);
                 if let Ok(src_meta) = fs::metadata(&src) {

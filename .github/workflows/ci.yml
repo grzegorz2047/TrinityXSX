@@ -387,7 +387,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .work/wine-cache
-          key: wine-cache-v1-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'standalone/native/build_prefix_seed.py') }}
+          key: wine-cache-v2-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'standalone/native/build_prefix_seed.py') }}
 
       - name: Fetch DXVK and DXC
         run: tools/fetch-deps.sh

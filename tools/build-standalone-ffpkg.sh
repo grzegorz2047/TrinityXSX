@@ -171,10 +171,10 @@ if [ ! -f "$runtime_stage/opus.dll" ]; then
   cp "$cached_opus_lic" "$runtime_stage/licenses/opus-BSD-3-Clause.txt"
 fi
 
-# 6. Patched wineserver.prx + report.json (cached in wine_cache)
+# 6. Patched wineserver.prx + ntdll.prx + report.json (cached in wine_cache)
 cached_wine="$wine_cache/wine-build"
-if [ ! -f "$cached_wine/prx/sce_module/wineserver.prx" ] || [ ! -f "$cached_wine/report.json" ]; then
-  echo "==> Building PS5 wineserver.prx (Wine ${WINE_REV:0:12})"
+if [ ! -f "$cached_wine/prx/sce_module/wineserver.prx" ] || [ ! -f "$cached_wine/prx/sce_module/ntdll.prx" ] || [ ! -f "$cached_wine/report.json" ]; then
+  echo "==> Building PS5 wineserver.prx & ntdll.prx (Wine ${WINE_REV:0:12})"
   wine_src="$work/wine-source"
   fetch_commit "$WINE_REPO" "$WINE_REV" "$wine_src"
 
@@ -203,6 +203,7 @@ if [ ! -f "$cached_wine/prx/sce_module/wineserver.prx" ] || [ ! -f "$cached_wine
   rm -rf "$cached_wine"
   mkdir -p "$cached_wine/prx/sce_module"
   cp "$wine_ps5_work/prx/sce_module/wineserver.prx" "$cached_wine/prx/sce_module/wineserver.prx"
+  cp "$wine_ps5_work/prx/sce_module/ntdll.prx" "$cached_wine/prx/sce_module/ntdll.prx"
   cp "$wine_ps5_work/report.json" "$cached_wine/report.json"
 fi
 

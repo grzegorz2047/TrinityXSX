@@ -26,6 +26,8 @@ SERVER_OWNER_PATCH = "0997-server-ps5-skip-config-dir-ownership.patch"
 SERVER_PATCH = "0998-server-ps5-inspect-directories-by-descriptor.patch"
 SERVER_DIAGNOSTIC_PATCH = "0999-server-ps5-record-fatal-startup-errors.patch"
 SERVER_MODULE = "win/wine/lib/wine/x86_64-unix/wineserver.prx"
+NTDLL_MODULE = "win/wine/lib/wine/x86_64-unix/ntdll.prx"
+NTDLL_SUBPAGE_PATCH = "0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessible-page-run-hot.patch"
 SOURCES = (
     "native/wine64_main.c", "native/pw_diagnostics.c", "native/pw_audio_ps5.c",
     "native/pw_data_mount.c", "native/pw_lapy_elevation.c",
@@ -58,6 +60,25 @@ def rebuilt_server(wine_build: Path) -> tuple[Path, str, bool, bool]:
     return path, digest, SERVER_DIAGNOSTIC_PATCH in patches, SERVER_OWNER_PATCH in patches
 
 
+def rebuilt_ntdll(wine_build: Path) -> tuple[Path, str, bool] | None:
+    path = wine_build / "prx/sce_module/ntdll.prx"
+    if not path.is_file():
+        return None
+    report = json.loads((wine_build / "report.json").read_text(encoding="utf-8"))
+    patches = report.get("patches", [])
+    if report.get("wine_commit") != WINE_REVISION:
+        raise ValueError("Expected Wine's pinned source revision for ntdll.prx")
+    module = report.get("prx", {}).get("modules", {}).get("ntdll", {})
+    checks = ("unresolved", "errors", "title_unbound", "webkit_unbound", "raw_syscalls")
+    if not module.get("built") or any(module.get(check) != [] for check in checks):
+        raise ValueError("Expected a linked ntdll.prx with a clean title import report")
+    with path.open("rb") as stream:
+        digest = file_digest(stream, "sha256").hexdigest()
+    if module.get("sha256") != digest:
+        raise ValueError("ntdll.prx does not match the build report SHA-256")
+    return path, digest, NTDLL_SUBPAGE_PATCH in patches
+
+
 def build(
     source: Path, foundation: Path, sdk: Path, llvm: Path, tool: Path, release: Path, output: Path,
     *, wine_build: Path | None = None, lapy_elf: Path | None = None,
@@ -72,6 +93,7 @@ def build(
         raise ValueError(f"Use the prospero-win source at {SOURCE_REVISION}")
     runner_source = (source / SOURCES[0]).read_text(encoding="utf-8")
     server = rebuilt_server(wine_build) if wine_build else None
+    ntdll_mod = rebuilt_ntdll(wine_build) if wine_build else None
     if server and server[2] and "WINE_PS5_SERVER_STARTUP_LOG" not in runner_source:
         raise ValueError("Apply the TrinityXSX server startup diagnostic patch to the runner source")
 
@@ -147,6 +169,8 @@ def build(
                     shutil.copyfileobj(original, destination)
         if server:
             shutil.copyfile(server[0], runner / SERVER_MODULE)
+        if ntdll_mod:
+            shutil.copyfile(ntdll_mod[0], runner / NTDLL_MODULE)
         if lapy_elf is not None:
             lapy_bytes = lapy_elf.read_bytes()
             if not lapy_bytes.startswith(b"\x7fELF"):
@@ -176,6 +200,10 @@ def build(
                 if server[3]:
                     sources.write("Patch: patches/prospero-win/0004-Skip-config-dir-owner-check-on-PS5.patch\n")
                 sources.write(f"wineserver.prx SHA-256: {server[1]}\n")
+            if ntdll_mod:
+                if ntdll_mod[2]:
+                    sources.write("Patch: patches/prospero-win/0011-Backport-ntdll-patch-0986-hot-subpage-access.patch\n")
+                sources.write(f"ntdll.prx SHA-256: {ntdll_mod[1]}\n")
         runner.rename(output)
 
 

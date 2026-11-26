@@ -646,6 +646,13 @@ impl Menu {
             let forward = (buttons & LEFT) == 0;
             match self.app_row {
                 0 => {
+                    if buttons & CROSS != 0 {
+                        self.installers = library_gog::scan_gog_installers(&self.paths);
+                        self.status.clear();
+                        self.screen = Screen::Installers;
+                    }
+                }
+                1 => {
                     self.ui.language = if forward { self.ui.language.next() } else { self.ui.language.prev() };
                     match library::save_ui_settings(&self.ui_file, &self.ui) {
                         Ok(()) => {
@@ -655,7 +662,7 @@ impl Menu {
                         Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
                     }
                 }
-                1 => {
+                2 => {
                     let len = self.ui.profiles.len();
                     if len > 0 {
                         self.ui.active_profile = if forward {
@@ -672,7 +679,7 @@ impl Menu {
                         Err(e) => self.status = format!("Cannot save ui_settings.toml: {e}"),
                     }
                 }
-                2 => {
+                3 => {
                     const OPTS: [u8; 4] = [0, 2, 3, 4];
                     let cur = OPTS.iter().position(|&v| v == self.framegen).unwrap_or(0);
                     let next = if forward { (cur + 1) % OPTS.len() } else { (cur + OPTS.len() - 1) % OPTS.len() };
@@ -687,17 +694,18 @@ impl Menu {
                             };
                             self.status = if self.framegen != self.active_framegen {
                                 format!(
-                                    "Frame Generation: {label}  ·  {}",
+                                    "{}: {label}  ·  {}",
+                                    tr(self.ui.language, "Frame Generation"),
                                     tr(self.ui.language, "Restart TrinityXSX to apply")
                                 )
                             } else {
-                                format!("Frame Generation: {label}")
+                                format!("{}: {label}", tr(self.ui.language, "Frame Generation"))
                             };
                         }
                         Err(e) => self.status = format!("Cannot save profile: {e}"),
                     }
                 }
-                3 => {
+                4 => {
                     self.show_fps = !self.show_fps;
                     match library::save_show_fps_setting(&self.profile_file, self.show_fps) {
                         Ok(()) => {
@@ -705,21 +713,14 @@ impl Menu {
                             self.status = if self.show_fps != self.active_show_fps {
                                 format!(
                                     "{}: {label}  ·  {}",
-                                    tr(self.ui.language, "FPS HUD Overlay"),
+                                    tr(self.ui.language, "FPS Counter"),
                                     tr(self.ui.language, "Restart TrinityXSX to apply")
                                 )
                             } else {
-                                format!("{}: {label}", tr(self.ui.language, "FPS HUD Overlay"))
+                                format!("{}: {label}", tr(self.ui.language, "FPS Counter"))
                             };
                         }
                         Err(e) => self.status = format!("Cannot save profile: {e}"),
-                    }
-                }
-                4 => {
-                    if buttons & CROSS != 0 {
-                        self.installers = library_gog::scan_gog_installers(&self.paths);
-                        self.status.clear();
-                        self.screen = Screen::Installers;
                     }
                 }
                 _ => {
@@ -1185,9 +1186,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let active = menu.catalog.folders.iter().filter(|f| f.available).count();
             let sort_label = t(menu.ui.sort_mode.label_key());
             text(dc, "TrinityXSX", region(left, 56, right - scale(740), 80), scale(62), 700, snow);
+            let installer_note = if !menu.installers.is_empty() {
+                format!("  ·  {} {} (OPTIONS)", menu.installers.len(), t("installer(s) ready"))
+            } else {
+                String::new()
+            };
             let header_sub = if menu.catalog.games.len() > GAME_ROWS {
                 format!(
-                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}  ·  {} / {}",
+                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}  ·  {} / {}{installer_note}",
                     t("Game library"),
                     menu.catalog.games.len(),
                     t("games"),
@@ -1199,7 +1205,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 )
             } else {
                 format!(
-                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}",
+                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}{installer_note}",
                     t("Game library"),
                     menu.catalog.games.len(),
                     t("games"),
@@ -1407,7 +1413,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             text(dc, &menu.status, region(left, 896, right, 38), scale(23), 400, mint);
             text(
                 dc,
-                t("X  Play    R1  Settings    Square  Folders    L1  Web/QR    OPTIONS  App/FG    L2  Fav    R2  Sort    Circle  Exit"),
+                t("X  Play    R1  Game    Square  Folders    L1  Web/QR    OPTIONS  Settings    L2  Fav    R2  Sort    Circle  Exit"),
                 region(left, 958, right, 44),
                 scale(21),
                 600,
@@ -1416,10 +1422,10 @@ unsafe fn paint(window: HWND, menu: &Menu) {
         }
 
         Screen::AppSettings => {
-            text(dc, t("Profile & Language"), region(left, 56, right - scale(660), 76), scale(52), 700, snow);
+            text(dc, t("Settings"), region(left, 56, right - scale(660), 76), scale(52), 700, snow);
             text(
                 dc,
-                t("Choose the offline player profile (separate saves) and interface language."),
+                t("Install games, adjust display options, player profile and language."),
                 region(left, 140, right, 44),
                 scale(25),
                 400,
@@ -1441,16 +1447,16 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let fps_val = if fps_pending { format!("{fps_base}  [restart]") } else { fps_base };
             let restart_val = if any_pending { t("Apply changes").to_owned() } else { t("Press X").to_owned() };
             let gog_val = if menu.installers.is_empty() {
-                "0 found (drop in installers/)".to_owned()
+                t("None found").to_owned()
             } else {
-                format!("{} ready  [Press X]", menu.installers.len())
+                format!("{} {}  [X]", menu.installers.len(), t("ready"))
             };
             let rows = [
+                (t("Install GOG Games"), gog_val),
                 (t("Interface language"), menu.ui.language.display_name().to_owned()),
                 (t("Active offline profile"), format!("{}  (XUID {})", profile.name, profile.user_id)),
-                (t("Frame Generation (MihawkGen)"), fg_val),
-                (t("FPS HUD Overlay"), fps_val),
-                ("Install GOG offline games (innoextract)", gog_val),
+                (t("Frame Generation"), fg_val),
+                (t("FPS Counter"), fps_val),
                 (t("Restart TrinityXSX now"), restart_val),
             ];
             for (idx, (label, val)) in rows.iter().enumerate() {
@@ -1467,7 +1473,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 text(dc, label, region(left + scale(26), top + 16, right - scale(500), 36), scale(26), 600, snow);
                 let val_color = if idx == 5 && any_pending {
                     amber
-                } else if (idx == 4 && !menu.installers.is_empty()) || selected {
+                } else if (idx == 0 && !menu.installers.is_empty()) || selected {
                     mint
                 } else {
                     muted
@@ -1485,7 +1491,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
 
             text(
                 dc,
-                t("MihawkGen neural interpolation (Vulkan / DXVK / D3D12). Restart TrinityXSX to apply."),
+                t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
                 region(left, 682, right, 42),
                 scale(23),
                 400,
@@ -1511,17 +1517,10 @@ unsafe fn paint(window: HWND, menu: &Menu) {
         }
 
         Screen::Installers => {
+            text(dc, t("Install GOG Games"), region(left, 56, right - scale(360), 76), scale(44), 700, snow);
             text(
                 dc,
-                "Install GOG Games (Open-Source innoextract)",
-                region(left, 56, right - scale(360), 76),
-                scale(44),
-                700,
-                snow,
-            );
-            text(
-                dc,
-                "Drop DRM-free GOG offline installers (setup_*.exe + .bin) into /mnt/ext1/xboxseries/installers/",
+                t("Place GOG installer files (setup_*.exe + .bin) in /mnt/ext1/xboxseries/installers/"),
                 region(left, 138, right, 40),
                 scale(23),
                 400,
@@ -1536,7 +1535,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 fill(dc, region(left, 250, right, 4), mint);
                 text(
                     dc,
-                    &format!("Extracting {}...", job.game_name),
+                    &format!("{} {}...", t("Installing"), job.game_name),
                     region(left + scale(32), 290, right - scale(32), 48),
                     scale(34),
                     700,
@@ -1565,7 +1564,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
                 text(
                     dc,
-                    "Please keep your PS5 awake until extraction finishes",
+                    t("Keep your PS5 awake until installation finishes"),
                     region(bar_l, 476, bar_r, 30),
                     scale(20),
                     400,
@@ -1575,7 +1574,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 fill(dc, region(left, 230, right, 240), panel_bg);
                 text(
                     dc,
-                    "No GOG offline installers found yet.",
+                    t("No GOG installers found."),
                     region(left + scale(28), 270, right - scale(28), 44),
                     scale(32),
                     600,
@@ -1583,7 +1582,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
                 text(
                     dc,
-                    "Upload setup_<game>.exe (+ any .bin slices) via FTP to /mnt/ext1/xboxseries/installers/ and press Triangle to rescan.",
+                    t("Copy setup_<game>.exe (+ .bin files) to /mnt/ext1/xboxseries/installers/ and press Triangle to rescan."),
                     region(left + scale(28), 336, right - scale(28), 72),
                     scale(24),
                     400,
@@ -1633,12 +1632,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     );
                 }
             }
-            let del_lbl = if menu.delete_installer_after { "On" } else { "Off" };
+            let del_lbl = t(if menu.delete_installer_after { "On" } else { "Off" });
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
             text(
                 dc,
                 &format!(
-                    "X  Install & Convert     Triangle  Rescan     Square  Delete after: {del_lbl}     Circle  Back"
+                    "{} {del_lbl}     {}",
+                    t("X  Install     Triangle  Rescan     Square  Delete files after:"),
+                    t("Circle  Back")
                 ),
                 region(left, 958, right, 44),
                 scale(23),
