@@ -19,6 +19,7 @@ on:
       - tools/build-standalone-ffpkg.sh
       - tools/build-innoextract.sh
       - tools/innoextract/**
+      - tools/netinput-sender/**
       - tools/sync_upstream.py
       - tools/compat.py
       - tools/test_compat.py
@@ -39,6 +40,7 @@ on:
       - tools/build-standalone-ffpkg.sh
       - tools/build-innoextract.sh
       - tools/innoextract/**
+      - tools/netinput-sender/**
       - tools/sync_upstream.py
       - tools/compat.py
       - tools/test_compat.py
@@ -301,6 +303,34 @@ jobs:
         with:
           name: innoextract
           path: out/innoextract
+          if-no-files-found: error
+
+  netinput-sender:
+    name: txin-sender.exe (keyboard & mouse over the LAN)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Check, test & build
+        working-directory: tools/netinput-sender
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: txin-sender
+          path: tools/netinput-sender/target/release/txin-sender.exe
           if-no-files-found: error
 
   package:

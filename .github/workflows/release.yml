@@ -221,6 +221,34 @@ jobs:
           path: out/innoextract
           if-no-files-found: error
 
+  netinput-sender:
+    name: txin-sender.exe (keyboard & mouse over the LAN)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Check, test & build
+        working-directory: tools/netinput-sender
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: txin-sender
+          path: tools/netinput-sender/target/release/txin-sender.exe
+          if-no-files-found: error
+
   standalone-ffpkg:
     name: Build standalone PPSA83601.ffpkg
     needs: [xcl, vkd3d-proton, innoextract, standalone]
@@ -307,7 +335,7 @@ jobs:
 
   publish:
     name: Assemble & publish GitHub Release
-    needs: [xcl, vkd3d-proton, innoextract, standalone, standalone-ffpkg]
+    needs: [xcl, vkd3d-proton, innoextract, standalone, standalone-ffpkg, netinput-sender]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -343,6 +371,11 @@ jobs:
           name: standalone-ffpkg
           path: release-assets
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: txin-sender
+          path: txin-sender
+
       - name: Assemble release assets
         run: |
           set -euo pipefail
@@ -351,10 +384,11 @@ jobs:
           tools/make-ps5-package.sh
           mkdir -p release-assets
           cp xcl/target/release/xcl.exe "release-assets/xcl-library-${TAG}.exe"
+          cp txin-sender/txin-sender.exe "release-assets/txin-sender-${TAG}.exe"
           (cd dist/prospero-win && zip -qr "../../release-assets/TrinityXSX-prospero-win-${TAG}.zip" .)
           (
             cd release-assets
-            sha256sum "PPSA83601.zip" "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
+            sha256sum "PPSA83601.zip" "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "txin-sender-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
           )
           cat "release-assets/SHA256SUMS-${TAG}.txt"
 
@@ -375,6 +409,7 @@ jobs:
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
           - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — standalone UFS2 image (`fsck_ufs` verified) for `/mnt/ext1/PPSA83601.ffpkg`.
           - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary for `/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe`.
+          - \`txin-sender-${RELEASE_TAG}.exe\` — run it on a Windows PC to play with its keyboard and mouse: it opens a page in the browser (full screen, Ctrl+Alt+F12 starts capturing, holding Esc for 1.5 s always stops it).
           - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle.
           - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for all release assets.
 

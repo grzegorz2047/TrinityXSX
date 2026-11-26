@@ -1,22 +1,29 @@
 //! txin-sender: this PC's keyboard and mouse to TrinityXSX on a PS5, over the LAN.
 //!
-//!     txin-sender <PS5 address> [--port 9396]     capture with Ctrl+Alt+F12, stop with Ctrl+Alt+F12
-//!     txin-sender <PS5 address> --test            no capture: hold W for a moment and move the mouse in a circle
+//!     txin-sender                         open the capture page in the browser (also: double-click)
+//!     txin-sender --web <PS5 address>     the same, with the PS5's address filled in
+//!     txin-sender <PS5 address>           capture without a browser: Ctrl+Alt+F12 starts and stops
+//!     txin-sender <PS5 address> --test    no capture: hold W for a moment and move the mouse in a circle
 //!
-//! Low-level keyboard and mouse hooks see every event; while capturing they hide it from Windows and the
-//! state goes to the PS5 (protocol.rs). Mouse motion comes from Raw Input when Windows delivers it while the
-//! hook hides the event, and otherwise from the hook's would-be cursor position against the cursor, which
-//! stays where capture began.
+//! Either way, holding Esc for 1.5 s stops capturing (panic), so the PC is always recoverable.
+//!
+//! Without a browser, low-level keyboard and mouse hooks see every event; while capturing they hide it from
+//! Windows and the state goes to the PS5 (protocol.rs). Mouse motion comes from Raw Input when Windows
+//! delivers it while the hook hides the event, and otherwise from the hook's would-be cursor position against
+//! the cursor, which stays where capture began. The capture page is web.rs.
 
 mod capture;
+mod link;
 mod protocol;
+mod web;
+mod ws;
 
-use capture::{Capture, Outcome, Verdict};
+use capture::{Outcome, Verdict};
+use link::{now_ms, Link};
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -114,7 +121,6 @@ extern "system" {
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> isize;
     fn GetCurrentThreadId() -> u32;
-    fn GetCurrentProcessId() -> u32;
     fn SetConsoleCtrlHandler(handler: unsafe extern "system" fn(u32) -> i32, add: i32) -> i32;
 }
 
@@ -141,50 +147,37 @@ const RIDEV_INPUTSINK: u32 = 0x100;
 const RID_INPUT: u32 = 0x1000_0003;
 const RIM_TYPEMOUSE: u32 = 0;
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
-const HEARTBEAT: Duration = Duration::from_millis(50);
+/// The hook mode's timer: heartbeats and the long-Esc check.
+const TICK_MS: u32 = 25;
 
 struct App {
-    capture: Capture,
-    socket: UdpSocket,
-    session: u32,
-    sequence: u32,
+    link: Link,
     anchor: Point,
     raw_seen: bool,
-    sent: u64,
-    last_sent: Instant,
 }
 
 impl App {
-    fn send(&mut self) {
-        self.sequence = self.sequence.wrapping_add(1);
-        let bytes = self.capture.packet(self.session, self.sequence).encode();
-        if self.socket.send(&bytes).is_ok() {
-            self.sent += 1;
-        }
-        self.last_sent = Instant::now();
-    }
-
     fn apply(&mut self, outcome: Outcome) -> Verdict {
         if outcome.toggled {
-            if self.capture.on {
-                let mut p = Point::default();
-                unsafe { GetCursorPos(&mut p) };
-                self.anchor = p;
-                self.raw_seen = false;
-                println!("capture ON  - the keyboard and mouse go to the PS5 (Ctrl+Alt+F12 stops)");
-            } else {
-                println!("capture OFF - the keyboard and mouse are this PC's again ({} datagrams sent)", self.sent);
-            }
-            unsafe { MessageBeep(0) };
+            self.announce(outcome);
         }
-        if outcome.changed || outcome.toggled {
-            self.send();
-            if outcome.toggled && !self.capture.on {
-                self.send(); // two more: the release must arrive
-                self.send();
-            }
-        }
+        self.link.deliver(outcome);
         outcome.verdict
+    }
+
+    fn announce(&mut self, outcome: Outcome) {
+        if self.link.capture.on {
+            // SAFETY: GetCursorPos writes one POINT into a live struct.
+            unsafe { GetCursorPos(&mut self.anchor) };
+            self.raw_seen = false;
+            println!("capture ON  - the keyboard and mouse go to the PS5 (Ctrl+Alt+F12 stops, or hold Esc)");
+        } else if outcome.panic {
+            println!("PANIC: Esc held - capture stopped, the keyboard and mouse are this PC's again");
+        } else {
+            println!("capture OFF - the keyboard and mouse are this PC's again ({} datagrams sent)", self.link.sent);
+        }
+        // SAFETY: plain call, no pointers.
+        unsafe { MessageBeep(0) };
     }
 }
 
@@ -203,7 +196,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: usize, lparam: isize)
         let k = &*(lparam as *const KbdLlHook);
         let down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
         if with_app(|app| {
-            let o = app.capture.key(k.vk as u8, down);
+            let o = app.link.capture.key(k.vk as u8, down, now_ms());
             app.apply(o)
         }) == Verdict::Swallow
         {
@@ -217,17 +210,18 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) ->
     if code >= 0 {
         let m = &*(lparam as *const MsLlHook);
         let verdict = with_app(|app| {
+            let capture = &mut app.link.capture;
             let outcome = match wparam {
                 WM_MOUSEMOVE => {
                     let (dx, dy) = if app.raw_seen { (0, 0) } else { (m.pt.x - app.anchor.x, m.pt.y - app.anchor.y) };
-                    app.capture.motion(dx, dy)
+                    capture.motion(dx, dy)
                 }
-                WM_LBUTTONDOWN | WM_LBUTTONUP => app.capture.button(0, wparam == WM_LBUTTONDOWN),
-                WM_RBUTTONDOWN | WM_RBUTTONUP => app.capture.button(1, wparam == WM_RBUTTONDOWN),
-                WM_MBUTTONDOWN | WM_MBUTTONUP => app.capture.button(2, wparam == WM_MBUTTONDOWN),
-                WM_XBUTTONDOWN | WM_XBUTTONUP => app.capture.button(3, wparam == WM_XBUTTONDOWN),
-                WM_MOUSEWHEEL => app.capture.wheel((m.mouse_data >> 16) as u16 as i16 as i32),
-                WM_MOUSEHWHEEL => app.capture.wheel(0),
+                WM_LBUTTONDOWN | WM_LBUTTONUP => capture.button(0, wparam == WM_LBUTTONDOWN),
+                WM_RBUTTONDOWN | WM_RBUTTONUP => capture.button(1, wparam == WM_RBUTTONDOWN),
+                WM_MBUTTONDOWN | WM_MBUTTONUP => capture.button(2, wparam == WM_MBUTTONDOWN),
+                WM_XBUTTONDOWN | WM_XBUTTONUP => capture.button(3, wparam == WM_XBUTTONDOWN),
+                WM_MOUSEWHEEL => capture.wheel((m.mouse_data >> 16) as u16 as i16 as i32),
+                WM_MOUSEHWHEEL => capture.wheel(0),
                 _ => return Verdict::Pass,
             };
             app.apply(outcome)
@@ -254,9 +248,9 @@ unsafe extern "system" fn window_proc(hwnd: isize, msg: u32, wparam: usize, lpar
                 let dy = i32::from_le_bytes(buffer[at + 16..at + 20].try_into().unwrap());
                 if kind == RIM_TYPEMOUSE && flags & MOUSE_MOVE_ABSOLUTE == 0 && (dx != 0 || dy != 0) {
                     with_app(|app| {
-                        if app.capture.on {
+                        if app.link.capture.on {
                             app.raw_seen = true;
-                            let o = app.capture.motion(dx, dy);
+                            let o = app.link.capture.motion(dx, dy);
                             app.apply(o);
                         }
                         Verdict::Pass
@@ -267,8 +261,9 @@ unsafe extern "system" fn window_proc(hwnd: isize, msg: u32, wparam: usize, lpar
         }
         WM_TIMER => {
             with_app(|app| {
-                if app.capture.on && app.last_sent.elapsed() >= HEARTBEAT {
-                    app.send();
+                let o = app.link.tick();
+                if o.toggled {
+                    app.announce(o);
                 }
                 Verdict::Pass
             });
@@ -287,93 +282,40 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-fn session_id() -> u32 {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    (nanos as u32) ^ ((nanos >> 32) as u32) ^ unsafe { GetCurrentProcessId() }.rotate_left(16)
-}
-
 fn usage() -> ! {
-    eprintln!("usage: txin-sender <PS5 address> [--port {}] [--test]", protocol::PORT);
-    eprintln!("  Ctrl+Alt+F12 starts and stops sending this PC's keyboard and mouse to the PS5.");
+    eprintln!("usage: txin-sender [--web] [<PS5 address>] [--port {}] [--test]", protocol::PORT);
+    eprintln!("  With no address (or --web) the capture page opens in the browser.");
+    eprintln!("  With an address, Ctrl+Alt+F12 starts and stops capturing this PC's keyboard and mouse.");
+    eprintln!("  Holding Esc for 1.5 s always stops capturing.");
     eprintln!("  --test sends a short pattern (W held, the mouse in a circle) without capturing anything.");
     std::process::exit(2);
 }
 
-fn connect(host: &str, port: u16) -> std::io::Result<(UdpSocket, SocketAddr)> {
-    let target = (host, port)
-        .to_socket_addrs()?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no IPv4 address"))?;
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect(target)?;
-    Ok((socket, target))
-}
-
-fn test_pattern(socket: UdpSocket, session: u32) {
-    let mut app = App {
-        capture: Capture::default(),
-        socket,
-        session,
-        sequence: 0,
-        anchor: Point::default(),
-        raw_seen: false,
-        sent: 0,
-        last_sent: Instant::now(),
-    };
-    // Capture on as the shortcut would (its Ctrl and Alt are Windows'), then W for 0.3 s and a 2 s circle.
-    app.capture.key(0xa2, true);
-    app.capture.key(0xa4, true);
-    app.capture.key(capture::VK_F12, true);
-    app.capture.key(0xa2, false);
-    app.capture.key(0xa4, false);
-    app.capture.key(capture::VK_F12, false);
-    app.send();
-    let o = app.capture.key(b'W', true);
-    app.apply(o);
+fn test_pattern(mut link: Link) {
+    link.capture.start();
+    link.send();
+    let o = link.capture.key(b'W', true, now_ms());
+    link.deliver(o);
     std::thread::sleep(Duration::from_millis(300));
-    let o = app.capture.key(b'W', false);
-    app.apply(o);
+    let o = link.capture.key(b'W', false, now_ms());
+    link.deliver(o);
     let (mut x, mut y) = (0i32, 0i32);
     for step in 1..=200 {
         let angle = step as f64 / 200.0 * std::f64::consts::TAU;
         let (nx, ny) = ((angle.cos() * 150.0 - 150.0) as i32, (angle.sin() * 150.0) as i32);
-        let o = app.capture.motion(nx - x, ny - y);
+        let o = link.capture.motion(nx - x, ny - y);
         (x, y) = (nx, ny);
-        app.apply(o);
+        link.deliver(o);
         std::thread::sleep(Duration::from_millis(10));
     }
-    app.capture.key(0xa2, true);
-    app.capture.key(0xa4, true);
-    let o = app.capture.key(capture::VK_F12, true);
-    app.apply(o);
-    println!("test pattern sent: {} datagrams, session {:08x}", app.sent, session);
+    link.release();
+    println!("test pattern sent: {} datagrams, session {:08x}", link.sent, link.session());
 }
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let mut host = None;
-    let mut port = protocol::PORT;
-    let mut test = false;
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--port" => port = args.next().and_then(|p| p.parse().ok()).unwrap_or_else(|| usage()),
-            "--test" => test = true,
-            "-h" | "--help" => usage(),
-            _ if host.is_none() && !a.starts_with('-') => host = Some(a),
-            _ => usage(),
-        }
-    }
-    let host = host.unwrap_or_else(|| usage());
-    let (socket, target) = connect(&host, port).unwrap_or_else(|e| {
-        eprintln!("txin-sender: {host}:{port}: {e}");
-        std::process::exit(1);
-    });
-    let session = session_id();
-    if test {
-        test_pattern(socket, session);
-        return;
-    }
-
+fn hooks(link: Link) {
+    let (target, session) = (link.target, link.session());
+    // SAFETY: Win32 calls with valid, live arguments; the hooks and the window procedure run on this thread
+    // inside the message loop below, and APP is this thread's.
     unsafe {
         MAIN_THREAD.store(GetCurrentThreadId(), Ordering::SeqCst);
         let instance = GetModuleHandleW(std::ptr::null());
@@ -409,20 +351,9 @@ fn main() {
         if hwnd == 0 || RegisterRawInputDevices(&mouse, 1, std::mem::size_of::<RawInputDevice>() as u32) == 0 {
             eprintln!("txin-sender: Raw Input is unavailable; mouse motion comes from the hook alone");
         }
-        SetTimer(hwnd, 1, HEARTBEAT.as_millis() as u32, std::ptr::null());
+        SetTimer(hwnd, 1, TICK_MS, std::ptr::null());
 
-        APP.with(|a| {
-            *a.borrow_mut() = Some(App {
-                capture: Capture::default(),
-                socket,
-                session,
-                sequence: 0,
-                anchor: Point::default(),
-                raw_seen: false,
-                sent: 0,
-                last_sent: Instant::now(),
-            })
-        });
+        APP.with(|a| *a.borrow_mut() = Some(App { link, anchor: Point::default(), raw_seen: false }));
         let kb = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_hook, instance, 0);
         let ms = SetWindowsHookExW(WH_MOUSE_LL, mouse_hook, instance, 0);
         if kb == 0 || ms == 0 {
@@ -433,7 +364,7 @@ fn main() {
         SetConsoleCtrlHandler(console_ctrl, 1);
 
         println!("txin-sender: PS5 at {target}, session {session:08x}");
-        println!("Ctrl+Alt+F12 starts and stops capturing; Ctrl+C here quits.");
+        println!("Ctrl+Alt+F12 starts and stops capturing; holding Esc for 1.5 s also stops it; Ctrl+C here quits.");
         let mut msg = std::mem::zeroed::<Msg>();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
             TranslateMessage(&msg);
@@ -445,10 +376,45 @@ fn main() {
     // Whatever was held is released on the PS5 before quitting.
     APP.with(|a| {
         if let Some(app) = a.borrow_mut().as_mut() {
-            app.capture = Capture::default();
-            for _ in 0..3 {
-                app.send();
-            }
+            app.link.release();
         }
     });
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let mut host = None;
+    let mut port = protocol::PORT;
+    let (mut test, mut web, mut open) = (false, false, true);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--port" => port = args.next().and_then(|p| p.parse().ok()).unwrap_or_else(|| usage()),
+            "--test" => test = true,
+            "--web" => web = true,
+            "--no-open" => open = false,
+            "-h" | "--help" => usage(),
+            _ if host.is_none() && !a.starts_with('-') => host = Some(a),
+            _ => usage(),
+        }
+    }
+    if web || host.is_none() {
+        if test {
+            usage();
+        }
+        if let Err(e) = web::serve(host.as_deref(), port, open) {
+            eprintln!("txin-sender: the capture page: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let host = host.unwrap_or_else(|| usage());
+    let link = Link::connect(&host, port).unwrap_or_else(|e| {
+        eprintln!("txin-sender: {host}:{port}: {e}");
+        std::process::exit(1);
+    });
+    if test {
+        test_pattern(link);
+    } else {
+        hooks(link);
+    }
 }

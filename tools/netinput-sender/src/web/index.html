@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrinityXSX · keyboard &amp; mouse</title>
+<style>
+  :root {
+    --bg: #0d1016; --panel: #161b24; --line: #273041; --text: #e8edf5; --muted: #93a0b4;
+    --accent: #4fa3ff; --warn: #ffb547; --bad: #ff6b6b; --good: #4fd18b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #setup { min-height: 100%; display: grid; place-items: center; padding: 32px 16px; }
+  .card { width: min(560px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { margin: 0 0 22px; color: var(--muted); }
+  label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 6px; }
+  .row { display: flex; gap: 10px; }
+  input { flex: 1; min-width: 0; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button { padding: 11px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #04121f;
+    font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  ul { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+  li { display: flex; gap: 12px; align-items: baseline; color: var(--muted); }
+  kbd { font: 600 13px/1 ui-monospace, Consolas, monospace; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 4px 6px; white-space: nowrap; }
+  #status { margin-top: 18px; min-height: 1.5em; font-size: 14px; color: var(--muted); }
+  #status.bad { color: var(--bad); } #status.good { color: var(--good); }
+  #notice { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; display: none; }
+  #notice.warn { display: block; background: #3a2b10; color: var(--warn); }
+  #notice.bad { display: block; background: #3a1717; color: var(--bad); }
+
+  #stage { position: fixed; inset: 0; display: none; place-items: center; background: #000; cursor: none; user-select: none; }
+  body.fullscreen #setup { display: none; }
+  body.fullscreen #stage { display: grid; }
+  .msg { text-align: center; padding: 24px; max-width: 900px; }
+  .big { font-size: clamp(26px, 4vw, 48px); font-weight: 700; margin: 0 0 14px; }
+  .small { color: var(--muted); font-size: clamp(15px, 1.6vw, 20px); margin: 0; }
+  body.capturing .big { font-size: clamp(16px, 1.6vw, 20px); font-weight: 500; color: #5d6878; }
+  body.capturing .small { color: #3f4856; font-size: 14px; }
+  #hold { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: var(--bad);
+    transform-origin: left; transform: scaleX(0); }
+  body.holding #hold { transition: transform 1.5s linear; transform: scaleX(1); }
+</style>
+</head>
+<body>
+<main id="setup">
+  <div class="card">
+    <h1 id="t-title"></h1>
+    <p class="sub" id="t-sub"></p>
+    <label for="ps5" id="t-addr"></label>
+    <div class="row">
+      <input id="ps5" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.170">
+      <button id="go" type="button"></button>
+    </div>
+    <ul>
+      <li><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>F12</kbd><span id="t-toggle"></span></li>
+      <li><kbd id="t-esc-key"></kbd><span id="t-esc"></span></li>
+    </ul>
+    <div id="notice" role="alert"></div>
+    <div id="status" aria-live="polite"></div>
+  </div>
+</main>
+<div id="stage">
+  <div class="msg">
+    <p class="big" id="big"></p>
+    <p class="small" id="small"></p>
+  </div>
+  <div id="hold"></div>
+</div>
+<script>
+"use strict";
+const PANIC_MS = 1500;
+const pl = (navigator.language || "").toLowerCase().startsWith("pl");
+const T = pl ? {
+  title: "TrinityXSX · klawiatura i mysz",
+  sub: "Steruj grą na PS5 klawiaturą i myszą tego komputera.",
+  addr: "Adres PS5", go: "Pełny ekran",
+  toggle: "zaczyna i kończy przechwytywanie", escKey: "Esc ×1,5 s",
+  esc: "tryb awaryjny: zatrzymuje wszystko i wychodzi z pełnego ekranu",
+  ready: "Naciśnij Ctrl+Alt+F12, aby zacząć przechwytywanie",
+  readySmall: "Przytrzymaj Esc, aby wyjść",
+  capturing: "Przechwytywanie · Ctrl+Alt+F12 zatrzymuje",
+  capturingSmall: "przytrzymaj Esc, aby wyjść",
+  interrupted: "Przechwytywanie przerwane. Naciśnij Ctrl+Alt+F12, aby wrócić",
+  noLock: "Ta przeglądarka nie blokuje klawiatury: Esc, Alt+Tab i klawisz Windows nie trafią do gry. Najlepiej działa Chrome lub Edge.",
+  panicked: "Tryb awaryjny: przechwytywanie zatrzymane, klawiatura i mysz wróciły do komputera.",
+  left: "Wyszedłeś z pełnego ekranu, przechwytywanie zatrzymane.",
+  needAddr: "Wpisz adres PS5 (np. 192.168.1.170).",
+  connecting: "Łączenie z pomocnikiem…", helper: "Pomocnik działa.",
+  helperGone: "Pomocnik txin-sender nie działa. Uruchom go ponownie i odśwież stronę.",
+  target: (a) => `Cel: ${a}`, sent: (n) => `Wysłano ${n} pakietów`, err: (e) => `Błąd: ${e}`,
+  noFull: "Bez pełnego ekranu: Esc zwalnia mysz, a Alt+Tab i klawisz Windows zostają na komputerze. Przytrzymaj Esc, aby wyjść",
+} : {
+  title: "TrinityXSX · keyboard & mouse",
+  sub: "Play the game on your PS5 with this computer's keyboard and mouse.",
+  addr: "PS5 address", go: "Full screen",
+  toggle: "starts and stops capturing", escKey: "Esc ×1.5 s",
+  esc: "panic: stops everything and leaves full screen",
+  ready: "Press Ctrl+Alt+F12 to start capturing",
+  readySmall: "Hold Esc to leave",
+  capturing: "Capturing · Ctrl+Alt+F12 stops",
+  capturingSmall: "hold Esc to leave",
+  interrupted: "Capture interrupted. Press Ctrl+Alt+F12 to resume",
+  noLock: "This browser cannot lock the keyboard: Esc, Alt+Tab and the Windows key will not reach the game. Chrome or Edge work best.",
+  panicked: "Panic: capture stopped, the keyboard and mouse are this computer's again.",
+  left: "You left full screen, so capture stopped.",
+  needAddr: "Enter the PS5's address (e.g. 192.168.1.170).",
+  connecting: "Connecting to the helper…", helper: "Helper running.",
+  helperGone: "The txin-sender helper is not running. Start it again and reload this page.",
+  target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,
+  noFull: "Not full screen: Esc frees the mouse, and Alt+Tab and the Windows key stay on this computer. Hold Esc to leave",
+};
+
+// KeyboardEvent.code (the physical key) to the Windows virtual key the PS5 side expects.
+const VK = {
+  Backspace: 0x08, Tab: 0x09, Enter: 0x0d, NumpadEnter: 0x0d, ShiftLeft: 0xa0, ShiftRight: 0xa1,
+  ControlLeft: 0xa2, ControlRight: 0xa3, AltLeft: 0xa4, AltRight: 0xa5, Pause: 0x13, CapsLock: 0x14,
+  Escape: 0x1b, Space: 0x20, PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24, ArrowLeft: 0x25,
+  ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28, PrintScreen: 0x2c, Insert: 0x2d, Delete: 0x2e,
+  MetaLeft: 0x5b, MetaRight: 0x5c, OSLeft: 0x5b, OSRight: 0x5c, ContextMenu: 0x5d,
+  NumpadMultiply: 0x6a, NumpadAdd: 0x6b, NumpadSubtract: 0x6d, NumpadDecimal: 0x6e, NumpadDivide: 0x6f,
+  NumLock: 0x90, ScrollLock: 0x91, Semicolon: 0xba, Equal: 0xbb, Comma: 0xbc, Minus: 0xbd, Period: 0xbe,
+  Slash: 0xbf, Backquote: 0xc0, BracketLeft: 0xdb, Backslash: 0xdc, BracketRight: 0xdd, Quote: 0xde,
+  IntlBackslash: 0xe2,
+};
+for (let i = 0; i < 26; i++) VK["Key" + String.fromCharCode(65 + i)] = 0x41 + i;
+for (let i = 0; i < 10; i++) { VK["Digit" + i] = 0x30 + i; VK["Numpad" + i] = 0x60 + i; }
+for (let i = 1; i <= 24; i++) VK["F" + i] = 0x6f + i;
+
+const $ = (id) => document.getElementById(id);
+const input = $("ps5"), go = $("go"), status = $("status"), notice = $("notice");
+let ws = null, state = "setup", escTimer = null, wheel = 0, connected = false, full = false;
+
+for (const [id, key] of [["t-title", "title"], ["t-sub", "sub"], ["t-addr", "addr"], ["go", "go"],
+                         ["t-toggle", "toggle"], ["t-esc-key", "escKey"], ["t-esc", "esc"]]) $(id).textContent = T[key];
+document.title = T.title;
+document.documentElement.lang = pl ? "pl" : "en";
+input.value = new URLSearchParams(location.search).get("ps5") || localStorage.getItem("txin-ps5") || "";
+if (!(navigator.keyboard && navigator.keyboard.lock)) showNotice(T.noLock, "warn");
+
+function showNotice(text, kind) { notice.textContent = text; notice.className = text ? kind : ""; }
+function setStatus(text, kind) { status.textContent = text; status.className = kind || ""; }
+function send(text) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(text); }
+
+function connect() {
+  setStatus(T.connecting);
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { connected = true; setStatus(T.helper, "good"); };
+  ws.onclose = () => { connected = false; leave(); showNotice(T.helperGone, "bad"); setStatus(""); go.disabled = true; };
+  ws.onmessage = (e) => {
+    const [verb, ...rest] = String(e.data).split(" ");
+    if (verb === "target") setStatus(T.target(rest[0]), "good");
+    else if (verb === "sent") setStatus(T.sent(rest[0]), "good");
+    else if (verb === "panic") panic();
+    else if (verb === "error") { leave(); showNotice(T.err(rest.join(" ")), "bad"); }
+  };
+}
+
+function show() {
+  document.body.classList.toggle("fullscreen", state !== "setup");
+  document.body.classList.toggle("capturing", state === "capturing");
+  if (state === "ready") { $("big").textContent = T.ready; $("small").textContent = full ? T.readySmall : T.noFull; }
+  if (state === "capturing") { $("big").textContent = T.capturing; $("small").textContent = T.capturingSmall; }
+}
+
+go.addEventListener("click", async () => {
+  const address = input.value.trim();
+  if (!address) { showNotice(T.needAddr, "bad"); input.focus(); return; }
+  if (!connected) return;
+  localStorage.setItem("txin-ps5", address);
+  showNotice("", "");
+  send("target " + address);
+  // Some embedded browsers never answer a full-screen request: carry on in the window after a moment.
+  const granted = await Promise.race([
+    document.documentElement.requestFullscreen({ navigationUI: "hide" }).then(() => true, () => false),
+    new Promise((resolve) => setTimeout(() => resolve(false), 1500)),
+  ]);
+  full = granted && !!document.fullscreenElement;
+  if (full && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }
+  state = "ready";
+  show();
+});
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && state === "setup") go.click(); });
+
+function startCapture() {
+  const stage = $("stage");
+  const p = stage.requestPointerLock({ unadjustedMovement: true });
+  if (p && p.catch) p.catch(() => stage.requestPointerLock());
+  send("on");
+  state = "capturing";
+  show();
+}
+
+function stopCapture(text) {
+  send("off");
+  if (document.pointerLockElement) document.exitPointerLock();
+  state = "ready";
+  show();
+  if (text) $("big").textContent = text;
+}
+
+// Back to the setup card: nothing captured, nothing locked, not full screen.
+function leave(text) {
+  if (escTimer) { clearTimeout(escTimer); escTimer = null; }
+  document.body.classList.remove("holding");
+  if (state === "capturing") send("off");
+  state = "setup";
+  if (document.pointerLockElement) document.exitPointerLock();
+  if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();
+  full = false;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  show();
+  if (text) showNotice(text, "warn");
+}
+
+function panic() { leave(T.panicked); }
+
+window.addEventListener("keydown", (e) => {
+  if (state === "setup") return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.code === "F12" && e.ctrlKey && e.altKey) {
+    if (!e.repeat) state === "capturing" ? stopCapture() : startCapture();
+    return;
+  }
+  if (e.code === "Escape" && !escTimer) {
+    escTimer = setTimeout(panic, PANIC_MS);
+    document.body.classList.add("holding");
+  }
+  if (state !== "capturing" || e.repeat) return;
+  const vk = VK[e.code];
+  if (vk) send(`k ${vk} 1`);
+}, true);
+
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Escape" && escTimer) {
+    clearTimeout(escTimer);
+    escTimer = null;
+    document.body.classList.remove("holding");
+  }
+  if (state === "setup") return;
+  e.preventDefault();
+  e.stopPropagation();
+  const vk = VK[e.code];
+  if (state === "capturing" && vk) send(`k ${vk} 0`);
+}, true);
+
+const BUTTON = { 0: 0, 1: 2, 2: 1 };   // left, middle, right → protocol's left, right, middle
+document.addEventListener("mousemove", (e) => {
+  if (state !== "capturing" || !document.pointerLockElement) return;
+  if (e.movementX || e.movementY) send(`m ${Math.round(e.movementX)} ${Math.round(e.movementY)}`);
+});
+for (const [type, down] of [["mousedown", 1], ["mouseup", 0]]) {
+  document.addEventListener(type, (e) => {
+    if (state === "setup") return;
+    e.preventDefault();
+    if (state === "capturing" && e.button in BUTTON) send(`b ${BUTTON[e.button]} ${down}`);
+  });
+}
+document.addEventListener("wheel", (e) => {
+  if (state === "setup") return;
+  e.preventDefault();
+  if (state !== "capturing") return;
+  wheel += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 100 : e.deltaY;
+  const detents = Math.trunc(-wheel / 100);
+  if (detents) { wheel += detents * 100; send(`w ${detents}`); }
+}, { passive: false });
+document.addEventListener("contextmenu", (e) => { if (state !== "setup") e.preventDefault(); });
+
+// Anything that takes the keyboard or mouse away stops capturing, so nothing stays held on the PS5.
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && full && state !== "setup") { full = false; leave(T.left); }
+});
+document.addEventListener("pointerlockchange", () => {
+  if (!document.pointerLockElement && state === "capturing") stopCapture(T.interrupted);
+});
+window.addEventListener("blur", () => { if (state === "capturing") stopCapture(T.interrupted); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && state !== "setup") leave(); });
+
+connect();
+</script>
+</body>
+</html>
