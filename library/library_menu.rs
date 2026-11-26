@@ -1,7 +1,6 @@
 //! TrinityXSX's controller-friendly library, cover preview, per-game xcl.toml editor,
 //! folder manager, and Web Companion QR window. Everything closes cleanly before in-process launch.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,7 +91,7 @@ struct Menu {
     screen: Screen,
     selected: usize,
     // Cached cover art thumbnails & preview for currently selected game
-    cover_cache: HashMap<PathBuf, Option<DibImage>>,
+    cover_cache: library_art::CoverCache,
     preview_key: Option<PathBuf>,
     preview_pe_kind: PeLaunchKind,
     preview_has_custom_cfg: bool,
@@ -197,7 +196,7 @@ impl Menu {
         let paths: Vec<PathBuf> =
             self.catalog.games.iter().skip(first).take(GAME_ROWS).filter_map(|g| g.logo.clone()).collect();
         for path in paths {
-            self.cover_cache.entry(path.clone()).or_insert_with(|| library_art::load_png_file(&path, CARD_BG_RGB).ok());
+            self.cover_cache.load(&path, CARD_BG_RGB);
         }
     }
 
@@ -214,7 +213,7 @@ impl Menu {
         }
         self.preview_key = Some(game.executable.clone());
         if let Some(path) = &game.logo {
-            self.cover_cache.entry(path.clone()).or_insert_with(|| library_art::load_png_file(path, CARD_BG_RGB).ok());
+            self.cover_cache.load(path, CARD_BG_RGB);
         }
         let (_, has_cfg) = library::load_game_config(game);
         self.preview_pe_kind = library_gog::detect_pe_kind(&game.executable);
@@ -1236,7 +1235,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let thumb_y = scale(top + 10);
                     let thumb_w = scale(116);
                     let thumb_h = scale(72);
-                    let thumb_img = game.logo.as_ref().and_then(|p| menu.cover_cache.get(p)).and_then(|o| o.as_ref());
+                    let thumb_img = game.logo.as_ref().and_then(|p| menu.cover_cache.get(p));
                     if let Some(img) = thumb_img {
                         draw_dib(dc, img, thumb_x, thumb_y, thumb_w, thumb_h);
                     } else {
@@ -1289,8 +1288,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let art_y = scale(card_top + 24);
                     let art_w = (right - preview_left) - pad * 2;
                     let art_h = scale(290);
-                    let preview_cover =
-                        game.logo.as_ref().and_then(|p| menu.cover_cache.get(p)).and_then(|o| o.as_ref());
+                    let preview_cover = game.logo.as_ref().and_then(|p| menu.cover_cache.get(p));
                     if let Some(cover) = preview_cover {
                         draw_dib(dc, cover, art_x, art_y, art_w, art_h);
                     } else {
@@ -2012,7 +2010,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
         watch_ticks: 0,
         screen: Screen::Library,
         selected: 0,
-        cover_cache: HashMap::new(),
+        cover_cache: library_art::CoverCache::default(),
         preview_key: None,
         preview_pe_kind: PeLaunchKind::XboxSeries,
         preview_has_custom_cfg: false,

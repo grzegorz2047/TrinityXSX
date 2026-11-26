@@ -193,6 +193,31 @@ pub fn decode_png(bytes: &[u8], bg_rgb: (u8, u8, u8)) -> Result<DibImage, &'stat
     Ok(DibImage { width, height, bgra_bottom_up: bgra })
 }
 
+/// Decoded cover art by file, each decoded at most once per session. A cover that fails to load is
+/// remembered as missing, so a broken file is not decoded again for every frame the list is drawn.
+#[derive(Default)]
+pub struct CoverCache {
+    images: std::collections::HashMap<std::path::PathBuf, Option<DibImage>>,
+}
+
+impl CoverCache {
+    /// Decode `path` (blended onto `bg_rgb`) unless it was tried already.
+    pub fn load(&mut self, path: &Path, bg_rgb: (u8, u8, u8)) {
+        self.load_with(path, |p| load_png_file(p, bg_rgb).ok());
+    }
+
+    fn load_with(&mut self, path: &Path, decode: impl FnOnce(&Path) -> Option<DibImage>) {
+        if !self.images.contains_key(path) {
+            self.images.insert(path.to_path_buf(), decode(path));
+        }
+    }
+
+    /// The decoded cover of `path`, if it was loaded and decoded.
+    pub fn get(&self, path: &Path) -> Option<&DibImage> {
+        self.images.get(path).and_then(Option::as_ref)
+    }
+}
+
 pub fn load_png_file(path: &Path, bg_rgb: (u8, u8, u8)) -> Result<DibImage, String> {
     let meta = fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_PNG_FILE_BYTES {
@@ -624,5 +649,38 @@ mod tests {
         assert!(qr.at(3, 3));
         // Always-dark module at (8, size - 8)
         assert!(qr.at(8, qr.size - 8));
+    }
+
+    #[test]
+    fn cover_cache_decodes_each_file_once_and_remembers_failures() {
+        let mut cache = CoverCache::default();
+        let calls = std::cell::Cell::new(0);
+        let image = || DibImage { width: 1, height: 1, bgra_bottom_up: vec![1, 2, 3, 255] };
+        let (good, broken) = (Path::new("covers/good.png"), Path::new("covers/broken.png"));
+        for _ in 0..3 {
+            cache.load_with(good, |_| {
+                calls.set(calls.get() + 1);
+                Some(image())
+            });
+            cache.load_with(broken, |_| {
+                calls.set(calls.get() + 1);
+                None
+            });
+        }
+        // one decode per file, the failed one included
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.get(good).map(|i| i.bgra_bottom_up.clone()), Some(vec![1, 2, 3, 255]));
+        assert!(cache.get(broken).is_none());
+        assert!(cache.get(Path::new("covers/never-loaded.png")).is_none());
+    }
+
+    #[test]
+    fn cover_cache_remembers_a_missing_file_as_no_cover() {
+        let mut cache = CoverCache::default();
+        let missing = std::env::temp_dir().join(format!("txsx_no_cover_{}.png", std::process::id()));
+        cache.load(&missing, (0, 0, 0));
+        assert!(cache.get(&missing).is_none());
+        // a later decode attempt is not made: the entry exists
+        cache.load_with(&missing, |_| panic!("decoded again"));
     }
 }
