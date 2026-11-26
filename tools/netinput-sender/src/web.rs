@@ -119,6 +119,7 @@ fn is_upgrade(request: &Request) -> bool {
 
 /// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats and watches for a long Esc.
 fn session(stream: TcpStream, udp_port: u16) {
+    println!("page connected");
     let Ok(writer) = stream.try_clone() else { return };
     let writer = Arc::new(Mutex::new(writer));
     let link: Arc<Mutex<Option<Link>>> = Arc::new(Mutex::new(None));
@@ -134,6 +135,7 @@ fn session(stream: TcpStream, udp_port: u16) {
                 let mut note = None;
                 if let Some(link) = link.lock().unwrap().as_mut() {
                     if link.tick().panic {
+                        println!("PANIC: Esc held - capture stopped ({} datagrams sent)", link.sent);
                         note = Some("panic".to_string());
                     } else if ticks.is_multiple_of(20) && link.sent != reported {
                         reported = link.sent;
@@ -164,6 +166,7 @@ fn session(stream: TcpStream, udp_port: u16) {
         }
     }
     closed.store(true, Ordering::SeqCst);
+    println!("page disconnected");
     let mut link = link.lock().unwrap();
     if let Some(link) = link.as_mut() {
         link.release();
@@ -185,6 +188,7 @@ pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<Str
         *link = None;
         return Some(match Link::connect(host, udp_port) {
             Ok(new) if new.is_private() => {
+                println!("PS5 at {}, session {:08x}", new.target, new.session());
                 let reply = format!("target {} {:08x}", new.target, new.session());
                 *link = Some(new);
                 reply
@@ -201,10 +205,12 @@ pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<Str
         "on" => {
             link.capture.start();
             link.send();
+            println!("capture ON");
             return Some("on".into());
         }
         "off" => {
             link.release();
+            println!("capture OFF ({} datagrams sent)", link.sent);
             return Some("off".into());
         }
         "k" => {

@@ -24,7 +24,9 @@
   button { padding: 11px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #04121f;
     font: inherit; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
-  ul { margin: 22px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+  .steps { margin: 20px 0 0; padding-left: 22px; color: var(--text); }
+  .steps li { display: list-item; color: var(--text); margin-top: 4px; }
+  ul { margin: 18px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
   li { display: flex; gap: 12px; align-items: baseline; color: var(--muted); }
   kbd { font: 600 13px/1 ui-monospace, Consolas, monospace; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 4px 6px; white-space: nowrap; }
@@ -42,6 +44,8 @@
   .small { color: var(--muted); font-size: clamp(15px, 1.6vw, 20px); margin: 0; }
   body.capturing .big { font-size: clamp(16px, 1.6vw, 20px); font-weight: 500; color: #5d6878; }
   body.capturing .small { color: #3f4856; font-size: 14px; }
+  .echo { margin: 28px 0 0; min-height: 1.5em; font: 14px/1.5 ui-monospace, Consolas, monospace; color: #5d6878; }
+  body.capturing .echo { display: none; }
   #hold { position: fixed; left: 0; right: 0; bottom: 0; height: 6px; background: var(--bad);
     transform-origin: left; transform: scaleX(0); }
   body.holding #hold { transition: transform 1.5s linear; transform: scaleX(1); }
@@ -57,6 +61,10 @@
       <input id="ps5" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.170">
       <button id="go" type="button"></button>
     </div>
+    <ol class="steps">
+      <li id="t-step1"></li>
+      <li id="t-step2"></li>
+    </ol>
     <ul>
       <li><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>F12</kbd><span id="t-toggle"></span></li>
       <li><kbd id="t-esc-key"></kbd><span id="t-esc"></span></li>
@@ -69,17 +77,20 @@
   <div class="msg">
     <p class="big" id="big"></p>
     <p class="small" id="small"></p>
+    <p class="echo" id="echo"></p>
   </div>
   <div id="hold"></div>
 </div>
 <script>
 "use strict";
 const PANIC_MS = 1500;
-const pl = (navigator.language || "").toLowerCase().startsWith("pl");
+const pl = (navigator.languages || [navigator.language || ""]).some((l) => String(l).toLowerCase().startsWith("pl"));
 const T = pl ? {
   title: "TrinityXSX · klawiatura i mysz",
   sub: "Steruj grą na PS5 klawiaturą i myszą tego komputera.",
   addr: "Adres PS5", go: "Pełny ekran",
+  step1: "Wpisz adres PS5 i kliknij Pełny ekran.",
+  step2: "Na czarnym ekranie naciśnij Ctrl+Alt+F12: dopiero wtedy zaczyna się przechwytywanie (na laptopie może być potrzebny Fn).",
   toggle: "zaczyna i kończy przechwytywanie", escKey: "Esc ×1,5 s",
   esc: "tryb awaryjny: zatrzymuje wszystko i wychodzi z pełnego ekranu",
   ready: "Naciśnij Ctrl+Alt+F12, aby zacząć przechwytywanie",
@@ -93,12 +104,15 @@ const T = pl ? {
   needAddr: "Wpisz adres PS5 (np. 192.168.1.170).",
   connecting: "Łączenie z pomocnikiem…", helper: "Pomocnik działa.",
   helperGone: "Pomocnik txin-sender nie działa. Uruchom go ponownie i odśwież stronę.",
+  lastKey: (k) => `Ostatni odebrany klawisz: ${k}`,
   target: (a) => `Cel: ${a}`, sent: (n) => `Wysłano ${n} pakietów`, err: (e) => `Błąd: ${e}`,
   noFull: "Bez pełnego ekranu: Esc zwalnia mysz, a Alt+Tab i klawisz Windows zostają na komputerze. Przytrzymaj Esc, aby wyjść",
 } : {
   title: "TrinityXSX · keyboard & mouse",
   sub: "Play the game on your PS5 with this computer's keyboard and mouse.",
   addr: "PS5 address", go: "Full screen",
+  step1: "Enter the PS5's address and click Full screen.",
+  step2: "On the black screen press Ctrl+Alt+F12: only then does capturing start (a laptop may need Fn).",
   toggle: "starts and stops capturing", escKey: "Esc ×1.5 s",
   esc: "panic: stops everything and leaves full screen",
   ready: "Press Ctrl+Alt+F12 to start capturing",
@@ -112,6 +126,7 @@ const T = pl ? {
   needAddr: "Enter the PS5's address (e.g. 192.168.1.170).",
   connecting: "Connecting to the helper…", helper: "Helper running.",
   helperGone: "The txin-sender helper is not running. Start it again and reload this page.",
+  lastKey: (k) => `Last key received: ${k}`,
   target: (a) => `Target: ${a}`, sent: (n) => `Sent ${n} datagrams`, err: (e) => `Error: ${e}`,
   noFull: "Not full screen: Esc frees the mouse, and Alt+Tab and the Windows key stay on this computer. Hold Esc to leave",
 };
@@ -135,9 +150,30 @@ for (let i = 1; i <= 24; i++) VK["F" + i] = 0x6f + i;
 const $ = (id) => document.getElementById(id);
 const input = $("ps5"), go = $("go"), status = $("status"), notice = $("notice");
 let ws = null, state = "setup", escTimer = null, wheel = 0, connected = false, full = false;
+// Physical keys held now, by KeyboardEvent.code: the shortcut is recognised from these, not from the
+// event's ctrlKey/altKey, which Right Alt (AltGr) and some keyboards report differently.
+const held = new Set();
+const CTRL = ["ControlLeft", "ControlRight"], ALT = ["AltLeft", "AltRight"];
+
+function isToggle(e) {
+  if (e.code !== "F12" && e.key !== "F12") return false;
+  const altGr = e.getModifierState && e.getModifierState("AltGraph");
+  const ctrl = e.ctrlKey || altGr || CTRL.some((c) => held.has(c));
+  const alt = e.altKey || altGr || ALT.some((c) => held.has(c));
+  return ctrl && alt;
+}
+
+// What the browser reported, so a key the laptop sends differently (F12 without Fn, AltGr) is visible.
+function describe(e) {
+  const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Win",
+                e.getModifierState && e.getModifierState("AltGraph") && "AltGr"].filter(Boolean);
+  const key = e.key && e.key !== e.code ? ` (${e.key === " " ? "Space" : e.key})` : "";
+  return [...mods, (e.code || "?") + key].join(" + ");
+}
 
 for (const [id, key] of [["t-title", "title"], ["t-sub", "sub"], ["t-addr", "addr"], ["go", "go"],
-                         ["t-toggle", "toggle"], ["t-esc-key", "escKey"], ["t-esc", "esc"]]) $(id).textContent = T[key];
+                         ["t-toggle", "toggle"], ["t-esc-key", "escKey"], ["t-esc", "esc"],
+                         ["t-step1", "step1"], ["t-step2", "step2"]]) $(id).textContent = T[key];
 document.title = T.title;
 document.documentElement.lang = pl ? "pl" : "en";
 input.value = new URLSearchParams(location.search).get("ps5") || localStorage.getItem("txin-ps5") || "";
@@ -162,6 +198,7 @@ function connect() {
 }
 
 function show() {
+  if (state !== "ready") $("echo").textContent = "";
   document.body.classList.toggle("fullscreen", state !== "setup");
   document.body.classList.toggle("capturing", state === "capturing");
   if (state === "ready") { $("big").textContent = T.ready; $("small").textContent = full ? T.readySmall : T.noFull; }
@@ -221,10 +258,12 @@ function leave(text) {
 function panic() { leave(T.panicked); }
 
 window.addEventListener("keydown", (e) => {
+  held.add(e.code);
   if (state === "setup") return;
   e.preventDefault();
   e.stopPropagation();
-  if (e.code === "F12" && e.ctrlKey && e.altKey) {
+  if (state === "ready") $("echo").textContent = T.lastKey(describe(e));
+  if (isToggle(e)) {
     if (!e.repeat) state === "capturing" ? stopCapture() : startCapture();
     return;
   }
@@ -238,6 +277,7 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 window.addEventListener("keyup", (e) => {
+  held.delete(e.code);
   if (e.code === "Escape" && escTimer) {
     clearTimeout(escTimer);
     escTimer = null;
@@ -279,7 +319,7 @@ document.addEventListener("fullscreenchange", () => {
 document.addEventListener("pointerlockchange", () => {
   if (!document.pointerLockElement && state === "capturing") stopCapture(T.interrupted);
 });
-window.addEventListener("blur", () => { if (state === "capturing") stopCapture(T.interrupted); });
+window.addEventListener("blur", () => { held.clear(); if (state === "capturing") stopCapture(T.interrupted); });
 document.addEventListener("visibilitychange", () => { if (document.hidden && state !== "setup") leave(); });
 
 connect();
