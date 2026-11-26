@@ -56,12 +56,13 @@ Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_
 | Path | What |
 |---|---|
 | `pins.env` | Pinned upstream revisions, release tags, and verified SHA-256 checksums |
-| `patches/xcl/` | XCL patches (`0001`..`0024`): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, TrinityXSX library UI, covers, `xcl.toml` editor & presets, Web Companion QR + save backup/restore, stall watchdog, profiles & i18n, Touchpad Quick Menu telemetry & `PresentX`/`vkQueuePresentKHR` pause, PC DXBC 3D replay, Win64 Vulkan support, and MihawkGen Frame Generation toggle |
+| `library/` | TrinityXSX library source (GPL-2.0-only, compiled into `xcl.exe`): game catalog & folder browser, DualSense menu, covers & QR, `xcl.toml` editor & presets, Web Companion (PIN-limited, session cookie) with save backup/restore, GOG importer, profiles & i18n. See [library/README.md](library/README.md) |
+| `patches/xcl/` | XCL patches (`0001`..`0032`, gaps where a patch was only library code): `--in-process`, 16 KiB PE pages, FL 11_0 fallback, PS5 GameInput/WASAPI/XGameRuntime fixes, stall watchdog, Touchpad Quick Menu telemetry & `PresentX`/`vkQueuePresentKHR` pause, PC DXBC 3D replay, Win64 Vulkan support, and (last) the hook that builds `library/` into `xcl.exe` |
 | `patches/vkd3d-proton/` | vkd3d-proton patches: extended D3D12 vtables (`VKD3D_VTBL_IS`), predicated buffer copies, mesh shaders without barycentrics |
-| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0007`) |
+| `patches/prospero-win/` | Standalone `PPSA83601` runner, `wineserver.prx`, and native DualSense Touchpad Quick Menu + HUD telemetry patches (`0001`..`0010`) |
 | `standalone/` | MIT-licensed native PS5 launcher (`eboot.bin`), catalog/staging/UFS2 `.ffpkg` image builder, unit tests |
 | `configs/` | Clean example `game.example.xcl.toml`, tested Minecraft preset, and `trinityxsx-library.profile` |
-| `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`) |
+| `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`); `xcl/` builds `library/` next to it |
 | `tools/fetch-deps.sh` | Download DXVK and DXC releases (SHA-256 verified) |
 | `tools/sync_upstream.py` | Check upstream repos/releases, test patch series (`git am --3way`), auto-drop upstreamed patches, and update `pins.env` |
 | `tools/collect_ps5_logs.py` | One-command FTP log collector creating a shareable `trinityxsx-logs-*.zip` for bug reports |
@@ -91,6 +92,6 @@ For full standalone `PPSA83601.ffpkg` packaging steps, see [standalone/README.md
 ## Licences
 
 - Scripts and docs here: GPL-2.0-only ([LICENSE](LICENSE)), as XCL. The independent `standalone/` launcher (`crt0.c`, `launcher.c`, `prefix_seed.c`, `launcher.ld`), packaging tools, and documentation use the [MIT License](standalone/LICENSE).
-- `patches/xcl/`: GPL-2.0-only (XCL). `patches/vkd3d-proton/`: LGPL-2.1-or-later (vkd3d-proton). `patches/prospero-win/`: LGPL-2.1 / upstream terms.
+- `patches/xcl/` and `library/`: GPL-2.0-only (XCL). `patches/vkd3d-proton/`: LGPL-2.1-or-later (vkd3d-proton). `patches/prospero-win/`: LGPL-2.1 / upstream terms.
 - The runtime bundles DXVK (zlib) and DXC (LLVM / Microsoft licences); all licence files are included in `licenses/`.
 - No console SDK files, no game data, no keys, and nothing for getting around DRM. Nothing from TrinityX360's GPL-3.0 code is used.

@@ -1,8 +1,7 @@
-From 37ac6ff58287c599642d7fb4d5d08841cef9095a Mon Sep 17 00:00:00 2001
+From cf447633a6dc7a565cb9e83ee2fefeed386aecfe Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:39 +0100
-Subject: [PATCH] TrinityXSX: pause PresentX while Touchpad quick menu
- is open
+Subject: [PATCH] TrinityXSX: pause PresentX while Touchpad quick menu is open
 
 ---
  crates/xcl/src/hle/d3d12x/present.rs | 67 ++++++++++++++++++++++++++++

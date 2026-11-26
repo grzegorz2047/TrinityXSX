@@ -10,6 +10,7 @@ on:
     paths:
       - pins.env
       - patches/**
+      - library/**
       - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
@@ -24,6 +25,7 @@ on:
     paths:
       - pins.env
       - patches/**
+      - library/**
       - sce_sys/**
       - standalone/**
       - tools/setup-sources.sh
@@ -79,6 +81,7 @@ jobs:
         run: |
           python3 -m py_compile tools/sync_upstream.py standalone/native/build_launcher.py standalone/native/build_prefix_seed.py
           bash -n tools/build-standalone-ffpkg.sh
+          bash -n tools/setup-sources.sh
 
       - name: Verify patches/prospero-win apply cleanly to pinned prospero-win
         run: |
@@ -112,7 +115,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: out
-          key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
+          key: xcl-out-v3-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**', 'library/**') }}
 
       - name: Fetch XCL and apply patches/xcl
         if: steps.out.outputs.cache-hit != 'true'

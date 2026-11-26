@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fetch XCL and vkd3d-proton at the revisions in pins.env and apply patches/ on top (git am).
 #   tools/setup-sources.sh [--only xcl|vkd3d] [DEST]     (DEST defaults to the repo root)
-# Creates DEST/xcl and DEST/vkd3d-proton; an existing folder is left alone.
+# Creates DEST/xcl and DEST/vkd3d-proton; an existing folder is left alone. xcl.exe builds the
+# TrinityXSX library from library/ next to xcl/ (linked there when DEST is not the repo root).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=../pins.env
@@ -22,6 +23,15 @@ if [ -z "$only" ] || [ "$only" = xcl ]; then
   if fetch "$XCL_REPO" "$XCL_REV" "$dest/xcl"; then
     git -C "$dest/xcl" am -q "$root"/patches/xcl/*.patch
     git -C "$dest/xcl" log --oneline -n "$(ls "$root"/patches/xcl/*.patch | wc -l)"
+  fi
+  # The library sources stay in $root/library/; the last xcl patch reads them from the xcl
+  # checkout's parent folder (DEST/library). Outside the repo root, link DEST/library to them.
+  if [ "$(cd "$dest" && pwd -P)" != "$(cd "$root" && pwd -P)" ] && [ ! -e "$dest/library" ]; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*) # a junction: no admin rights or Developer Mode needed
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$dest/library")" "$(cygpath -w "$root/library")" >/dev/null ;;
+      *) ln -s "$root/library" "$dest/library" ;;
+    esac
   fi
 fi
 

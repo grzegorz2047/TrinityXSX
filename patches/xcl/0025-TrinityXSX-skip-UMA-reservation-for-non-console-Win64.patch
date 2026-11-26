@@ -1,8 +1,7 @@
-From 467aa288640186e47fbab843aea8efa68dd25994 Mon Sep 17 00:00:00 2001
+From fad89f777debb397deb397e99c08079263a80dcb Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:40 +0100
-Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console
- Win64
+Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console Win64
 
 ---
  crates/xcl/src/gpu/uma.rs | 4 ++++

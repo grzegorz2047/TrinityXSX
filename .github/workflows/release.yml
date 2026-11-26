@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: out
-          key: xcl-out-v2-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**') }}
+          key: xcl-out-v3-${{ hashFiles('pins.env', 'tools/setup-sources.sh', 'patches/xcl/**', 'library/**') }}
 
       - name: Fetch XCL and apply patches
         if: steps.out.outputs.cache-hit != 'true'

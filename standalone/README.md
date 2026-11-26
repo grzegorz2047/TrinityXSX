@@ -19,7 +19,7 @@ and the SHA-256 of each XCL runtime binary. Output must be a new directory.
 
 ## Game library on PS5
 
-XCL patch `0016` adds the **TrinityXSX** library screen. It scans immediate
+The **TrinityXSX** library screen ([`library/`](../library/README.md), built into `xcl.exe`). It scans immediate
 children of `C:\XCL\games` at launch. The corresponding FTP directory for the
 current test installation is `/data/prospero-win/prefix/drive_c/XCL/games/`.
 Each game folder needs a `MicrosoftGame.config` and the Scarlett executable
@@ -32,7 +32,7 @@ settings, which also lets the existing tested install use its current save
 location. The library uses the existing `xcl.toml` when one is present.
 
 For a PC catalog check, run `xcl.exe library <games-folder> --list`. For a PS5
-test with the existing prospero-win installation, build XCL with patch `0016`
+test with the existing prospero-win installation, build XCL (`tools/setup-sources.sh`)
 and run `python -m standalone.deploy_library <PS5-host> <built-xcl.exe>`. The
 installer publishes a separate **TrinityXSX** profile after verifying both files
 and keeps a backup of the profile index. The existing Minecraft profile remains

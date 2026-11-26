@@ -1,15 +1,16 @@
-From db8a87f6d880a68461e6fb617a0b91f1c3a18a4c Mon Sep 17 00:00:00 2001
+From 555c14535634cda8ed8e355374242a289beef649 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 08:39:40 +0100
-Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad
- quick
+Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad quick
 
+
+The library part of this change (crates/xcl/src/library*.rs) now lives
+in TrinityXSX's library/ folder; see the last TrinityXSX patch.
 ---
  crates/xcl/src/hle/d3d12x/present.rs | 119 +++++++++++++++++++++++++++
  crates/xcl/src/host.rs               |  17 +++-
- crates/xcl/src/library.rs            |   4 +-
  crates/xcl/src/resolver.rs           |   9 ++
- 4 files changed, 146 insertions(+), 3 deletions(-)
+ 3 files changed, 144 insertions(+), 1 deletion(-)
 
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
 index c682d93..39409fb 100644
@@ -176,21 +177,6 @@ index b213e61..4684d31 100644
          let _ = std::thread::Builder::new().name("xcl-stall-watch".into()).spawn(|| {
              const INITIAL_STALL_SECS: u64 = 30;
              const RUNTIME_STALL_SECS: u64 = 15;
-diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
-index 637ce16..08255e1 100644
---- a/crates/xcl/src/library.rs
-+++ b/crates/xcl/src/library.rs
-@@ -835,8 +835,8 @@ pub fn prepare(game: &Game) -> Result<(), String> {
- 
- pub fn prepare_with_profile(game: &Game, profile: &Profile) -> Result<(), String> {
-     let (_, _, title) = launcher::resolve_target(&game.executable)?;
--    if !crate::inspect::console_imports(&game.executable).is_some_and(|imports| !imports.is_empty()) {
--        return Err("the selected executable is not an Xbox Series PE program".into());
-+    if crate::inspect::console_imports(&game.executable).is_none() {
-+        return Err("the selected executable is not a valid 64-bit Windows PE program".into());
-     }
-     let dir = launcher::data_root().join(title);
-     let cfg_path = dir.join("xcl.toml");
 diff --git a/crates/xcl/src/resolver.rs b/crates/xcl/src/resolver.rs
 index 7882042..4819cd5 100644
 --- a/crates/xcl/src/resolver.rs
