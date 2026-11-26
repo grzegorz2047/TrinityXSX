@@ -357,6 +357,11 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
+          name: innoextract
+          path: innoextract
+
+      - uses: actions/download-artifact@v8
+        with:
           name: vkd3d-proton
 
       - name: Assemble XCL runtime & build PPSA83601.ffpkg

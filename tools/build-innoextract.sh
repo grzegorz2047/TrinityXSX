@@ -25,9 +25,16 @@ shutil.copy2(api_src, src / "src" / "cli" / "trinity_inno_api.cpp")
 
 console_cpp = src / "src" / "util" / "console.cpp"
 txt = console_cpp.read_text(encoding="utf-8")
-hook_decl = 'extern "C" void trinity_inno_notify_progress(boost::uint64_t done_bytes, boost::uint64_t total_bytes);\n'
+inc_anchor = '#include "util/console.hpp"\n'
+assert inc_anchor in txt, "console.hpp include not found in console.cpp"
+hook_decl = (
+    '#include "util/console.hpp"\n'
+    '#include <cstdint>\n'
+    'extern "C" void trinity_inno_notify_progress(uint64_t done_bytes, uint64_t total_bytes);\n'
+)
 if "trinity_inno_notify_progress" not in txt:
-    txt = hook_decl + txt
+    txt = txt.replace(inc_anchor, hook_decl, 1)
+txt = txt.replace("isatty(", "util::isatty(")
 needle = "\tvalue += delta;\n"
 assert needle in txt, "progress::update value += delta not found"
 replacement = (
@@ -37,6 +44,29 @@ replacement = (
 )
 txt = txt.replace(needle, replacement, 1)
 console_cpp.write_text(txt, encoding="utf-8")
+
+# Avoid GCC 16 / UCRT64 <io.h> conflict with `using util::isatty;`
+win_hpp = src / "src" / "util" / "windows.hpp"
+wh = win_hpp.read_text(encoding="utf-8")
+assert "using util::isatty;" in wh, "using util::isatty; not found in windows.hpp"
+wh = wh.replace("using util::isatty;", "// using util::isatty; // conflicts with UCRT64 <io.h>")
+win_hpp.write_text(wh, encoding="utf-8")
+
+# Replace CLI main() wrapper in windows.cpp with DLL-safe UTF-8 Boost.Filesystem locale initializer
+win_cpp = src / "src" / "util" / "windows.cpp"
+wc = win_cpp.read_text(encoding="utf-8")
+main_anchor = "// We really want main here, not utf8_main."
+assert main_anchor in wc, "main() wrapper not found in windows.cpp"
+wc = wc[:wc.index(main_anchor)] + (
+    'extern "C" void trinity_inno_init_utf8_locale() {\n'
+    '\tstatic bool inited = false;\n'
+    '\tif (!inited) {\n'
+    '\t\tinited = true;\n'
+    '\t\tboost::filesystem::path::imbue(std::locale(std::locale(), new utf8_codecvt()));\n'
+    '\t}\n'
+    '}\n'
+)
+win_cpp.write_text(wc, encoding="utf-8")
 
 cmake = src / "CMakeLists.txt"
 ct = cmake.read_text(encoding="utf-8")

@@ -3,7 +3,9 @@
 // Allows extracting DRM-free GOG offline Inno Setup installers (including multi-part .bin slices)
 // inside xcl-library.exe without fork/exec (required under PS5 WINELOADERNOEXEC=1).
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <atomic>
@@ -26,6 +28,8 @@ typedef void (__cdecl *TrinityInnoProgressFn)(uint64_t done_bytes, uint64_t tota
 
 static std::atomic<TrinityInnoProgressFn> g_progress_fn{nullptr};
 static std::atomic<void *> g_progress_ctx{nullptr};
+
+extern "C" void trinity_inno_init_utf8_locale();
 
 // Called from our tiny hook in src/util/console.cpp (progress::update)
 extern "C" void trinity_inno_notify_progress(uint64_t done_bytes, uint64_t total_bytes) {
@@ -68,6 +72,7 @@ extern "C" __declspec(dllexport) int __cdecl trinity_inno_extract_utf8(
 
     int rc = 0;
     try {
+        trinity_inno_init_utf8_locale();
         std::wstring in_w = utf8_to_wide(setup_exe_utf8);
         std::wstring out_w = utf8_to_wide(output_dir_utf8);
         fs::path installer(in_w);
