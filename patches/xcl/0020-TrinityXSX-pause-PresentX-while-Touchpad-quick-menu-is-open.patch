@@ -1,25 +1,19 @@
-From 7787e3e4ef573c6713102c08136dd43ffe57d130 Mon Sep 17 00:00:00 2001
+From 37ac6ff58287c599642d7fb4d5d08841cef9095a Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Wed, 25 Nov 2026 17:00:18 +0100
-Subject: [PATCH] TrinityXSX: pause PresentX while Touchpad quick menu is open
+Date: Thu, 26 Nov 2026 08:39:39 +0100
+Subject: [PATCH] TrinityXSX: pause PresentX while Touchpad quick menu
+ is open
 
-Query prospero-win process information class PW_TITLE_MENU_PROCESS_INFO
-(0x50574D01) via NtQueryInformationProcess. While the native PS5 Touchpad
-quick menu is open, pause PresentX in 16ms slices so libvulkan.prx goes
-idle and pw_runner.bin can present the menu overlay over active 60 FPS
-Vulkan games, and pause the xcl-stall-watch timer so menu pauses do not
-trigger false stall logs. Unsupported status on regular Windows is cached
-once with zero runtime overhead.
 ---
  crates/xcl/src/hle/d3d12x/present.rs | 67 ++++++++++++++++++++++++++++
  crates/xcl/src/host.rs               |  4 ++
  2 files changed, 71 insertions(+)
 
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
-index 01b3c92..c512d7a 100644
+index d47e678..c682d93 100644
 --- a/crates/xcl/src/hle/d3d12x/present.rs
 +++ b/crates/xcl/src/hle/d3d12x/present.rs
-@@ -46,12 +46,79 @@ static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+@@ -49,12 +49,79 @@ static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
  static PRESENTX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
  static PRESENTX_LOCK: Mutex<()> = Mutex::new(());
  
@@ -100,10 +94,10 @@ index 01b3c92..c512d7a 100644
      let _present = PRESENTX_LOCK.lock().unwrap();
      present_x_frame(queue, plane_count, planes);
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 5d978bd..431b24d 100644
+index 40ed711..80920ae 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -123,6 +123,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -128,6 +128,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
              let mut reported_stall = false;
              loop {
                  std::thread::sleep(std::time::Duration::from_secs(3));

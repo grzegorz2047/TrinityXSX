@@ -1,37 +1,9 @@
-From df1a74d682210075d997b43c657ba2c48ae126e2 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 02:51:53 +0100
-Subject: [PATCH 03/12] PE loader: sections sharing a host page get the union
- of their access
+From 84b489c124bd8baaf7db476abee852df22545a8d Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:32 +0100
+Subject: [PATCH 03/12] PE loader: sections sharing a host page
+ get the union
 
-Under Wine on the PS5 (prospero-win) the host has 16 KiB pages. The
-loader protected each section with VirtualProtect at 4 KiB granularity,
-one section after the other, and a host page holds only one protection:
-the last call on it wins. In the test title, .rdata's last 8 KiB and
-.data share the host page at +0x7C000, so .data became read-only and the
-title's first write to its stdout state at +0x7E068 faulted (Wine
-reported the 16 KiB-aligned host page, 0x10015fc000, as the address).
-
-protection_runs() now computes the protections as runs of pages: pages
-in one host page get the union of the access of the sections in it, so
-code there stays executable and data writable. Under Wine the host page
-is taken as 16 KiB (its size cannot be asked there; on a 4 KiB host it
-only widens a section's neighbour within the same 16 KiB); on Windows it
-is 4 KiB and every section keeps exactly its own protection, as before.
-
-Tests: the test title's real section layout with 4 KiB host pages
-(each section's own protection) and 16 KiB host pages (.data writable,
-.text executable), and pages of no section left alone. The PS5 failure
-itself was found from the PS5 logs (Wine +virtual views, the faulting
-instruction at xcl_testtitle.exe+0x4a385); it cannot run in CI.
-
-Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
-cargo test --workspace --no-fail-fast -- --test-threads=4: 978 passed,
-1 failed, 45 ignored, 23 SKIPPED; the failure is
-execute_indirect_reads_the_arguments_written_before_it, as on main on
-this GPU.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  crates/xcl/src/loader.rs | 136 +++++++++++++++++++++++++++++++++++++--
  1 file changed, 130 insertions(+), 6 deletions(-)

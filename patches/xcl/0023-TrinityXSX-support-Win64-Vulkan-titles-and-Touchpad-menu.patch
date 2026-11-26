@@ -1,13 +1,9 @@
-From 24d1630250c2969fbb6b38230e6c1a2f4debaefd Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 22:22:20 +0100
-Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad quick
- menu hook
+From db8a87f6d880a68461e6fb617a0b91f1c3a18a4c Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:40 +0100
+Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad
+ quick
 
-- Allow valid x64 Win64 PE titles without console DLL imports in library prepare
-- Skip unused D3D12.X backend and PresentX stall-watch for non-console PE titles
-- Hook vulkan-1.dll/winevulkan.dll vkQueuePresentKHR to pause while PS5 Touchpad
-  quick menu is open and publish live Vulkan FPS telemetry to hud_stats.txt
 ---
  crates/xcl/src/hle/d3d12x/present.rs | 119 +++++++++++++++++++++++++++
  crates/xcl/src/host.rs               |  17 +++-
@@ -16,10 +12,10 @@ Subject: [PATCH] TrinityXSX: support Win64 Vulkan titles and Touchpad quick
  4 files changed, 146 insertions(+), 3 deletions(-)
 
 diff --git a/crates/xcl/src/hle/d3d12x/present.rs b/crates/xcl/src/hle/d3d12x/present.rs
-index c512d7a..cb4e29d 100644
+index c682d93..39409fb 100644
 --- a/crates/xcl/src/hle/d3d12x/present.rs
 +++ b/crates/xcl/src/hle/d3d12x/present.rs
-@@ -112,6 +112,125 @@ fn wait_while_title_menu_open() {
+@@ -115,6 +115,125 @@ fn wait_while_title_menu_open() {
      }
  }
  
@@ -146,10 +142,10 @@ index c512d7a..cb4e29d 100644
  /// the frame; S_OK always (a console present does not fail for the title).
  pub unsafe extern "system" fn present_x(queue: *mut c_void, plane_count: u32, planes: *const u8, _params: *const u8) -> i32 {
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 0245284..1afe11a 100644
+index b213e61..4684d31 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -46,6 +46,21 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -47,6 +47,21 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_ACTIVITY").is_none() && boot.config.activity {
          std::env::set_var("XCL_ACTIVITY", "1");
      }
@@ -171,7 +167,7 @@ index 0245284..1afe11a 100644
      crate::debug_tools::init(&boot.config);
      crate::hle::netoff::install_getnameinfo_guard();
      crate::state::set_boot(boot.clone());
-@@ -114,7 +129,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -119,7 +134,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
      // Automatic 0-FPS loading / rendering stall watchdog (disable with XCL_NO_STALL_WATCH=1).
      // Captures GPU/DirectStorage/VRAM counters + thread dump once per stall so black-screen
      // bug reports always contain actionable diagnostics.

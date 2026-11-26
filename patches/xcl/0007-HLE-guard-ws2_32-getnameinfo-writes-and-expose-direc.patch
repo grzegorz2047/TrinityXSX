@@ -1,10 +1,9 @@
-From c0c9a4891ff5ae2073d1e8ff02dd2f740c87bffd Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 06:58:52 +0100
-Subject: [PATCH 07/12] HLE: guard ws2_32!getnameinfo writes and expose
- direct_dxil / network in xcl.toml
+From 96be5bf8e4b47708f84d9138dad477a98acc9147 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:34 +0100
+Subject: [PATCH 07/12] HLE: guard ws2_32!getnameinfo writes and
+ expose
 
-RakNet (Minecraft Preview) passes hostlen=65 for a 64-byte stack buffer right before the stack cookie; Wine's getnameinfo zeroes up to hostlen, corrupting the cookie's low byte (0xC0000409). Copy only strlen+1 bytes back on success. Also allow setting direct_dxil and network=false via xcl.toml for runtimes like prospero-win that restrict custom env prefixes.
 ---
  crates/xcl/src/config.rs     |  7 +++++
  crates/xcl/src/hle/netoff.rs | 50 ++++++++++++++++++++++++++++++++++++
@@ -12,7 +11,7 @@ RakNet (Minecraft Preview) passes hostlen=65 for a 64-byte stack buffer right be
  3 files changed, 64 insertions(+)
 
 diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
-index 3fbeff2..b561814 100644
+index 22a7b89..5a65805 100644
 --- a/crates/xcl/src/config.rs
 +++ b/crates/xcl/src/config.rs
 @@ -72,6 +72,11 @@ pub struct Config {
@@ -37,11 +36,11 @@ index 3fbeff2..b561814 100644
      }
  }
 diff --git a/crates/xcl/src/hle/netoff.rs b/crates/xcl/src/hle/netoff.rs
-index 8071b04..012792d 100644
+index ca05e37..877ca7b 100644
 --- a/crates/xcl/src/hle/netoff.rs
 +++ b/crates/xcl/src/hle/netoff.rs
-@@ -118,6 +118,56 @@ static O_GETADDRINFO: AtomicUsize = AtomicUsize::new(0);
- static O_GETADDRINFO_W: AtomicUsize = AtomicUsize::new(0);
+@@ -122,6 +122,56 @@ static O_GETADDRINFO_W: AtomicUsize = AtomicUsize::new(0);
+ static O_GETADDRINFO_EX: AtomicUsize = AtomicUsize::new(0);
  /// trampolines of hooks whose original is never called
  static O_UNUSED: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 +static O_GETNAMEINFO: AtomicUsize = AtomicUsize::new(0);
@@ -98,10 +97,10 @@ index 8071b04..012792d 100644
  unsafe fn orig_connect(s: usize, name: *const u8, len: i32) -> i32 {
      match O_CONNECT.load(Ordering::Acquire) {
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index f3e57ce..c2ef706 100644
+index 444333d..523eccc 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -34,6 +34,13 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -35,6 +35,13 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_UMA_MB").is_none() && boot.config.uma_mb != 0 {
          std::env::set_var("XCL_UMA_MB", boot.config.uma_mb.to_string());
      }
@@ -113,8 +112,8 @@ index f3e57ce..c2ef706 100644
 +    }
 +    crate::hle::netoff::install_getnameinfo_guard();
      crate::state::set_boot(boot.clone());
-     // `XCL_ACTIVITY=1`: every 2 s what the title did since (a timeline of where it stops)
-     if std::env::var_os("XCL_ACTIVITY").is_some() {
+     let _ = std::thread::Builder::new().name("xcl-split-counts".into()).spawn(|| loop {
+         std::thread::sleep(std::time::Duration::from_secs(10));
 -- 
 2.48.1.windows.1
 

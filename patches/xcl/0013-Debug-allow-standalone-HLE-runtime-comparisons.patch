@@ -1,15 +1,17 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Wed, 25 Nov 2026 09:31:00 +0100
-Subject: [PATCH] Debug: allow standalone HLE runtime comparisons on Windows
+From f3880996c02924641f304006f2da2cc17449d881 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:36 +0100
+Subject: [PATCH] Debug: allow standalone HLE runtime comparisons on
+ Windows
 
-The PS5 has no system Gaming Services runtime. Let Windows comparisons use
-the same built-in task queues and async implementation without changing
-the installed system DLL. Add bounded opt-in async lifecycle logging.
-Default runtime selection and logging remain unchanged.
+---
+ README.md                                 |  6 ++++
+ crates/xcl/src/hle/xgameruntime/api.rs    |  4 +++
+ crates/xcl/src/hle/xgameruntime/xasync.rs | 36 +++++++++++++++++++++--
+ 3 files changed, 44 insertions(+), 2 deletions(-)
 
 diff --git a/README.md b/README.md
-index 449f11f..4e42c48 100644
+index 321cc03..e82d525 100644
 --- a/README.md
 +++ b/README.md
 @@ -196,6 +196,12 @@ KB5029331+), inbox `D3D12Core.dll` stops at SM 6.5; place the Microsoft D3D12 Ag
@@ -129,3 +131,6 @@ index d358dc5..4ac78af 100644
      match lookup(b) {
          Lookup::Invalid => E_INVALIDARG,
          Lookup::Finished(h) => {
+-- 
+2.48.1.windows.1
+

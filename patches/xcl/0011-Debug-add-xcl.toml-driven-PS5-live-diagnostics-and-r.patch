@@ -1,8 +1,8 @@
-From 796f3e816fde16ea6decf40c005090190d92d270 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 08:36:16 +0100
-Subject: [PATCH 11/12] Debug: add xcl.toml-driven PS5 live diagnostics and
- retour software call probes
+From 12b0d3d932d12df0fd8af9933e458390e016fc6a Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:35 +0100
+Subject: [PATCH 11/12] Debug: add xcl.toml-driven PS5 live
+ diagnostics and
 
 ---
  crates/xcl/src/config.rs                     |  18 ++
@@ -20,7 +20,7 @@ Subject: [PATCH 11/12] Debug: add xcl.toml-driven PS5 live diagnostics and
  create mode 100644 crates/xcl/src/debug_tools.rs
 
 diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
-index e00fdea..d366b12 100644
+index a4666bb..7bdaa21 100644
 --- a/crates/xcl/src/config.rs
 +++ b/crates/xcl/src/config.rs
 @@ -81,6 +81,18 @@ pub struct Config {
@@ -279,10 +279,10 @@ index b4506dd..7524662 100644
          return S_OK;
      }
 diff --git a/crates/xcl/src/hle/netoff.rs b/crates/xcl/src/hle/netoff.rs
-index 012792d..f3086c2 100644
+index 877ca7b..b3e0813 100644
 --- a/crates/xcl/src/hle/netoff.rs
 +++ b/crates/xcl/src/hle/netoff.rs
-@@ -83,6 +83,15 @@ pub fn ordinals() -> Vec<(u16, &'static str)> {
+@@ -86,6 +86,15 @@ pub fn ordinals() -> Vec<(u16, &'static str)> {
  }
  
  fn note(what: &str) {
@@ -416,10 +416,10 @@ index e5565ad..4811b39 100644
  // shared worker pool + timer
  // ---------------------------------------------------------------------------------------
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index d34dcfe..9dde1cd 100644
+index a4b07fa..bba4dc5 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -43,6 +43,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -44,6 +44,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_NETWORK").is_none() && !boot.config.network {
          std::env::set_var("XCL_NETWORK", "0");
      }
@@ -429,8 +429,8 @@ index d34dcfe..9dde1cd 100644
 +    crate::debug_tools::init(&boot.config);
      crate::hle::netoff::install_getnameinfo_guard();
      crate::state::set_boot(boot.clone());
-     // `XCL_ACTIVITY=1`: every 2 s what the title did since (a timeline of where it stops)
-@@ -155,6 +159,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     let _ = std::thread::Builder::new().name("xcl-split-counts".into()).spawn(|| loop {
+@@ -160,6 +164,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
          }
      };
      unsafe { crate::hle::kernelx::adopt_title_hooks(&main) };
@@ -439,19 +439,19 @@ index d34dcfe..9dde1cd 100644
      let code = crate::loader::run_main(&main);
      crate::xlog_info!("game entry point returned code {code}");
 diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
-index 4229043..f6e5a61 100644
+index b6bc0d2..51118ee 100644
 --- a/crates/xcl/src/lib.rs
 +++ b/crates/xcl/src/lib.rs
-@@ -9,6 +9,7 @@
- pub mod log;
+@@ -10,6 +10,7 @@ pub mod log;
  pub mod manifest;
+ pub(crate) mod cli;
  pub mod config;
 +pub mod debug_tools;
  pub mod disasm;
  pub mod eh;
  pub mod gpu;
 diff --git a/crates/xcl/src/log.rs b/crates/xcl/src/log.rs
-index 76b51b7..cd7a3b5 100644
+index 7f5d1f1..81f9eb5 100644
 --- a/crates/xcl/src/log.rs
 +++ b/crates/xcl/src/log.rs
 @@ -79,7 +79,7 @@ pub fn write(level: Level, args: std::fmt::Arguments<'_>) {

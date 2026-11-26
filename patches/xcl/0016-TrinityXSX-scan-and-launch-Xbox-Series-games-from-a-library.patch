@@ -1,77 +1,42 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Wed, 25 Nov 2026 10:40:00 +0100
-Subject: [PATCH] TrinityXSX: scan and launch Xbox Series games from a library
+From dd72a76f4d9260d1dd4ca1abf3bcc8135318f937 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:37 +0100
+Subject: [PATCH] TrinityXSX: scan and launch Xbox Series games from a
+ library
 
-Scan game folders at startup and on refresh. Show Scarlett titles in a
-controller-friendly window, select an entry, and run its manifest's executable
-in the current Wine process. Preserve existing configs and seed offline PS5
-settings on first launch. Provide a read-only command to inspect the catalog.
+---
+ README.md                      |   6 +
+ crates/xcl/Cargo.toml          |   1 +
+ crates/xcl/src/lib.rs          |   1 +
+ crates/xcl/src/library.rs      | 198 +++++++++++++++++++++++++
+ crates/xcl/src/library_menu.rs | 254 +++++++++++++++++++++++++++++++++
+ crates/xcl/src/main.rs         |   7 +
+ 6 files changed, 467 insertions(+)
+ create mode 100644 crates/xcl/src/library.rs
+ create mode 100644 crates/xcl/src/library_menu.rs
 
-diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
-index f6e5a61..c887a5d 100644
---- a/crates/xcl/src/lib.rs
-+++ b/crates/xcl/src/lib.rs
-@@ -19,6 +19,7 @@ pub mod host;
- pub mod insn;
- pub mod inspect;
- pub mod launcher;
-+pub mod library;
- pub mod loader;
- pub mod modules;
- pub mod pe;
-diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
-index 5ee51fe..0bd467b 100644
---- a/crates/xcl/src/main.rs
-+++ b/crates/xcl/src/main.rs
-@@ -4,6 +4,8 @@ use std::ffi::c_void;
- use std::path::PathBuf;
- use std::sync::atomic::Ordering;
- 
-+mod library_menu;
-+
- /// Our own TLS callback: ntdll calls it for every thread start/exit in the process.
- /// In host mode it initialises the game's static TLS for the new thread and forwards
- /// the notification to the game's TLS callbacks / DllMains.
-@@ -27,6 +29,8 @@ Usage:
-   xcl run --in-process <game folder | file.exe> [-- game arguments]
-       The same, with the game in this process instead of a child (for runtimes with one
-       process per program, such as Wine on the PS5).
-+  xcl library <games folder> [--list]
-+      TrinityXSX library for unpacked Scarlett game folders. --list prints the catalog.
-   xcl inspect <file.exe|file.dll> [--json]
-       Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
-   xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
-@@ -62,6 +66,9 @@ fn main() {
- 
-     let args: Vec<String> = std::env::args().skip(1).collect();
-     let code = match args.first().map(String::as_str) {
-+        Some("library") if args.len() == 2 || (args.len() == 3 && args[2] == "--list") => {
-+            library_menu::run(PathBuf::from(&args[1]), args.len() == 3)
-+        }
-         Some("run") if args.len() >= 2 && !(args[1] == "--in-process" && args.len() < 3) => {
-             let in_process = args[1] == "--in-process";
-             let target = if in_process { 2 } else { 1 };
 diff --git a/README.md b/README.md
+index 2a1c5f9..65b9440 100644
 --- a/README.md
 +++ b/README.md
-@@ -208,6 +208,12 @@
- Console WASAPI requests rejected with `E_INVALIDARG` are retried without the extra
+@@ -209,6 +209,12 @@ Console WASAPI requests rejected with `E_INVALIDARG` are retried without the ext
  `0x01000000` stream flag used by FMOD's GameCore output. Accepted requests, other flags,
  and device/format errors retain the system audio client's behavior.
-+
+ 
 +`xcl library <games folder>` opens the TrinityXSX catalog for unpacked Scarlett
 +games. It scans on open and refresh, selects the executable from `MicrosoftGame.config`,
 +creates an initial offline PS5 configuration on first launch and runs the game in
 +the same process. The folder and existing title configurations can be reused by
 +`xcl run`. `--list` prints the detected games without opening the menu.
- 
++
  - **DXC:** 1.8 or newer is recommended, from the
    [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+   and point `XCL_DXC_DIR` at its `bin\x64`. A Windows SDK may hold an older one (the same `10.0.26100.0`
 diff --git a/crates/xcl/Cargo.toml b/crates/xcl/Cargo.toml
+index ec535ae..0a67ff1 100644
 --- a/crates/xcl/Cargo.toml
 +++ b/crates/xcl/Cargo.toml
-@@ -46,6 +46,7 @@
+@@ -46,6 +46,7 @@ features = [
  version = "0.61"
  features = [
      "Win32_Foundation",
@@ -79,8 +44,21 @@ diff --git a/crates/xcl/Cargo.toml b/crates/xcl/Cargo.toml
      "Win32_Security",
      "Win32_Storage_FileSystem",
      "Win32_System_Diagnostics_Debug",
+diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
+index 51118ee..4545d67 100644
+--- a/crates/xcl/src/lib.rs
++++ b/crates/xcl/src/lib.rs
+@@ -20,6 +20,7 @@ pub mod host;
+ pub mod insn;
+ pub mod inspect;
+ pub mod launcher;
++pub mod library;
+ pub mod loader;
+ pub mod modules;
+ pub mod pe;
 diff --git a/crates/xcl/src/library.rs b/crates/xcl/src/library.rs
 new file mode 100644
+index 0000000..ad7282a
 --- /dev/null
 +++ b/crates/xcl/src/library.rs
 @@ -0,0 +1,198 @@
@@ -284,6 +262,7 @@ new file mode 100644
 +}
 diff --git a/crates/xcl/src/library_menu.rs b/crates/xcl/src/library_menu.rs
 new file mode 100644
+index 0000000..6f1da18
 --- /dev/null
 +++ b/crates/xcl/src/library_menu.rs
 @@ -0,0 +1,254 @@
@@ -541,3 +520,38 @@ new file mode 100644
 +        Err(_) => { eprintln!("TrinityXSX: library thread ended unexpectedly"); 2 }
 +    }
 +}
+diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
+index b127420..1445bfc 100644
+--- a/crates/xcl/src/main.rs
++++ b/crates/xcl/src/main.rs
+@@ -4,6 +4,8 @@ use std::ffi::c_void;
+ use std::path::PathBuf;
+ use std::sync::atomic::Ordering;
+ 
++mod library_menu;
++
+ /// Our own TLS callback: ntdll calls it for every thread start/exit in the process.
+ /// In host mode it initialises the game's static TLS for the new thread and forwards
+ /// the notification to the game's TLS callbacks / DllMains.
+@@ -27,6 +29,8 @@ Usage:
+   xcl run --in-process <game folder | file.exe> [-- game arguments]
+       The same, with the game in this process instead of a child (for runtimes with one
+       process per program, such as Wine on the PS5).
++  xcl library <games folder> [--list]
++      TrinityXSX library for unpacked Scarlett game folders. --list prints the catalog.
+   xcl inspect <file.exe|file.dll> [--json]
+       Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
+   xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
+@@ -65,6 +69,9 @@ fn main() {
+ 
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     let code = match args.first().map(String::as_str) {
++        Some("library") if args.len() == 2 || (args.len() == 3 && args[2] == "--list") => {
++            library_menu::run(PathBuf::from(&args[1]), args.len() == 3)
++        }
+         Some("run") if args.len() >= 2 && !(args[1] == "--in-process" && args.len() < 3) => {
+             let in_process = args[1] == "--in-process";
+             let target = if in_process { 2 } else { 1 };
+-- 
+2.48.1.windows.1
+

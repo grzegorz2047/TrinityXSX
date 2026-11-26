@@ -1,32 +1,9 @@
-From 86c6ce49c334853d9facfaf991ea5f89feba7286 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 02:22:44 +0100
-Subject: [PATCH 01/12] xcl run: --in-process runs the host in the launcher's
- process
+From be2530c5e64dcb34a0110bcd3daf31d03c3ff4e4 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:31 +0100
+Subject: [PATCH 01/12] xcl run: --in-process runs the host in
+ the launcher's
 
-Wine on the PS5 (prospero-win) runs one process per program: the child
-host process `xcl run` starts with CreateProcessW would not run there,
-and its profiles cannot set XCL_HOST either (only DXVK_/VKD3D_/... names).
-
-`xcl run --in-process <game> [-- args]` writes boot.json as before, then
-sets the game folder as the current directory and calls host_main() in
-this process. The title gets the command line the child would have had:
-kernelx answers GetCommandLineW / GetCommandLineA (kernel32 imports are
-routed there) with it, and the UCRT's cached _wcmdln / _acmdln, which a
-dynamic-CRT title builds argv from, point at it. Without the flag
-nothing changes: GetCommandLineW / A pass through to Windows.
-
-Test: e2e test_title_runs_in_the_launchers_process runs the test title
-with --in-process; its argv check fails without the command line
-(argv[0] = ...\xcl.exe), measured by disabling set_command_line().
-
-Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
-cargo test --workspace --no-fail-fast -- --test-threads=4: 976 passed,
-1 failed, 45 ignored, 23 SKIPPED (no wave64 etc.). The failure is
-execute_indirect_reads_the_arguments_written_before_it, which fails the
-same way on main on this GPU. cargo test -p xcl --test e2e: 4 passed.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  crates/xcl/src/hle/kernelx.rs | 48 +++++++++++++++++++++++++++++++++++
  crates/xcl/src/launcher.rs    | 19 +++++++++++++-
@@ -35,7 +12,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 112 insertions(+), 4 deletions(-)
 
 diff --git a/crates/xcl/src/hle/kernelx.rs b/crates/xcl/src/hle/kernelx.rs
-index afa86c3..a0b5ed2 100644
+index 4144a11..07ada10 100644
 --- a/crates/xcl/src/hle/kernelx.rs
 +++ b/crates/xcl/src/hle/kernelx.rs
 @@ -96,6 +96,9 @@ pub fn exports() -> Vec<(&'static str, usize)> {
@@ -48,7 +25,7 @@ index afa86c3..a0b5ed2 100644
          FreeLibrary,
          FreeLibraryWhenCallbackReturns,
          DisableThreadLibraryCalls,
-@@ -2001,6 +2004,51 @@ pub unsafe extern "system" fn GetModuleFileNameA(h: usize, buf: *mut u8, size: u
+@@ -2056,6 +2059,51 @@ pub unsafe extern "system" fn GetModuleFileNameA(h: usize, buf: *mut u8, size: u
      }
  }
  
@@ -145,7 +122,7 @@ index 00a9cb1..0fc6b50 100644
      use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
      use windows_sys::Win32::System::Threading::{
 diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
-index 6291b5d..5ee51fe 100644
+index 4c45685..b127420 100644
 --- a/crates/xcl/src/main.rs
 +++ b/crates/xcl/src/main.rs
 @@ -24,6 +24,9 @@ Usage:
@@ -158,7 +135,7 @@ index 6291b5d..5ee51fe 100644
    xcl inspect <file.exe|file.dll> [--json]
        Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
    xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
-@@ -59,12 +62,14 @@ fn main() {
+@@ -62,12 +65,14 @@ fn main() {
  
      let args: Vec<String> = std::env::args().skip(1).collect();
      let code = match args.first().map(String::as_str) {
@@ -177,10 +154,10 @@ index 6291b5d..5ee51fe 100644
          Some("inspect") if args.len() >= 2 => {
              let json = args.iter().any(|a| a == "--json");
 diff --git a/crates/xcl/tests/e2e.rs b/crates/xcl/tests/e2e.rs
-index 3c54144..e2b1f0e 100644
+index 027638e..3df060a 100644
 --- a/crates/xcl/tests/e2e.rs
 +++ b/crates/xcl/tests/e2e.rs
-@@ -84,6 +84,44 @@ fn launcher_uses_configured_exe_in_an_ambiguous_folder() {
+@@ -109,6 +109,44 @@ fn launcher_uses_configured_exe_in_an_ambiguous_folder() {
      assert_eq!(exe.file_name().unwrap(), "game.exe");
  }
  

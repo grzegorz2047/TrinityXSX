@@ -1,8 +1,8 @@
-From 8b56458c16087e5b9830a6d0e10409bb39ff1546 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 08:22:17 +0100
-Subject: [PATCH 10/12] GameInput/XUser: serialize device association after
- async GameInput device arrival
+From 46fddcc1d0777c1d4477023286a5f95e974259a8 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:35 +0100
+Subject: [PATCH 10/12] GameInput/XUser: serialize device
+ association after
 
 ---
  crates/xcl/src/hle/gameinput.rs        | 18 +++++++++

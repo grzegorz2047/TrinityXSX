@@ -1,29 +1,28 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Wed, 25 Nov 2026 09:43:00 +0100
-Subject: [PATCH] XGameRuntime: notify monitors on shared task queue ports
+From ad146d9648560f4d7d1ea4c06670c70761003cc2 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:36 +0100
+Subject: [PATCH] XGameRuntime: notify monitors on shared task queue
+ ports
 
-Manual dispatchers can sleep waiting for monitor notifications. Submitting
-through a composite queue must notify the other queues sharing its port,
-with each queue's own port index. Keep weak queue attachments on ports and
-invoke monitors outside the registry lock.
-
-The regression test fails on the previous implementation and checks both
-submission directions, remapped ports, dispatch, and unregistration.
+---
+ README.md                                    |  3 +
+ crates/xcl/src/hle/xgameruntime/taskqueue.rs | 91 ++++++++++++++++++--
+ 2 files changed, 86 insertions(+), 8 deletions(-)
 
 diff --git a/README.md b/README.md
+index e82d525..8d1a755 100644
 --- a/README.md
 +++ b/README.md
-@@ -201,6 +201,9 @@
- `System32\xgameruntime.dll`. Unimplemented runtime families remain unavailable in this mode.
+@@ -202,6 +202,9 @@ runtime and uses XCL's built-in XAsync/task queues, as on a host without
  `XCL_TRACE_ASYNC=1` logs up to 1024 built-in async lifecycle events for diagnosing callbacks
  or results that do not reach the title.
-+
+ 
 +Built-in task queue monitors are notified for submissions through every queue sharing
 +their port, including composite queues, so a manual dispatcher can wake for shared work.
- 
++
  - **DXC:** 1.8 or newer is recommended, from the
    [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+   and point `XCL_DXC_DIR` at its `bin\x64`. A Windows SDK may hold an older one (the same `10.0.26100.0`
 diff --git a/crates/xcl/src/hle/xgameruntime/taskqueue.rs b/crates/xcl/src/hle/xgameruntime/taskqueue.rs
 index 4811b39..e79fd3e 100644
 --- a/crates/xcl/src/hle/xgameruntime/taskqueue.rs
@@ -190,3 +189,6 @@ index 4811b39..e79fd3e 100644
      #[test]
      fn monitor_fires_on_submit_and_stops_after_unregister() {
          unsafe extern "system" fn noop(_ctx: *mut c_void, _canceled: bool) {}
+-- 
+2.48.1.windows.1
+

@@ -1,12 +1,9 @@
-From af971184885e459ed984bdfa6471fc8ae898479d Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 23:55:20 +0100
-Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console Win64
- PE titles
+From 467aa288640186e47fbab843aea8efa68dd25994 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:40 +0100
+Subject: [PATCH] TrinityXSX: skip 1 GiB UMA reservation for non-console
+ Win64
 
-- Honor XCL_NO_UMA in gpu::uma::get() to skip sparse/coherent UMA window allocation
-- Automatically set XCL_NO_UMA=1 in host_main for Win64 PE titles without console DLL imports,
-  freeing ~1 GiB of PS5 unified memory for native Vulkan apps such as Godot
 ---
  crates/xcl/src/gpu/uma.rs | 4 ++++
  crates/xcl/src/host.rs    | 5 ++++-
@@ -28,10 +25,10 @@ index 7592d04..ddb8b92 100644
              let req = configured_runtime_windows();
              let coherent = coherent_hint_for(req);
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 1afe11a..17d3929 100644
+index 4684d31..ee30af5 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -59,7 +59,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -60,7 +60,10 @@ pub fn host_main(boot_path: &Path) -> i32 {
          {
              boot.config.graphics = "null".into();
          }

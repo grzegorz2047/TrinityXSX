@@ -1,15 +1,9 @@
-From ee971075a255ba2c795b46f40c1dfe439c8536d8 Mon Sep 17 00:00:00 2001
-From: TrinityXSX <trinityxsx@localhost>
-Date: Wed, 25 Nov 2026 16:49:13 +0100
-Subject: [PATCH] TrinityXSX: add 0-FPS stall watchdog, offline profiles, i18n,
- auto-refresh, and --game forwarder
+From da40c9b0bfe17101c5abcdeda67df3b8b9f71681 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:38 +0100
+Subject: [PATCH] TrinityXSX: add 0-FPS stall watchdog, offline
+ profiles, i18n,
 
-- Add automatic 0-FPS loading (30s) and in-game (15s) stall watchdog in host.rs
-  logging GPU/DirectStorage/VRAM counters + eh::dump_threads() + flush.
-- Add multi-language UI (EN/PL/PT/ES) and persisted offline player profiles
-  (ui_settings.toml), editable via OPTIONS on DualSense or Web Companion.
-- Add 5-second automatic folder-change detection on the library screen.
-- Add `xcl library --game <folder>` direct-launch forwarder mode.
 ---
  crates/xcl/src/host.rs         |  57 ++++++++
  crates/xcl/src/lib.rs          |   1 +
@@ -23,10 +17,10 @@ Subject: [PATCH] TrinityXSX: add 0-FPS stall watchdog, offline profiles, i18n,
  create mode 100644 crates/xcl/src/library_i18n.rs
 
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 7d4fde0..5d978bd 100644
+index 5ee50e3..40ed711 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -111,6 +111,63 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -116,6 +116,63 @@ pub fn host_main(boot_path: &Path) -> i32 {
              }
          });
      }
@@ -91,10 +85,10 @@ index 7d4fde0..5d978bd 100644
      // report written (a process killed from outside with GPU work in flight can hang in the driver)
      if let Some(secs) = std::env::var("XCL_RUN_SECONDS").ok().and_then(|v| v.parse::<u64>().ok()) {
 diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
-index 84c45e7..54c5344 100644
+index 80d32af..6fad9c3 100644
 --- a/crates/xcl/src/lib.rs
 +++ b/crates/xcl/src/lib.rs
-@@ -21,6 +21,7 @@ pub mod inspect;
+@@ -22,6 +22,7 @@ pub mod inspect;
  pub mod launcher;
  pub mod library;
  pub mod library_art;
@@ -1183,7 +1177,7 @@ index e54e092..4a5afee 100644
      let joined_paths = paths.join("\n");
      html.push_str(&format!(
 diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
-index 01a6428..1495ee5 100644
+index 4a39338..1f1472e 100644
 --- a/crates/xcl/src/main.rs
 +++ b/crates/xcl/src/main.rs
 @@ -29,8 +29,9 @@ Usage:
@@ -1198,7 +1192,7 @@ index 01a6428..1495ee5 100644
    xcl inspect <file.exe|file.dll> [--json]
        Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
    xcl disasm <file> [--offset N] [--length N] [--all] [--hex] [--fssm FILE]
-@@ -66,6 +67,9 @@ fn main() {
+@@ -69,6 +70,9 @@ fn main() {
  
      let args: Vec<String> = std::env::args().skip(1).collect();
      let code = match args.first().map(String::as_str) {

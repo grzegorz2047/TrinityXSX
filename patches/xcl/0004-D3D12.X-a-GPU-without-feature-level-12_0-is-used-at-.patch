@@ -1,34 +1,9 @@
-From e3f67f0341c5cea816621d3155346cab04b22f9f Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 03:24:27 +0100
-Subject: [PATCH 04/12] D3D12.X: a GPU without feature level 12_0 is used at
- 11_0 before WARP
+From 334ac0199438b1e3738cfb0c87451d2521ea4d89 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:33 +0100
+Subject: [PATCH 04/12] D3D12.X: a GPU without feature level
+ 12_0 is used at
 
-The title's device (hle::d3d12x::real) and the launcher's GPU check
-(preflight) asked each hardware adapter for feature level 12_0 only,
-then took WARP at 11_0. vkd3d-proton on the PS5's RADV (under
-prospero-win) refuses 12_0: the GPU has tiled resources tier 1 only
-("Feature level 0xc000 is not supported"). XCL then ran on "WARP
-(software renderer)", which DXVK's dxgi answered with the same GPU, so
-it worked by accident and was reported as WARP; on Windows the same
-fallback would have been the software renderer.
-
-gpu::adapter::create_device() now asks every adapter for 12_0, then
-every adapter for 11_0, then WARP, and both callers use it (they had
-the same loop copied). A device below 12_0 says so in its name and in
-the log. On a GPU that gives 12_0 nothing changes.
-
-Test: first_device() picks an adapter that gives only 11_0 (asked at
-12_0 first), and prefers a later adapter with 12_0 to an earlier one
-with 11_0.
-
-Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
-cargo test --workspace --no-fail-fast -- --test-threads=4: 976 passed,
-1 failed, 45 ignored, 23 SKIPPED; the failure is
-execute_indirect_reads_the_arguments_written_before_it, as on main on
-this GPU. Not yet run on the PS5.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  crates/xcl/src/gpu/adapter.rs       | 40 +++++++++++++++++++++++++++++
  crates/xcl/src/gpu/adapter_tests.rs | 25 +++++++++++++++++-
@@ -132,10 +107,10 @@ index 70fc209..e8bbf1c 100644
 +    assert_eq!(first_device(&[] as &[&'static str], &LEVELS, create), None);
 +}
 diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
-index 9241a3a..6048213 100644
+index 76f31d4..40ad5bb 100644
 --- a/crates/xcl/src/hle/d3d12x/real.rs
 +++ b/crates/xcl/src/hle/d3d12x/real.rs
-@@ -512,33 +512,19 @@ pub fn init() -> Result<String, String> {
+@@ -511,33 +511,19 @@ pub fn init() -> Result<String, String> {
              }
          }
          let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(|e| format!("DXGI: {e}"))?;

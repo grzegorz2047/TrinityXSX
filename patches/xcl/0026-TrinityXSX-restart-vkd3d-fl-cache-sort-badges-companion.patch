@@ -1,8 +1,8 @@
-From a9947c64520638480a83503a54d4c03003901451 Mon Sep 17 00:00:00 2001
+From 159b09cb9e976f7c7681096a301611592552721c Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Thu, 26 Nov 2026 00:59:02 +0100
-Subject: [PATCH] TrinityXSX: add 1-button restart, VKD3D feature level, shader
- cache clear, favorites/recent sort, FG badge, and Web Companion live logs
+Date: Thu, 26 Nov 2026 08:39:41 +0100
+Subject: [PATCH] TrinityXSX: add 1-button restart, VKD3D feature level,
+ shader
 
 ---
  crates/xcl/src/config.rs       |   4 +
@@ -14,7 +14,7 @@ Subject: [PATCH] TrinityXSX: add 1-button restart, VKD3D feature level, shader
  6 files changed, 678 insertions(+), 41 deletions(-)
 
 diff --git a/crates/xcl/src/config.rs b/crates/xcl/src/config.rs
-index d366b12..b21eae6 100644
+index 7bdaa21..46f5f45 100644
 --- a/crates/xcl/src/config.rs
 +++ b/crates/xcl/src/config.rs
 @@ -79,6 +79,9 @@ pub struct Config {
@@ -36,10 +36,10 @@ index d366b12..b21eae6 100644
              activity: false,
              trace_input: false,
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 17d3929..080cc12 100644
+index ee30af5..032c593 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -40,6 +40,11 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -41,6 +41,11 @@ pub fn host_main(boot_path: &Path) -> i32 {
      if std::env::var_os("XCL_DIRECT_DXIL").is_none() && !boot.config.direct_dxil.is_empty() {
          std::env::set_var("XCL_DIRECT_DXIL", &boot.config.direct_dxil);
      }

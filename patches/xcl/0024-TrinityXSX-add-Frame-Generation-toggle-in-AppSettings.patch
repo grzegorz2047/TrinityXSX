@@ -1,12 +1,8 @@
-From 5ebfebb7336872f42fb274b4696dc5b4af1ce6ca Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 23:24:46 +0100
+From d2630ba3a385024dbd3eb0322d38f830b3d892c2 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:40 +0100
 Subject: [PATCH] TrinityXSX: add Frame Generation (MihawkGen) toggle in
- AppSettings
 
-- Read and update [display] framegen = off|2|3|4 in trinityxsx-library.profile
-- Expose Off / 2x / 3x / 4x toggle in the OPTIONS (Profile & Language) menu
-- Indicate [restart] when saved factor differs from active PW_FRAMEGEN
 ---
  crates/xcl/src/library.rs      | 162 +++++++++++++++++++++++++++++++++
  crates/xcl/src/library_i18n.rs |   6 ++

@@ -1,8 +1,8 @@
-From ee56242b258a66bb6da9bd669cb2af7a2c57389f Mon Sep 17 00:00:00 2001
+From 704e07f447f2c05904d0ff5a1fb39ce55f18b13b Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Thu, 26 Nov 2026 08:38:05 +0100
-Subject: [PATCH] TrinityXSX: add FPS HUD toggle, storage free space bar, and
- cached list cover thumbnails
+Date: Thu, 26 Nov 2026 08:39:41 +0100
+Subject: [PATCH] TrinityXSX: add FPS HUD toggle, storage free space
+ bar, and
 
 ---
  crates/xcl/src/library.rs      | 148 +++++++++++++++++++++++++------

@@ -1,8 +1,8 @@
-From 5d30dedc33bc0d5f0e1e833aaecc1564b4b0c17a Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 20:58:19 +0100
-Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV descriptor
- tables
+From 19797f9421ccdb4520b226a058f33e71e16d5564 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:39 +0100
+Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV
+ descriptor
 
 ---
  crates/xcl/src/hle/d3d12x/bind.rs         | 115 +++++++++++++++++++---
@@ -11,7 +11,7 @@ Subject: [PATCH] D3D12.X: replay PC graphics root arguments and SRV descriptor
  3 files changed, 132 insertions(+), 15 deletions(-)
 
 diff --git a/crates/xcl/src/hle/d3d12x/bind.rs b/crates/xcl/src/hle/d3d12x/bind.rs
-index da5b15e..58f9a75 100644
+index 3f31c48..ecb45a3 100644
 --- a/crates/xcl/src/hle/d3d12x/bind.rs
 +++ b/crates/xcl/src/hle/d3d12x/bind.rs
 @@ -18,6 +18,16 @@ use windows::Win32::Graphics::Direct3D12::*;
@@ -75,7 +75,7 @@ index da5b15e..58f9a75 100644
          s.pso = pso;
          (old, std::mem::take(&mut s.uma))
      });
-@@ -178,32 +193,111 @@ pub(super) unsafe extern "system" fn set_graphics_root_signature(this: *mut c_vo
+@@ -194,32 +209,111 @@ pub(super) unsafe extern "system" fn set_graphics_root_signature(this: *mut c_vo
          s.args_gfx = vec![0u8; layout.as_ref().map_or(0, |l| l.size as usize)];
          s.layout_gfx = layout;
          s.rs_gfx = rs as usize;
@@ -191,12 +191,15 @@ index da5b15e..58f9a75 100644
  }
  
  /// `XCL_TRACE_ADDRESSES=1`: root descriptor addresses of console code – in unified memory
-@@ -514,12 +608,9 @@ unsafe fn graphics_bound(this: *mut c_void) -> Option<ID3D12GraphicsCommandList>
+@@ -579,15 +673,12 @@ unsafe fn graphics_bound(this: *mut c_void) -> Option<ID3D12GraphicsCommandList>
              }
          }
          // a PC pipeline (also a stand-in or fallback: made with the title's root signature):
 -        // the title's root signature, which nothing else binds on the PC list – a draw without
 -        // one is invalid (the debug layer reports it on every GPU; WARP faults on it)
+         if super::pso_async::is_pending(pso) {
+             super::list_x::note_dropped_draw(this);
+         }
 -        let rs = with(this, |s| s.rs_gfx) as *mut c_void;
 -        if let Some(r) = ID3D12RootSignature::from_raw_borrowed(&rs) {
 -            list.SetGraphicsRootSignature(r);
@@ -208,10 +211,10 @@ index da5b15e..58f9a75 100644
      }
      if super::present::trace_frame() {
 diff --git a/crates/xcl/src/hle/d3d12x/console_heap.rs b/crates/xcl/src/hle/d3d12x/console_heap.rs
-index 14d4f36..2a97e89 100644
+index 4862abd..b0ee29b 100644
 --- a/crates/xcl/src/hle/d3d12x/console_heap.rs
 +++ b/crates/xcl/src/hle/d3d12x/console_heap.rs
-@@ -393,6 +393,32 @@ pub fn start(obj: usize) -> Option<u64> {
+@@ -413,6 +413,32 @@ pub fn start(obj: usize) -> Option<u64> {
      HEAPS.lock().unwrap().iter().find(|h| h.obj == obj).map(|h| h.shadow as u64)
  }
  
@@ -245,10 +248,10 @@ index 14d4f36..2a97e89 100644
  #[derive(Clone, Copy, Debug)]
  pub struct Slot {
 diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
-index bc8e709..b8d58c4 100644
+index e250d17..0ffceb9 100644
 --- a/crates/xcl/src/hle/d3d12x/real.rs
 +++ b/crates/xcl/src/hle/d3d12x/real.rs
-@@ -987,9 +987,9 @@ fn console_slots(kind: Kind) -> Vec<(usize, usize)> {
+@@ -988,9 +988,9 @@ fn console_slots(kind: Kind) -> Vec<(usize, usize)> {
                  (36, b::set_graphics_root_table as usize),
                  (38, b::set_graphics_root_constant as usize),
                  (40, b::set_graphics_root_constants as usize),

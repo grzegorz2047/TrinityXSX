@@ -1,33 +1,9 @@
-From b3854b9384e3134dd98a3976b893e11521f00013 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 01:57:13 +0100
-Subject: [PATCH 02/12] HLE: no D3D11 bridge for MFResetDXGIDeviceManagerX on
- vkd3d-proton
+From bf7bafaf14ebccd2359feece0b7334c2ec323ce0 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:32 +0100
+Subject: [PATCH 02/12] HLE: no D3D11 bridge for
+ MFResetDXGIDeviceManagerX on
 
-MFResetDXGIDeviceManagerX falls back to a companion D3D11 device when
-Windows' IMFDXGIDeviceManager rejects the title's ID3D12Device. With
-vkd3d-proton (D3D12 on Vulkan) and DXVK's dxgi.dll the adapter is not
-one of Windows' own: Windows' d3d11.dll queries it for a private
-interface (7abb6563-02bc-47c4-8ef9-acc4795edbcf), gets E_NOINTERFACE and
-dereferences null (d3d11.dll+0xf94b), which killed the e2e test title.
-
-Recognise a vkd3d-proton device by ID3D12DXVKInteropDevice (only its
-devices answer it) and return the direct ResetDevice result there. On
-vkd3d-proton Windows' Media Foundation takes the D3D12 device directly
-(ResetDevice returns S_OK), so nothing is lost.
-
-Tests: vkd3d_proton_devices_are_recognised (Windows' runtime: false,
-vkd3d-proton next to the test binary: true); the reset test checks the
-direct result on vkd3d-proton.
-
-Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
-- Windows D3D12: cargo test -p xcl --lib hle::mfplat 4 passed,
-  cargo test -p xcl --test e2e 3 passed
-- vkd3d-proton 3.1 (b_ndebug, xcl-compat patches) + DXVK 3.1.1
-  dxgi/d3d11: hle::mfplat 4 passed, e2e 3 passed (failed before:
-  test title crashed in d3d11.dll)
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  crates/xcl/src/hle/mfplat.rs | 55 ++++++++++++++++++++++++++++++++++++
  1 file changed, 55 insertions(+)

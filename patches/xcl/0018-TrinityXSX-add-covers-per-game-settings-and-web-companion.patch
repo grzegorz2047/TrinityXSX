@@ -1,14 +1,9 @@
-From 36cc6a4a84ca48c99b1c6f80a7e6675fc21c3106 Mon Sep 17 00:00:00 2001
-From: TrinityXSX <trinityxsx@localhost>
-Date: Wed, 25 Nov 2026 16:38:24 +0100
-Subject: [PATCH] TrinityXSX: add PNG cover art, per-game xcl.toml editor, and
- Web Companion QR
+From e7008509dd84b401797e688e9ed3a1cdbc484669 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:38 +0100
+Subject: [PATCH] TrinityXSX: add PNG cover art, per-game xcl.toml
+ editor, and
 
-Decode PNG logos from MicrosoftGame.config in pure Rust (miniz_oxide),
-render a right-side game preview panel with saves summary and version
-badge, add a DualSense per-game xcl.toml settings editor (R1/Options),
-and add a PIN-protected LAN Web Companion with QR code (L1) for one-tap
-trinityxsx-logs.zip download and browser config editing.
 ---
  crates/xcl/src/lib.rs          |   2 +
  crates/xcl/src/library.rs      | 193 ++++++++--
@@ -20,10 +15,10 @@ trinityxsx-logs.zip download and browser config editing.
  create mode 100644 crates/xcl/src/library_web.rs
 
 diff --git a/crates/xcl/src/lib.rs b/crates/xcl/src/lib.rs
-index c887a5d..84c45e7 100644
+index 4545d67..80d32af 100644
 --- a/crates/xcl/src/lib.rs
 +++ b/crates/xcl/src/lib.rs
-@@ -20,6 +20,8 @@ pub mod insn;
+@@ -21,6 +21,8 @@ pub mod insn;
  pub mod inspect;
  pub mod launcher;
  pub mod library;

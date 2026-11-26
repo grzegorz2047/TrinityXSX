@@ -1,8 +1,7 @@
-From e47a3c6bbc9ed4eb5fa48fd49d35932a659de44e Mon Sep 17 00:00:00 2001
+From d00e9218199657bb20814c11f2b5a6dd9e6c9be5 Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Wed, 25 Nov 2026 17:37:49 +0100
+Date: Thu, 26 Nov 2026 08:39:39 +0100
 Subject: [PATCH] TrinityXSX: add save backup/restore ZIP, compatibility
- presets, HUD telemetry, and manual diagnostic dump
 
 ---
  crates/xcl/src/host.rs         | 102 ++++++++----
@@ -12,10 +11,10 @@ Subject: [PATCH] TrinityXSX: add save backup/restore ZIP, compatibility
  4 files changed, 502 insertions(+), 71 deletions(-)
 
 diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 431b24d..0245284 100644
+index 80920ae..b213e61 100644
 --- a/crates/xcl/src/host.rs
 +++ b/crates/xcl/src/host.rs
-@@ -118,16 +118,83 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -123,16 +123,83 @@ pub fn host_main(boot_path: &Path) -> i32 {
          let _ = std::thread::Builder::new().name("xcl-stall-watch".into()).spawn(|| {
              const INITIAL_STALL_SECS: u64 = 30;
              const RUNTIME_STALL_SECS: u64 = 15;
@@ -102,7 +101,7 @@ index 431b24d..0245284 100644
                  if presents != last_presents {
                      if reported_stall {
                          crate::xlog_info!("STALL: rendering resumed (presents={presents})");
-@@ -140,32 +207,9 @@ pub fn host_main(boot_path: &Path) -> i32 {
+@@ -145,32 +212,9 @@ pub fn host_main(boot_path: &Path) -> i32 {
                  let threshold = if presents == 0 { INITIAL_STALL_SECS } else { RUNTIME_STALL_SECS };
                  if !reported_stall && last_progress.elapsed().as_secs() >= threshold {
                      reported_stall = true;

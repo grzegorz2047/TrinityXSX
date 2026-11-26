@@ -1,34 +1,32 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Codex <codex@openai.com>
-Date: Wed, 25 Nov 2026 10:03:00 +0100
+From 3c40bd39c6fef7484c4bf49d0838c281454f8064 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:37 +0100
 Subject: [PATCH] WASAPI: retry rejected GameCore stream initialization
 
-FMOD's GameCore backend initializes two probe clients successfully, but
-its final stream has flags 0x01040000. Wine rejects the additional bit
-with E_INVALIDARG, after which FMOD stops all clients and emits no audio.
-
-Patch the system audio client's shared Initialize slot, preserving the
-original call. Retry only E_INVALIDARG requests containing 0x01000000,
-removing that bit and returning the real retry result. Keep all other
-arguments, accepted requests and unrelated errors unchanged. Pin the
-implementation module and release the setup COM objects/apartment.
-
-Includes a regression test that fails with pass-through initialization.
+---
+ README.md                    |   4 +
+ crates/xcl/Cargo.toml        |   2 +
+ crates/xcl/src/hle/mod.rs    |   1 +
+ crates/xcl/src/hle/wasapi.rs | 148 +++++++++++++++++++++++++++++++++++
+ crates/xcl/src/host.rs       |   1 +
+ 5 files changed, 156 insertions(+)
+ create mode 100644 crates/xcl/src/hle/wasapi.rs
 
 diff --git a/README.md b/README.md
+index 8d1a755..2a1c5f9 100644
 --- a/README.md
 +++ b/README.md
-@@ -204,6 +204,10 @@
- 
+@@ -205,6 +205,10 @@ or results that do not reach the title.
  Built-in task queue monitors are notified for submissions through every queue sharing
  their port, including composite queues, so a manual dispatcher can wake for shared work.
-+
+ 
 +Console WASAPI requests rejected with `E_INVALIDARG` are retried without the extra
 +`0x01000000` stream flag used by FMOD's GameCore output. Accepted requests, other flags,
 +and device/format errors retain the system audio client's behavior.
- 
++
  - **DXC:** 1.8 or newer is recommended, from the
    [DirectXShaderCompiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases): unpack one
+   and point `XCL_DXC_DIR` at its `bin\x64`. A Windows SDK may hold an older one (the same `10.0.26100.0`
 diff --git a/crates/xcl/Cargo.toml b/crates/xcl/Cargo.toml
 index c3b23a1..ec535ae 100644
 --- a/crates/xcl/Cargo.toml
@@ -54,20 +52,9 @@ index abea3ae..a090bb8 100644
  pub mod xaudio2;
  pub mod xma2;
  pub mod xg;
-diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
-index 9dde1cd..7d4fde0 100644
---- a/crates/xcl/src/host.rs
-+++ b/crates/xcl/src/host.rs
-@@ -126,6 +126,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
-     crate::stubs::init_db(&boot.config.stub_returns);
-     crate::hle::init(&boot.config);
-     crate::hle::kernelx::fine_timer();
-+    crate::hle::wasapi::install();
-     crate::loader::set_cache_dir(boot.cache_dir());
-     let mut dirs = vec![boot.game_root.clone()];
-     if let Some(p) = boot.exe_path.parent() {
 diff --git a/crates/xcl/src/hle/wasapi.rs b/crates/xcl/src/hle/wasapi.rs
 new file mode 100644
+index 0000000..a82c264
 --- /dev/null
 +++ b/crates/xcl/src/hle/wasapi.rs
 @@ -0,0 +1,148 @@
@@ -219,3 +206,18 @@ new file mode 100644
 +        }
 +    }
 +}
+diff --git a/crates/xcl/src/host.rs b/crates/xcl/src/host.rs
+index bba4dc5..5ee50e3 100644
+--- a/crates/xcl/src/host.rs
++++ b/crates/xcl/src/host.rs
+@@ -131,6 +131,7 @@ pub fn host_main(boot_path: &Path) -> i32 {
+     crate::stubs::init_db(&boot.config.stub_returns);
+     crate::hle::init(&boot.config);
+     crate::hle::kernelx::fine_timer();
++    crate::hle::wasapi::install();
+     crate::loader::set_cache_dir(boot.cache_dir());
+     let mut dirs = vec![boot.game_root.clone()];
+     if let Some(p) = boot.exe_path.parent() {
+-- 
+2.48.1.windows.1
+

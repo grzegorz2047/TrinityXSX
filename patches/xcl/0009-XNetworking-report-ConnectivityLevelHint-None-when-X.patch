@@ -1,8 +1,8 @@
-From 926e6e4dd2f28aded17b17ca9a0d9c17c4205220 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 07:55:20 +0100
-Subject: [PATCH 09/12] XNetworking: report ConnectivityLevelHint::None when
- XCL_NETWORK=0
+From e3d7c8b9cd007bce4cba0dde4ec3d7084fe5d090 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:34 +0100
+Subject: [PATCH 09/12] XNetworking: report
+ ConnectivityLevelHint::None when
 
 ---
  crates/xcl/src/hle/xgameruntime/networking.rs | 16 ++++++++++++++++

@@ -1,12 +1,9 @@
-From 6c204ee63aaebe5b797dc7632250b2966ff792e6 Mon Sep 17 00:00:00 2001
-From: TrinityXSX <trinityxsx@localhost>
-Date: Wed, 25 Nov 2026 16:04:08 +0100
-Subject: [PATCH] TrinityXSX: add multi-folder library and directory browser
+From b18996457f7f83c048f2683d04e2c3af038c65b6 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:37 +0100
+Subject: [PATCH] TrinityXSX: add multi-folder library and directory
+ browser
 
-Support multiple persisted game folders in game_paths.txt (matching
-TrinityX360), default PS5 paths (/data, /mnt/usb0..1, /mnt/ext0..1,
-C:\XCL\games), Wine Z: <-> PS5 Unix path translation, and DualSense
-folder management + interactive directory browser.
 ---
  crates/xcl/src/library.rs      | 585 +++++++++++++++++++++++++++++++--
  crates/xcl/src/library_menu.rs | 575 ++++++++++++++++++++++++++++----
@@ -1378,7 +1375,7 @@ index 6f1da18..74500a0 100644
      }
  }
 diff --git a/crates/xcl/src/main.rs b/crates/xcl/src/main.rs
-index 0bd467b..01a6428 100644
+index 1445bfc..4a39338 100644
 --- a/crates/xcl/src/main.rs
 +++ b/crates/xcl/src/main.rs
 @@ -29,7 +29,7 @@ Usage:
@@ -1390,7 +1387,7 @@ index 0bd467b..01a6428 100644
        TrinityXSX library for unpacked Scarlett game folders. --list prints the catalog.
    xcl inspect <file.exe|file.dll> [--json]
        Analysis without running: imports and what XCL has for them (HLE / Windows / stub).
-@@ -66,8 +66,10 @@ fn main() {
+@@ -69,8 +69,10 @@ fn main() {
  
      let args: Vec<String> = std::env::args().skip(1).collect();
      let code = match args.first().map(String::as_str) {

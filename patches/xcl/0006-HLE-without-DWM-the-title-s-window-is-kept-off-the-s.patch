@@ -1,40 +1,9 @@
-From 542cfc3a64fc3abc89c06950ade5600307696b77 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 04:42:59 +0100
-Subject: [PATCH 06/12] HLE: without DWM the title's window is kept off the
- screens
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 05995dfb0cb5b9de5930ab18bfc0f708af1d0bef Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:33 +0100
+Subject: [PATCH 06/12] HLE: without DWM the title's window is
+ kept off the
 
-XCL hides the title's top-level window (the console's 1920x1080 screen;
-its frames are shown in XCL's own window) with DWMWA_CLOAK. Wine has no
-DWM: DwmSetWindowAttribute is a stub and DWMWA_CLOAKED is not
-implemented (E_NOTIMPL), so the window stayed mapped at (0, 0). On the
-PS5 under prospero-win the test title's check "… is the hidden 1920x1080
-console screen" failed with "not cloaked"; on desktop Wine the window can
-cover XCL's.
-
-Under Wine the window is now made just right of the virtual screen, and
-console_wndproc puts it back there in WM_WINDOWPOSCHANGING wherever the
-title moves it. It keeps WS_VISIBLE, its styles and its 1920x1080 client
-area, so the title sees the same window. On Windows nothing changes: it
-stays at (0, 0), cloaked.
-
-The test title's check still requires cloaking where DWM answers
-DWMWA_CLOAKED; only where that query fails (no DWM) does a window wholly
-outside the virtual screen count as hidden. It first moves its window to
-(0, 0), as a title might, so the interception is tested too.
-
-Test: console_window_without_dwm_stays_off_the_screens (the off-screen
-path forced on Windows); it fails without the WM_WINDOWPOSCHANGING case
-("moved onto the screen: [0, 0, 1920, 1080]"), measured.
-
-Measured on an RTX 3060 Laptop GPU, Windows 11, Rust 1.100 debug:
-cargo test -p xcl --lib hle::user: 4 passed; cargo test -p xcl --test
-e2e: 3 passed. Not yet run on the PS5.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  crates/xcl/src/hle/user.rs  | 97 +++++++++++++++++++++++++++++++++----
  tests/testtitle/src/main.rs | 16 +++++-

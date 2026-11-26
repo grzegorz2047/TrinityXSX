@@ -1,8 +1,8 @@
-From 93d8f3ec1c26e460ae04612312fbc72c15b960f7 Mon Sep 17 00:00:00 2001
-From: Grzegorz <grzegorz2047@gmail.com>
-Date: Wed, 25 Nov 2026 08:52:43 +0100
-Subject: [PATCH 12/12] GameInput/XUser: deliver device association before
- async GameInput arrival
+From f84fa61fdefa81a663529263fb42a4d56c322f53 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 08:39:35 +0100
+Subject: [PATCH 12/12] GameInput/XUser: deliver device
+ association before
 
 ---
  crates/xcl/src/hle/gameinput.rs        | 33 ++++++-----
