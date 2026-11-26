@@ -155,6 +155,25 @@ env = DXVK_LOG_PATH=C:/XCL
 """
 
 
+def vkd3d_cache_folder(profile: bytes) -> str | None:
+    """The folder under C:/XCL/cache that a profile's VKD3D_SHADER_CACHE_PATH names, if any.
+
+    vkd3d-proton never creates its cache folder; without it nothing is cached and every launch
+    compiles all pipelines again, so the staged prefix must already contain it.
+    """
+    prefix = "env = VKD3D_SHADER_CACHE_PATH="
+    for line in profile.decode("utf-8-sig").splitlines():
+        line = line.strip()
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix):].strip().replace("\\", "/")
+        head, sep, name = value.partition("C:/XCL/cache/")
+        if head == "" and sep and name and all(part not in ("", ".", "..") for part in name.split("/")):
+            return name
+        raise ValueError(f"VKD3D_SHADER_CACHE_PATH must be a folder under C:/XCL/cache: {value!r}")
+    return None
+
+
 def read_library_executable(binary: Path) -> bytes:
     code = binary.read_bytes()
     if not code.startswith(b"MZ") or b"TrinityXSX: library window opened" not in code:
@@ -234,6 +253,10 @@ def stage(
             stamp.update(f"{name}:{hashes[name]}\n".encode("ascii"))
         (xcl / "runtime-stamp.txt").write_text(f"{stamp.hexdigest()}\n", encoding="ascii", newline="\n")
         shutil.copytree(runtime / "licenses", xcl / "licenses")
+        # after the runtime-stamp hashes above, which read every entry of XCL as a file
+        cache = vkd3d_cache_folder(profile)
+        if cache is not None:
+            (xcl / "cache" / cache).mkdir(parents=True)
         (tree / game_destination).mkdir(parents=True)
         if game is not None:
             data = tree / "prefix" / USER_DATA / game.identity

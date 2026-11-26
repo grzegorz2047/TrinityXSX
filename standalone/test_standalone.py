@@ -12,7 +12,7 @@ import zipfile
 from .catalog import ManifestError, read_game, scan
 from .image import write_app_zip
 from .native.build_prefix_seed import CONSOLE_CPU, CPU_KEY, PC_CPU, rewrite_system_reg, sanitize_symlinks
-from .stage import RUNNER_EXECUTABLE, RUNTIME_FILES, profile_text, stage
+from .stage import RUNNER_EXECUTABLE, RUNTIME_FILES, profile_text, stage, vkd3d_cache_folder
 
 
 MANIFEST = """<Game>
@@ -97,6 +97,8 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual((output / "prefix/system.reg").read_text(), "test registry")
         self.assertEqual((output / "profiles/profiles.lst").read_text(), "minecraft-beta.profile\n")
         self.assertEqual(list((output / record["game_install_path"]).iterdir()), [])
+        # vkd3d-proton does not create its cache folder: the staged prefix has it, empty
+        self.assertEqual(list((output / "prefix/drive_c/XCL/cache/minecraft-beta").iterdir()), [])
         self.assertFalse((seed / "drive_c/XCL").exists())
         with self.assertRaises(FileExistsError):
             stage(self.game, runtime, output, runner, seed)
@@ -118,6 +120,7 @@ class StandaloneTests(unittest.TestCase):
         icon = Path(__file__).with_name("assets") / "icon0.png"
         self.assertEqual((library_output / "sce_sys/icon0.png").read_bytes(), icon.read_bytes())
         self.assertEqual((library_output / "profiles/profiles.lst").read_text(), "trinityxsx-library.profile\n")
+        self.assertTrue((library_output / "prefix/drive_c/XCL/cache/trinityxsx-library").is_dir())
         stamp1 = (library_output / "prefix/drive_c/XCL/runtime-stamp.txt").read_text(encoding="ascii").strip()
         self.assertEqual(len(stamp1), 64)
         self.assertFalse((runner / RUNNER_EXECUTABLE).exists())
@@ -128,6 +131,14 @@ class StandaloneTests(unittest.TestCase):
         stamp2 = (library_output_v2 / "prefix/drive_c/XCL/runtime-stamp.txt").read_text(encoding="ascii").strip()
         self.assertEqual(len(stamp2), 64)
         self.assertNotEqual(stamp1, stamp2)
+
+    def test_vkd3d_cache_folder_comes_from_the_profile_and_stays_under_xcl_cache(self):
+        self.assertEqual(vkd3d_cache_folder(b"[debug]\nenv = VKD3D_SHADER_CACHE_PATH=C:/XCL/cache/game\n"), "game")
+        self.assertEqual(vkd3d_cache_folder(b"env = VKD3D_SHADER_CACHE_PATH=C:\\XCL\\cache\\a\\b\n"), "a/b")
+        self.assertIsNone(vkd3d_cache_folder(b"env = VKD3D_DEBUG=warn\n"))
+        for bad in (b"D:/cache/x", b"C:/XCL/cache/", b"C:/XCL/cache/../prefix", b"C:/XCL/cachex/y"):
+            with self.assertRaises(ValueError):
+                vkd3d_cache_folder(b"env = VKD3D_SHADER_CACHE_PATH=" + bad + b"\n")
 
     def test_prefix_seed_registry_rewrite_preserves_other_sections(self):
         reg = (
