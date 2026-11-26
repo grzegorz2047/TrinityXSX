@@ -2087,6 +2087,33 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, St
     Ok(menu.chosen)
 }
 
+/// Run one title of the benchmark queue (`library::bench`). The library is asked to start again
+/// afterwards, whatever the title does, so the queue moves on to the next title.
+fn run_bench(job: library::bench::Job) -> i32 {
+    let _ = library::request_app_restart();
+    let paths = library::load_or_init_paths(&library::paths_file(), None);
+    let catalog = library::scan_paths(&paths);
+    let Some(game) = catalog.games.iter().find(|g| g.identity.eq_ignore_ascii_case(&job.identity)) else {
+        println!("TrinityXSX: benchmark title {} is not in the library", job.identity);
+        library::bench::record_failure(&job, "not-found");
+        return 0;
+    };
+    if matches!(library_gog::detect_pe_kind(&game.executable), PeLaunchKind::PcNative { .. }) {
+        library::bench::record_failure(&job, "unsupported");
+        return 0;
+    }
+    if let Err(e) = library::prepare(game) {
+        println!("TrinityXSX: benchmark title {} cannot start: {e}", job.identity);
+        library::bench::record_failure(&job, "prepare-failed");
+        return 0;
+    }
+    for (name, value) in &job.env {
+        std::env::set_var(name, value);
+    }
+    println!("TrinityXSX: benchmark {} -> {}", game.executable.display(), job.out.display());
+    xcl::launcher::run_with(&game.executable, &[], true)
+}
+
 pub fn run_direct(folder: PathBuf) -> i32 {
     library::ensure_shader_cache_dirs();
     match library::inspect_game_folder(&folder) {
@@ -2134,6 +2161,9 @@ pub fn run(root: Option<PathBuf>, list: bool) -> i32 {
         }
         println!("Skipped folders: {}", catalog.skipped);
         return 0;
+    }
+    if let Some(job) = library::bench::next_job(&library::storage_root_dir()) {
+        return run_bench(job);
     }
     if let Some(executable) = library::take_restart_game_target() {
         println!("TrinityXSX: restarting last game {}", executable.display());

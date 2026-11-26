@@ -49,7 +49,7 @@ All external dependencies are pinned in [`pins.env`](pins.env) and tracked autom
 
 ---
 
-Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md) · [standalone/README.md](standalone/README.md) · Upstream drafts (not sent): [docs/upstream/](docs/upstream/).
+Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/PERFORMANCE.md](docs/PERFORMANCE.md) · [docs/MINECRAFT_PS5.md](docs/MINECRAFT_PS5.md) · [standalone/README.md](standalone/README.md) · Upstream drafts (not sent): [docs/upstream/](docs/upstream/).
 
 ## Layout
 
@@ -65,6 +65,8 @@ Status & engineering notes: [docs/STATUS.md](docs/STATUS.md) · [docs/MINECRAFT_
 | `tools/setup-sources.sh` | Fetch pinned XCL and vkd3d-proton and apply patches (`git am`); `xcl/` builds `library/` next to it |
 | `tools/fetch-deps.sh` | Download DXVK and DXC releases (SHA-256 verified) |
 | `tools/sync_upstream.py` | Check upstream repos/releases, test patch series (`git am --3way`), auto-drop upstreamed patches, and update `pins.env` |
+| `tools/compat.py` | Game compatibility database (`library/compat.toml`): validate it, regenerate `docs/COMPATIBILITY.md`, turn a verified report into an entry |
+| `tools/ps5_bench.py` | Automatic PS5 performance runs (FPS, frame times, stalls, memory) compared with `perf/baseline.json`; see [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
 | `tools/collect_ps5_logs.py` | One-command FTP log collector creating a shareable `trinityxsx-logs-*.zip` for bug reports |
 | `tools/make-ps5-package.sh` | Assemble `dist/prospero-win/` runtime bundle with third-party licenses |
 | `tools/ftp_put_tree.py` | Upload a local folder tree to the PS5 in one FTP session |

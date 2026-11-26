@@ -724,6 +724,166 @@ pub mod compat {
     }
 }
 
+/// Benchmark queue: `<storage root>/bench/request.toml`, written by `tools/ps5_bench.py`
+/// (docs/PERFORMANCE.md), lists titles to measure. Each library start takes the next one, runs it
+/// with XCL's benchmark mode (`XCL_BENCH_*`) and asks `launcher.c` to start the library again
+/// afterwards, until the queue is empty. Results go to `bench/results/<run>/<identity>.json`;
+/// `queue.json` there says which title runs and when the run is done.
+pub mod bench {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        run: String,
+        seconds: u64,
+        warmup: u64,
+        #[serde(default)]
+        title: Vec<RequestTitle>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct RequestTitle {
+        identity: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+    }
+
+    #[derive(Debug, Default, Deserialize, Serialize)]
+    struct Queue {
+        run: String,
+        /// "running" or "done"
+        state: String,
+        current: Option<String>,
+        remaining: Vec<String>,
+    }
+
+    /// One title to measure now: its Identity Name and the environment to start it with.
+    #[derive(Debug, PartialEq)]
+    pub struct Job {
+        pub identity: String,
+        pub env: Vec<(String, String)>,
+        pub out: PathBuf,
+    }
+
+    fn valid_run(run: &str) -> bool {
+        run.len() == 15 && run.bytes().enumerate().all(|(i, b)| if i == 8 { b == b'-' } else { b.is_ascii_digit() })
+    }
+
+    fn valid_identity(identity: &str) -> bool {
+        (2..=100).contains(&identity.len())
+            && identity.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+            && identity.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    }
+
+    fn valid_env(name: &str, value: &str) -> bool {
+        (1..=64).contains(&name.len())
+            && name.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+            && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            && !name.starts_with("XCL_BENCH")
+            && !value.contains(['\0', '\n', '\r'])
+    }
+
+    fn check(request: &Request) -> Result<(), String> {
+        if !valid_run(&request.run) {
+            return Err(format!("run {:?} is not YYYYMMDD-HHMMSS", request.run));
+        }
+        if !(5..=1800).contains(&request.seconds) || request.warmup > 600 {
+            return Err("seconds must be 5..1800 and warmup at most 600".into());
+        }
+        for t in &request.title {
+            if !valid_identity(&t.identity) {
+                return Err(format!("invalid Identity Name {:?}", t.identity));
+            }
+            if let Some((k, _)) = t.env.iter().find(|(k, v)| !valid_env(k, v)) {
+                return Err(format!("environment variable {k:?} is not allowed"));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, text)?;
+        if fs::rename(&tmp, path).is_err() {
+            // PS5: replacing a file another UID owns can fail; remove it first
+            let _ = fs::remove_file(path);
+            fs::rename(&tmp, path)?;
+        }
+        Ok(())
+    }
+
+    fn result_text(identity: &str, status: &str) -> String {
+        format!("{{\n  \"version\": 1,\n  \"identity\": \"{identity}\",\n  \"status\": \"{status}\"\n}}\n")
+    }
+
+    /// Record a title of the current run that produced no measurement (`not-found`, `unsupported`, ...).
+    pub fn record_failure(job: &Job, status: &str) {
+        let _ = write_atomic(&job.out, &result_text(&job.identity, status));
+    }
+
+    /// The next title to measure from the queue in `root` (the storage root), or `None` when there is
+    /// no queue or it just ended. The title is taken off `request.toml` before it runs, so a title
+    /// that hangs or crashes the console is not started again; the next start records it as
+    /// `crashed` when it left no result.
+    pub fn next_job(root: &Path) -> Option<Job> {
+        let dir = root.join("bench");
+        let request_path = dir.join("request.toml");
+        let text = fs::read_to_string(&request_path).ok()?;
+        let mut request =
+            match toml::from_str::<Request>(&text).map_err(|e| e.to_string()).and_then(|r| check(&r).map(|_| r)) {
+                Ok(r) => r,
+                Err(e) => {
+                    crate::xlog_warn!("bench: ignoring {}: {e}", request_path.display());
+                    let _ = fs::write(dir.join("request.error.txt"), format!("{e}\n"));
+                    let _ = fs::rename(&request_path, dir.join("request.invalid.toml"));
+                    return None;
+                }
+            };
+        let results = dir.join("results").join(&request.run);
+        fs::create_dir_all(&results).ok()?;
+        let queue_path = results.join("queue.json");
+        let previous: Queue =
+            fs::read_to_string(&queue_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        if let Some(current) = previous.current.filter(|c| valid_identity(c)) {
+            let out = results.join(format!("{current}.json"));
+            if !out.exists() {
+                let _ = write_atomic(&out, &result_text(&current, "crashed"));
+            }
+        }
+        if request.title.is_empty() {
+            let queue = Queue { run: request.run.clone(), state: "done".into(), current: None, remaining: Vec::new() };
+            let _ = write_atomic(&queue_path, &serde_json::to_string_pretty(&queue).unwrap_or_default());
+            let _ = fs::remove_file(&request_path);
+            return None;
+        }
+        let title = request.title.remove(0);
+        // persist the shorter queue first: whatever this title does, it is not started twice
+        write_atomic(&request_path, &toml::to_string(&request).ok()?).ok()?;
+        let queue = Queue {
+            run: request.run.clone(),
+            state: "running".into(),
+            current: Some(title.identity.clone()),
+            remaining: request.title.iter().map(|t| t.identity.clone()).collect(),
+        };
+        let _ = write_atomic(&queue_path, &serde_json::to_string_pretty(&queue).unwrap_or_default());
+        let out = results.join(format!("{}.json", title.identity));
+        let mut env = vec![
+            ("XCL_BENCH_SECONDS".to_owned(), request.seconds.to_string()),
+            ("XCL_BENCH_WARMUP".to_owned(), request.warmup.to_string()),
+            ("XCL_BENCH_OUT".to_owned(), out.to_string_lossy().into_owned()),
+            ("XCL_BENCH_ID".to_owned(), title.identity.clone()),
+        ];
+        env.extend(title.env);
+        Some(Job { identity: title.identity, env, out })
+    }
+}
+
 /// The library's label for a game the compatibility database knows ("Name — Status (release)").
 pub fn lookup_tested_preset_label(title_id: &str, identity: &str) -> Option<&'static str> {
     compat::lookup(title_id, identity).map(|e| e.label.as_str())
@@ -2256,5 +2416,67 @@ mod tests {
         let t = compat::parse(&bad_type).unwrap();
         assert!(compat::apply(&t[0], &Config::default()).is_err());
         assert!(compat::parse(&bad_key.replace("menus", "great")).is_err());
+    }
+
+    #[test]
+    fn bench_queue_runs_each_title_once_and_records_crashes() {
+        let root = std::env::temp_dir().join(format!("txsx_bench_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("bench");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("request.toml"),
+            "run = \"20261126-120000\"\nseconds = 30\nwarmup = 5\n\n[[title]]\nidentity = \"A.Game\"\nenv = { AETHER_AUTO_DEMO = \"1\" }\n\n[[title]]\nidentity = \"B.Game\"\n",
+        )
+        .unwrap();
+        let results = dir.join("results").join("20261126-120000");
+
+        let a = bench::next_job(&root).unwrap();
+        assert_eq!(a.identity, "A.Game");
+        assert_eq!(a.out, results.join("A.Game.json"));
+        let env: std::collections::HashMap<_, _> = a.env.iter().cloned().collect();
+        assert_eq!(env["XCL_BENCH_SECONDS"], "30");
+        assert_eq!(env["XCL_BENCH_WARMUP"], "5");
+        assert_eq!(env["XCL_BENCH_ID"], "A.Game");
+        assert_eq!(env["AETHER_AUTO_DEMO"], "1");
+        // A is off the queue before it runs
+        assert!(!fs::read_to_string(dir.join("request.toml")).unwrap().contains("A.Game"));
+        assert!(fs::read_to_string(results.join("queue.json")).unwrap().contains("\"running\""));
+
+        // A died without a result: recorded as crashed, B is next
+        let b = bench::next_job(&root).unwrap();
+        assert_eq!(b.identity, "B.Game");
+        assert!(fs::read_to_string(results.join("A.Game.json")).unwrap().contains("\"crashed\""));
+
+        // B wrote its result: the queue ends and the request is gone
+        fs::write(&b.out, "{\"status\": \"ok\"}").unwrap();
+        assert!(bench::next_job(&root).is_none());
+        assert!(fs::read_to_string(results.join("queue.json")).unwrap().contains("\"done\""));
+        assert_eq!(fs::read_to_string(&b.out).unwrap(), "{\"status\": \"ok\"}");
+        assert!(!dir.join("request.toml").exists());
+        assert!(bench::next_job(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bench_queue_refuses_unsafe_requests() {
+        let root = std::env::temp_dir().join(format!("txsx_bench_bad_{}", std::process::id()));
+        let good = "run = \"20261126-120000\"\nseconds = 30\nwarmup = 5\n[[title]]\nidentity = \"A.Game\"\n";
+        for bad in [
+            good.replace("20261126-120000", "../../x"),
+            good.replace("A.Game", "../evil"),
+            good.replace("seconds = 30", "seconds = 99999"),
+            format!("{good}env = {{ XCL_BENCH_SECONDS = \"1\" }}\n"),
+            format!("{good}env = {{ lower = \"1\" }}\n"),
+            format!("{good}unknown = 1\n"),
+        ] {
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("bench")).unwrap();
+            fs::write(root.join("bench/request.toml"), &bad).unwrap();
+            assert!(bench::next_job(&root).is_none(), "{bad}");
+            assert!(root.join("bench/request.invalid.toml").exists(), "{bad}");
+            assert!(!root.join("bench/results").exists(), "{bad}");
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }
