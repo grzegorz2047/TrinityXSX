@@ -4,6 +4,9 @@
 /AnyPS5/
 /TrinityX360/
 
+# local scratch: build experiments, diagnostics, downloaded kits (many GB)
+/.work/
+
 # downloads (DXVK, DXC, MSYS2, runtime kits), builds, packages, logs, dumps
 /tools/*/
 /dist/

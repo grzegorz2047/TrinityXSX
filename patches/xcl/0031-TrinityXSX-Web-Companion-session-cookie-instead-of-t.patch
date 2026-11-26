@@ -1,0 +1,611 @@
+From faf83d1cf89d7c44c12e3e7b79ff271d778a609d Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 13:20:27 +0100
+Subject: [PATCH] TrinityXSX: Web Companion session cookie instead of the PIN
+ in URLs
+
+Every link, form, fetch and redirect carried ?pin=NNNNNN, so the PIN
+stayed in browser history, the address bar and anything that logs URLs.
+
+- The QR code still logs in with one scan: a GET with the right PIN
+  gets a 303 to the same URL without it and a session cookie
+  (txsx_session, 128-bit, HttpOnly, SameSite=Lax; Lax so a QR opened
+  from the camera app keeps it on the redirect). All GET routes are
+  read-only.
+- The dashboard HTML and script no longer contain the PIN.
+- POSTs whose Origin is not this server are refused (403), so another
+  website cannot submit the dashboard's forms with the cookie.
+- The dashboard notice (?msg=) is shown only for this site's own
+  navigations (Sec-Fetch-Site), so a link from elsewhere cannot put
+  its own text in the real dashboard.
+- Without a session or PIN, paths other than / answer 401; the log
+  viewer and save restore stop and ask to scan the QR again (e.g. a
+  tab from before a restart, which also gets a new token).
+---
+ crates/xcl/src/library_web.rs | 373 +++++++++++++++++++++++++++++-----
+ 1 file changed, 318 insertions(+), 55 deletions(-)
+
+diff --git a/crates/xcl/src/library_web.rs b/crates/xcl/src/library_web.rs
+index bdc575b..be90c2f 100644
+--- a/crates/xcl/src/library_web.rs
++++ b/crates/xcl/src/library_web.rs
+@@ -30,6 +30,8 @@ const PIN_BASE_LOCKOUT: Duration = Duration::from_secs(30);
+ const PIN_MAX_LOCKOUT: Duration = Duration::from_secs(600);
+ /// Distinct wrong PINs remembered so that repeating one is not counted again.
+ const PIN_REMEMBERED_WRONG: usize = 64;
++/// Session cookie set once the PIN is accepted, so the PIN does not stay in links, history or logs.
++const SESSION_COOKIE: &str = "txsx_session";
+ 
+ pub struct WebCompanion {
+     pub url: String,
+@@ -52,7 +54,7 @@ impl WebCompanion {
+         let ip = detect_lan_ip().unwrap_or_else(|| "127.0.0.1".into());
+         let pin = generate_pin();
+         let url = format!("http://{ip}:{port}");
+-        let qr_url = format!("{url}/?pin={pin}");
++        let qr_url = qr_login_url(&url, &pin);
+ 
+         let stop = Arc::new(AtomicBool::new(false));
+         let dirty = Arc::new(AtomicBool::new(false));
+@@ -61,6 +63,7 @@ impl WebCompanion {
+         let dirty_bg = Arc::clone(&dirty);
+         let restart_bg = Arc::clone(&restart_requested);
+         let pin_bg = pin.clone();
++        let session_bg = generate_session_token();
+ 
+         let thread = thread::spawn(move || {
+             let mut guard = PinGuard::default();
+@@ -70,7 +73,7 @@ impl WebCompanion {
+                         let _ = stream.set_nonblocking(false);
+                         let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+                         let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+-                        handle_connection(stream, &pin_bg, &mut guard, &paths_file, &dirty_bg, &restart_bg);
++                        handle_connection(stream, &pin_bg, &session_bg, &mut guard, &paths_file, &dirty_bg, &restart_bg);
+                     }
+                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                         thread::sleep(Duration::from_millis(50));
+@@ -123,6 +126,28 @@ fn detect_lan_ip() -> Option<String> {
+     None
+ }
+ 
++/// The QR code carries the PIN so one scan logs in; the server trades it for the session cookie and
++/// redirects to the same page without it.
++fn qr_login_url(url: &str, pin: &str) -> String {
++    format!("{url}/?pin={pin}")
++}
++
++/// 128-bit session token. `RandomState` keys come from the OS RNG; SipHash of a counter and the time
++/// under those keys is not predictable without them.
++fn generate_session_token() -> String {
++    use std::hash::{BuildHasher, Hasher};
++    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
++    let mut out = String::with_capacity(32);
++    for i in 0..2u64 {
++        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
++        h.write_u64(nanos);
++        h.write_u64(i);
++        h.write_u32(std::process::id());
++        out.push_str(&format!("{:016x}", h.finish()));
++    }
++    out
++}
++
+ fn generate_pin() -> String {
+     use std::hash::{BuildHasher, Hasher};
+     let nanos = SystemTime::now()
+@@ -200,52 +225,84 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+ fn handle_connection(
+     mut stream: TcpStream,
+     pin: &str,
++    session: &str,
+     guard: &mut PinGuard,
+     paths_file: &Path,
+     dirty: &AtomicBool,
+     restart_requested: &AtomicBool,
+ ) {
+-    let Some((method, target, body)) = read_http_request(&mut stream) else {
++    let Some(request) = read_http_request(&mut stream) else {
+         return;
+     };
+-    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
++    let HttpRequest { method, target, body, .. } = &request;
++    let (method, body) = (method.as_str(), body.as_slice());
++    let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+     let params = parse_query(query);
+ 
+-    // A request without a PIN (first visit, favicon) only gets the login page and is not counted.
+-    let Some(supplied_pin) =
+-        params.iter().find(|(k, _)| k == "pin").map(|(_, v)| v.as_str()).filter(|p| !p.is_empty())
+-    else {
+-        let html = render_login_page(path, "");
+-        send_response(&mut stream, "200 OK", "text/html; charset=utf-8", html.as_bytes(), None);
++    // Forms and fetch() calls from another site must not act with the user's cookie. Browsers send
++    // Origin on every POST; when it is there it has to be this server.
++    if method != "GET" && !origin_allowed(request.origin.as_deref(), request.host.as_deref()) {
++        send_response(&mut stream, "403 Forbidden", "text/plain; charset=utf-8", b"Cross-site request refused", None);
+         return;
+-    };
+-    match guard.check(supplied_pin, pin, Instant::now()) {
+-        PinCheck::Accepted => {}
+-        PinCheck::Rejected => {
+-            let html = render_login_page(path, "Wrong PIN. Check the PIN shown on your TV.");
+-            send_response(&mut stream, "403 Forbidden", "text/html; charset=utf-8", html.as_bytes(), None);
+-            return;
+-        }
+-        PinCheck::LockedOut(wait) => {
+-            // Round up, so a client that waits exactly this long is not refused again.
+-            let secs = (wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1);
+-            let html = render_login_page(path, &format!("Too many wrong PINs. Try again in {secs} s."));
+-            let retry_after = secs.to_string();
+-            send_response_with_headers(
+-                &mut stream,
+-                "429 Too Many Requests",
+-                "text/html; charset=utf-8",
+-                html.as_bytes(),
+-                &[("Retry-After", retry_after.as_str())],
+-            );
++    }
++
++    let has_session = request.session.as_deref().is_some_and(|s| constant_time_eq(s.as_bytes(), session.as_bytes()));
++    let supplied_pin = params.iter().find(|(k, _)| k == "pin").map(|(_, v)| v.as_str()).filter(|p| !p.is_empty());
++
++    if !has_session {
++        // No valid session and no PIN (first visit, favicon, a tab from before a restart): only the
++        // login page, not counted as a guess. 401 for anything but the page itself, so the dashboard
++        // script can tell its session is gone.
++        let Some(supplied_pin) = supplied_pin else {
++            let html = render_login_page(path, "");
++            let status = if path == "/" { "200 OK" } else { "401 Unauthorized" };
++            send_response(&mut stream, status, "text/html; charset=utf-8", html.as_bytes(), None);
+             return;
++        };
++        match guard.check(supplied_pin, pin, Instant::now()) {
++            PinCheck::Accepted => {
++                if method == "GET" {
++                    // Trade the PIN for the cookie and drop it from the address bar and history.
++                    let cookie = format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax");
++                    send_redirect_with_headers(&mut stream, &without_pin(path, query), &[("Set-Cookie", &cookie)]);
++                    return;
++                }
++            }
++            PinCheck::Rejected => {
++                let html = render_login_page(path, "Wrong PIN. Check the PIN shown on your TV.");
++                send_response(&mut stream, "403 Forbidden", "text/html; charset=utf-8", html.as_bytes(), None);
++                return;
++            }
++            PinCheck::LockedOut(wait) => {
++                // Round up, so a client that waits exactly this long is not refused again.
++                let secs = (wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1);
++                let html = render_login_page(path, &format!("Too many wrong PINs. Try again in {secs} s."));
++                let retry_after = secs.to_string();
++                send_response_with_headers(
++                    &mut stream,
++                    "429 Too Many Requests",
++                    "text/html; charset=utf-8",
++                    html.as_bytes(),
++                    &[("Retry-After", retry_after.as_str())],
++                );
++                return;
++            }
+         }
+     }
+ 
+-    match (method.as_str(), path) {
++    match (method, path) {
+         ("GET", "/") => {
+-            let notice = params.iter().find(|(k, _)| k == "msg").map(|(_, v)| v.as_str()).unwrap_or("");
+-            let html = render_dashboard(pin, paths_file, notice);
++            // `msg` is the result of the dashboard's own last POST. A link from another site could put any
++            // text there and have the real dashboard show it, so it is shown only for this site's own
++            // navigations (browsers that do not send Sec-Fetch-Site still get it).
++            let own_navigation = request.fetch_site.as_deref().is_none_or(|site| site == "same-origin");
++            let notice = params
++                .iter()
++                .find(|(k, _)| k == "msg")
++                .map(|(_, v)| v.as_str())
++                .filter(|_| own_navigation)
++                .unwrap_or("");
++            let html = render_dashboard(paths_file, notice);
+             send_response(&mut stream, "200 OK", "text/html; charset=utf-8", html.as_bytes(), None);
+         }
+         ("GET", "/logs.zip") => {
+@@ -264,7 +321,7 @@ fn handle_connection(
+             send_response(&mut stream, "200 OK", "text/plain; charset=utf-8", text.as_bytes(), None);
+         }
+         ("POST", "/clear-cache") => {
+-            let body_str = String::from_utf8_lossy(&body);
++            let body_str = String::from_utf8_lossy(body);
+             let form = parse_query(&body_str);
+             let title = form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).filter(|s| is_safe_title_id(s));
+             let (files, bytes) = library::clear_shader_cache(title);
+@@ -273,7 +330,7 @@ fn handle_connection(
+                 "Cleared {files} shader cache file(s) ({:.1} MiB freed).",
+                 (bytes as f64) / (1024.0 * 1024.0)
+             );
+-            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++            send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
+         }
+         ("POST", "/restart") => {
+             restart_requested.store(true, Ordering::Release);
+@@ -311,7 +368,7 @@ fn handle_connection(
+             }
+         }
+         ("POST", "/preset") => {
+-            let body_str = String::from_utf8_lossy(&body);
++            let body_str = String::from_utf8_lossy(body);
+             let form = parse_query(&body_str);
+             let title = form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).unwrap_or("");
+             let preset_id = form.iter().find(|(k, _)| k == "preset").map(|(_, v)| v.as_str()).unwrap_or("recommended");
+@@ -330,10 +387,10 @@ fn handle_connection(
+             } else {
+                 "Game not found in library.".into()
+             };
+-            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++            send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
+         }
+         ("POST", "/paths") => {
+-            let body_str = String::from_utf8_lossy(&body);
++            let body_str = String::from_utf8_lossy(body);
+             let form = parse_query(&body_str);
+             let raw = form.iter().find(|(k, _)| k == "paths").map(|(_, v)| v.as_str()).unwrap_or("");
+             let mut next = Vec::new();
+@@ -347,10 +404,10 @@ fn handle_connection(
+                 }
+                 Err(e) => format!("Error saving game_paths.txt: {e}"),
+             };
+-            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++            send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
+         }
+         ("POST", "/ui") => {
+-            let body_str = String::from_utf8_lossy(&body);
++            let body_str = String::from_utf8_lossy(body);
+             let form = parse_query(&body_str);
+             let ui_file = library::ui_settings_file();
+             let mut ui = library::load_ui_settings(&ui_file);
+@@ -415,10 +472,10 @@ fn handle_connection(
+                     Err(e) => format!("Cannot save ui_settings.toml: {e}"),
+                 };
+             }
+-            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++            send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
+         }
+         ("POST", "/config") => {
+-            let body_str = String::from_utf8_lossy(&body);
++            let body_str = String::from_utf8_lossy(body);
+             let form = parse_query(&body_str);
+             let title = form.iter().find(|(k, _)| k == "title").map(|(_, v)| v.as_str()).unwrap_or("");
+             let raw_toml = form.iter().find(|(k, _)| k == "toml").map(|(_, v)| v.as_str()).unwrap_or("");
+@@ -442,7 +499,7 @@ fn handle_connection(
+                     Err(e) => format!("Invalid TOML (not saved): {e}"),
+                 }
+             };
+-            send_redirect(&mut stream, &format!("/?pin={pin}&msg={}", url_encode(&msg)));
++            send_redirect(&mut stream, &format!("/?msg={}", url_encode(&msg)));
+         }
+         _ => {
+             send_response(&mut stream, "404 Not Found", "text/plain; charset=utf-8", b"Not Found", None);
+@@ -450,7 +507,26 @@ fn handle_connection(
+     }
+ }
+ 
+-fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
++struct HttpRequest {
++    method: String,
++    target: String,
++    body: Vec<u8>,
++    /// Value of the `txsx_session` cookie, if sent.
++    session: Option<String>,
++    origin: Option<String>,
++    host: Option<String>,
++    /// `Sec-Fetch-Site`, sent by current browsers: `same-origin`, `same-site`, `cross-site` or `none`.
++    fetch_site: Option<String>,
++}
++
++fn cookie_value(header: &str, name: &str) -> Option<String> {
++    header.split(';').find_map(|pair| {
++        let (k, v) = pair.split_once('=')?;
++        (k.trim() == name).then(|| v.trim().to_owned())
++    })
++}
++
++fn read_http_request(stream: &mut TcpStream) -> Option<HttpRequest> {
+     let mut buf = Vec::with_capacity(4096);
+     let mut chunk = [0u8; 8192];
+     let header_end;
+@@ -480,10 +556,21 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)
+         MAX_HTTP_BODY_BYTES
+     };
+     let mut content_length = 0usize;
++    let (mut session, mut origin, mut host, mut fetch_site) = (None, None, None, None);
+     for line in lines {
+         if let Some((k, v)) = line.split_once(':') {
+             if k.eq_ignore_ascii_case("Content-Length") {
+                 content_length = v.trim().parse().unwrap_or(0).min(max_body);
++            } else if k.eq_ignore_ascii_case("Cookie") {
++                if let Some(value) = cookie_value(v, SESSION_COOKIE) {
++                    session = Some(value);
++                }
++            } else if k.eq_ignore_ascii_case("Origin") {
++                origin = Some(v.trim().to_owned());
++            } else if k.eq_ignore_ascii_case("Host") {
++                host = Some(v.trim().to_owned());
++            } else if k.eq_ignore_ascii_case("Sec-Fetch-Site") {
++                fetch_site = Some(v.trim().to_ascii_lowercase());
+             }
+         }
+     }
+@@ -498,7 +585,7 @@ fn read_http_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)
+         }
+     }
+     let body_end = (header_end + content_length).min(buf.len());
+-    Some((method, target, buf[header_end..body_end].to_vec()))
++    Some(HttpRequest { method, target, body: buf[header_end..body_end].to_vec(), session, origin, host, fetch_site })
+ }
+ 
+ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+@@ -532,6 +619,36 @@ fn send_response_with_headers(
+     let _ = stream.flush();
+ }
+ 
++/// `Origin` must name this server when present. `Host` is what the browser connected to.
++fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
++    match (origin, host) {
++        (None, _) => true,
++        (Some(origin), Some(host)) => origin.eq_ignore_ascii_case(&format!("http://{host}")),
++        (Some(_), None) => false,
++    }
++}
++
++/// `path?query` without any `pin=` parameter, for the redirect after a PIN is accepted.
++fn without_pin(path: &str, query: &str) -> String {
++    let rest: Vec<&str> =
++        query.split('&').filter(|pair| !pair.is_empty() && pair.split('=').next() != Some("pin")).collect();
++    if rest.is_empty() {
++        path.to_owned()
++    } else {
++        format!("{path}?{}", rest.join("&"))
++    }
++}
++
++fn send_redirect_with_headers(stream: &mut TcpStream, location: &str, extra_headers: &[(&str, &str)]) {
++    let mut resp = format!("HTTP/1.1 303 See Other\r\nLocation: {location}\r\nCache-Control: no-store\r\n");
++    for (name, value) in extra_headers {
++        resp.push_str(&format!("{name}: {value}\r\n"));
++    }
++    resp.push_str("Content-Length: 0\r\nConnection: close\r\n\r\n");
++    let _ = stream.write_all(resp.as_bytes());
++    let _ = stream.flush();
++}
++
+ fn send_redirect(stream: &mut TcpStream, location: &str) {
+     let resp = format!("HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+     let _ = stream.write_all(resp.as_bytes());
+@@ -634,7 +751,7 @@ fn render_login_page(path: &str, notice: &str) -> String {
+     )
+ }
+ 
+-fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
++fn render_dashboard(paths_file: &Path, notice: &str) -> String {
+     let paths = library::read_paths(paths_file).unwrap_or_default();
+     let catalog = library::scan_paths(&paths);
+     let storage_items = library::storage_space_summary();
+@@ -657,7 +774,7 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+         html.push_str(&format!("<div class=notice>{}</div>", html_escape(notice)));
+     }
+     html.push_str(&format!(
+-        "<div class=card><h2>Diagnostic Logs &amp; Live Viewer</h2><p class=muted>Downloads only logs and <code>xcl.toml</code> configs (never game files or saves).</p><a class=btn href='/logs.zip?pin={pin}'>Download trinityxsx-logs.zip</a>\
++        "<div class=card><h2>Diagnostic Logs &amp; Live Viewer</h2><p class=muted>Downloads only logs and <code>xcl.toml</code> configs (never game files or saves).</p><a class=btn href='/logs.zip'>Download trinityxsx-logs.zip</a>\
+          <div style='margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>\
+          <select id=logsel onchange='loadLog()' style='padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>\
+          <option value='session'>Latest PS5 session log</option>\
+@@ -699,10 +816,10 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+     );
+     let (cache_files, cache_bytes) = library::shader_cache_summary(None);
+     html.push_str(&format!(
+-        "<div class=card><h2>Profile, Language &amp; Display</h2><form method=POST action='/ui?pin={pin}'><label class=muted>Language:</label><br><select name=lang style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{lang_opts}</select><br><br><label class=muted>Active offline profile:</label><br><select name=profile style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{prof_opts}</select><br><br><label class=muted>Or create a new gamertag (1-15 letters/digits):</label><br><input type=text name=new_profile maxlength=15 placeholder='Optional new gamertag'><br><br><label class=muted>Frame Generation (MihawkGen — Vulkan / DXVK / D3D12):</label><br><select name=framegen style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fg_opts}</select><br><br><label class=muted>FPS HUD Overlay (restart to apply):</label><br><select name=show_fps style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fps_opts}</select><br><br><button class=btn type=submit>Save settings</button></form>\
++        "<div class=card><h2>Profile, Language &amp; Display</h2><form method=POST action='/ui'><label class=muted>Language:</label><br><select name=lang style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{lang_opts}</select><br><br><label class=muted>Active offline profile:</label><br><select name=profile style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{prof_opts}</select><br><br><label class=muted>Or create a new gamertag (1-15 letters/digits):</label><br><input type=text name=new_profile maxlength=15 placeholder='Optional new gamertag'><br><br><label class=muted>Frame Generation (MihawkGen — Vulkan / DXVK / D3D12):</label><br><select name=framegen style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fg_opts}</select><br><br><label class=muted>FPS HUD Overlay (restart to apply):</label><br><select name=show_fps style='width:100%;padding:8px;background:#0e171d;color:#eef7f8;border:1px solid #35505b;border-radius:6px'>{fps_opts}</select><br><br><button class=btn type=submit>Save settings</button></form>\
+          <div style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap'>\
+-         <form method=POST action='/restart?pin={pin}' onsubmit=\"return confirm('Restart TrinityXSX on PS5 now?')\"><button class=btn style='background:#f7c672;color:#0e171d;font-size:0.9rem;padding:8px 14px' type=submit>Restart TrinityXSX now</button></form>\
+-         <form method=POST action='/clear-cache?pin={pin}' onsubmit=\"return confirm('Clear compiled shader cache? Games will recompile shaders on next launch.')\"><button class=btn style='background:#3b5d66;color:#eef7f8;font-size:0.9rem;padding:8px 14px' type=submit>Clear Shader Cache ({cache_files} files, {:.1} MiB)</button></form>\
++         <form method=POST action='/restart' onsubmit=\"return confirm('Restart TrinityXSX on PS5 now?')\"><button class=btn style='background:#f7c672;color:#0e171d;font-size:0.9rem;padding:8px 14px' type=submit>Restart TrinityXSX now</button></form>\
++         <form method=POST action='/clear-cache' onsubmit=\"return confirm('Clear compiled shader cache? Games will recompile shaders on next launch.')\"><button class=btn style='background:#3b5d66;color:#eef7f8;font-size:0.9rem;padding:8px 14px' type=submit>Clear Shader Cache ({cache_files} files, {:.1} MiB)</button></form>\
+          </div></div>",
+         (cache_bytes as f64) / (1024.0 * 1024.0)
+     ));
+@@ -710,7 +827,7 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+     // Game folders editor
+     let joined_paths = paths.join("\n");
+     html.push_str(&format!(
+-        "<div class=card><h2>Game Folders (<code>game_paths.txt</code>)</h2><p class=muted>One folder per line (e.g. <code>/mnt/ext1/xboxseries</code> or <code>C:\\XCL\\games</code>).</p><form method=POST action='/paths?pin={pin}'><textarea name=paths rows=7>{}</textarea><br><br><button class=btn type=submit>Save folders</button></form></div>",
++        "<div class=card><h2>Game Folders (<code>game_paths.txt</code>)</h2><p class=muted>One folder per line (e.g. <code>/mnt/ext1/xboxseries</code> or <code>C:\\XCL\\games</code>).</p><form method=POST action='/paths'><textarea name=paths rows=7>{}</textarea><br><br><button class=btn type=submit>Save folders</button></form></div>",
+         html_escape(&joined_paths)
+     ));
+ 
+@@ -730,7 +847,7 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+             let mut preset_btns = String::new();
+             for p in library::NAMED_PRESETS {
+                 preset_btns.push_str(&format!(
+-                    "<form method=POST action='/preset?pin={pin}' style='display:inline-block;margin:4px 6px 4px 0'><input type=hidden name=title value='{}'><input type=hidden name=preset value='{}'><button class=btn style='background:#274e48;color:#eef7f8;font-size:0.82rem;padding:6px 10px' type=submit>{}</button></form>",
++                    "<form method=POST action='/preset' style='display:inline-block;margin:4px 6px 4px 0'><input type=hidden name=title value='{}'><input type=hidden name=preset value='{}'><button class=btn style='background:#274e48;color:#eef7f8;font-size:0.82rem;padding:6px 10px' type=submit>{}</button></form>",
+                     html_escape(&game.identity),
+                     html_escape(p.id),
+                     html_escape(p.label),
+@@ -742,11 +859,11 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+                  <div style='margin:10px 0'><span class=muted>Quick presets:</span><br>{preset_btns}</div>\
+                  <div style='margin:10px 0;padding:10px;background:#142027;border-radius:8px'>\
+                  <span class=muted>Saves backup &amp; restore (<code>pls/</code>):</span><br>\
+-                 <a class=btn style='font-size:0.88rem;padding:7px 12px;margin:6px 8px 6px 0' href='/saves.zip?pin={pin}&amp;title={title_enc}'>Backup Saves (.zip)</a>\
++                 <a class=btn style='font-size:0.88rem;padding:7px 12px;margin:6px 8px 6px 0' href='/saves.zip?title={title_enc}'>Backup Saves (.zip)</a>\
+                  <input type=file accept='.zip' id='zf-{title_enc}' style='color:#b2c7cb;font-size:0.85rem'>\
+                  <button class=btn style='background:#3b5d66;color:#eef7f8;font-size:0.88rem;padding:7px 12px;margin-left:6px' type=button onclick=\"restoreSave('{title_enc}')\">Restore Saves (.zip)</button>\
+                  </div>\
+-                 <form method=POST action='/config?pin={pin}'><input type=hidden name=title value='{}'><textarea name=toml rows=11>{}</textarea><br><br><button class=btn type=submit>Save xcl.toml</button></form></div>",
++                 <form method=POST action='/config'><input type=hidden name=title value='{}'><textarea name=toml rows=11>{}</textarea><br><br><button class=btn type=submit>Save xcl.toml</button></form></div>",
+                 html_escape(&game.name),
+                 html_escape(&game.identity),
+                 html_escape(&game.title_id),
+@@ -761,7 +878,7 @@ fn render_dashboard(pin: &str, paths_file: &Path, notice: &str) -> String {
+         }
+     }
+     html.push_str(&format!(
+-        "<script>let logTimer=null;async function loadLog(){{const sel=document.getElementById('logsel');const box=document.getElementById('logbox');if(!sel||!box)return;try{{const r=await fetch('/logs/tail?pin={pin}&file='+encodeURIComponent(sel.value));if(r.status===403||r.status===429){{if(logTimer){{clearInterval(logTimer);logTimer=null;}}const cb=document.getElementById('logauto');if(cb)cb.checked=false;box.textContent='TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.';return;}}box.textContent=await r.text();box.scrollTop=box.scrollHeight;}}catch(e){{box.textContent='Error loading log: '+e;}}}}function toggleAutoLog(){{const cb=document.getElementById('logauto');if(logTimer){{clearInterval(logTimer);logTimer=null;}}if(cb&&cb.checked){{loadLog();logTimer=setInterval(loadLog,3000);}}}}async function restoreSave(t){{const inp=document.getElementById('zf-'+t);if(!inp||!inp.files||!inp.files[0]){{alert('Choose a .zip backup file first.');return;}}if(!confirm('Restore saves for '+decodeURIComponent(t)+'? Existing saves will be backed up to pls.before-restore.'))return;const r=await fetch('/saves/restore?pin={pin}&title='+t,{{method:'POST',body:await inp.files[0].arrayBuffer()}});const txt=await r.text();window.location='/?pin={pin}&msg='+encodeURIComponent(txt);}}</script></body></html>"
++        "<script>let logTimer=null;async function loadLog(){{const sel=document.getElementById('logsel');const box=document.getElementById('logbox');if(!sel||!box)return;try{{const r=await fetch('/logs/tail?file='+encodeURIComponent(sel.value));if(r.status===401||r.status===403||r.status===429){{if(logTimer){{clearInterval(logTimer);logTimer=null;}}const cb=document.getElementById('logauto');if(cb)cb.checked=false;box.textContent='TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.';return;}}box.textContent=await r.text();box.scrollTop=box.scrollHeight;}}catch(e){{box.textContent='Error loading log: '+e;}}}}function toggleAutoLog(){{const cb=document.getElementById('logauto');if(logTimer){{clearInterval(logTimer);logTimer=null;}}if(cb&&cb.checked){{loadLog();logTimer=setInterval(loadLog,3000);}}}}async function restoreSave(t){{const inp=document.getElementById('zf-'+t);if(!inp||!inp.files||!inp.files[0]){{alert('Choose a .zip backup file first.');return;}}if(!confirm('Restore saves for '+decodeURIComponent(t)+'? Existing saves will be backed up to pls.before-restore.'))return;const r=await fetch('/saves/restore?title='+t,{{method:'POST',body:await inp.files[0].arrayBuffer()}});if(r.status===401||r.status===403||r.status===429){{alert('TrinityXSX restarted with a new PIN (or is locked). Scan the QR code on your TV again.');return;}}const txt=await r.text();window.location='/?msg='+encodeURIComponent(txt);}}</script></body></html>"
+     ));
+     html
+ }
+@@ -1200,6 +1317,152 @@ mod tests {
+         assert!(!constant_time_eq(b"", b"123456"));
+     }
+ 
++    #[test]
++    fn qr_code_logs_in_with_the_pin() {
++        assert_eq!(qr_login_url("http://192.168.1.5:8360", "042137"), "http://192.168.1.5:8360/?pin=042137");
++    }
++
++    #[test]
++    fn session_tokens_are_long_and_distinct() {
++        let a = generate_session_token();
++        let b = generate_session_token();
++        assert_eq!(a.len(), 32);
++        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
++        assert_ne!(a, b);
++    }
++
++    #[test]
++    fn cookie_value_finds_the_session_among_others() {
++        assert_eq!(cookie_value(" a=1; txsx_session=abc ; b=2", SESSION_COOKIE).as_deref(), Some("abc"));
++        assert_eq!(cookie_value("txsx_session_old=x", SESSION_COOKIE), None);
++        assert_eq!(cookie_value("", SESSION_COOKIE), None);
++    }
++
++    #[test]
++    fn redirect_after_pin_drops_only_the_pin() {
++        assert_eq!(without_pin("/", "pin=123456"), "/");
++        assert_eq!(without_pin("/logs.zip", "pin=123456"), "/logs.zip");
++        assert_eq!(without_pin("/", "msg=Saved%21&pin=1&x=2"), "/?msg=Saved%21&x=2");
++        assert_eq!(without_pin("/", "pinned=1"), "/?pinned=1");
++    }
++
++    #[test]
++    fn origin_must_match_host_when_sent() {
++        assert!(origin_allowed(None, Some("192.168.1.5:8360")));
++        assert!(origin_allowed(Some("http://192.168.1.5:8360"), Some("192.168.1.5:8360")));
++        assert!(!origin_allowed(Some("http://evil.example"), Some("192.168.1.5:8360")));
++        assert!(!origin_allowed(Some("null"), Some("192.168.1.5:8360")));
++        assert!(!origin_allowed(Some("http://192.168.1.5:8360"), None));
++    }
++
++    #[test]
++    fn dashboard_links_carry_no_pin() {
++        let html = render_dashboard(Path::new("does-not-exist/game_paths.txt"), "");
++        assert!(!html.contains("pin="), "PIN leaked into dashboard HTML");
++    }
++
++    /// One request through `handle_connection` over loopback; returns the raw response.
++    fn roundtrip(request: &str, session: &str, guard: &mut PinGuard, paths_file: &Path) -> String {
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap();
++        let request = request.replace("{addr}", &addr.to_string());
++        let client = thread::spawn(move || {
++            let mut c = TcpStream::connect(addr).unwrap();
++            c.write_all(request.as_bytes()).unwrap();
++            let mut out = Vec::new();
++            let _ = c.read_to_end(&mut out);
++            String::from_utf8_lossy(&out).into_owned()
++        });
++        let (stream, _) = listener.accept().unwrap();
++        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
++        let (dirty, restart) = (AtomicBool::new(false), AtomicBool::new(false));
++        handle_connection(stream, "123456", session, guard, paths_file, &dirty, &restart);
++        client.join().unwrap()
++    }
++
++    #[test]
++    fn http_pin_is_traded_for_a_cookie_and_cross_site_posts_are_refused() {
++        let dir = std::env::temp_dir().join(format!("txsx-web-test-{}", std::process::id()));
++        let _ = fs::create_dir_all(&dir);
++        let paths_file = dir.join("game_paths.txt");
++        let session = "0123456789abcdef0123456789abcdef";
++        let mut guard = PinGuard::default();
++
++        // QR link: the PIN is accepted once, set as a cookie, and dropped from the URL.
++        let r = roundtrip("GET /?pin=123456&msg=hi HTTP/1.1\r\nHost: {addr}\r\n\r\n", session, &mut guard, &paths_file);
++        assert!(r.starts_with("HTTP/1.1 303"), "{r}");
++        assert!(r.contains("\r\nLocation: /?msg=hi\r\n"), "{r}");
++        assert!(r.contains(&format!("Set-Cookie: txsx_session={session}; Path=/; HttpOnly; SameSite=Lax")), "{r}");
++
++        // With the cookie the dashboard loads, and its links carry no PIN.
++        let r = roundtrip(
++            &format!("GET / HTTP/1.1\r\nHost: {{addr}}\r\nCookie: other=1; txsx_session={session}\r\n\r\n"),
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
++        assert!(r.contains("Web Companion") && !r.contains("pin="), "{r}");
++
++        // Another site linking to the dashboard cannot put its own text in the notice banner.
++        let r = roundtrip(
++            &format!(
++                "GET /?msg=Download+the+fix+from+evil.example HTTP/1.1\r\nHost: {{addr}}\r\nSec-Fetch-Site: cross-site\r\nCookie: txsx_session={session}\r\n\r\n"
++            ),
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.starts_with("HTTP/1.1 200") && !r.contains("evil.example"), "{r}");
++        let r = roundtrip(
++            &format!(
++                "GET /?msg=Saved+3+folders HTTP/1.1\r\nHost: {{addr}}\r\nSec-Fetch-Site: same-origin\r\nCookie: txsx_session={session}\r\n\r\n"
++            ),
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.contains("Saved 3 folders"), "{r}");
++
++        // A stale cookie (from before a restart) gets 401 on the log poll and is not counted.
++        let r = roundtrip(
++            "GET /logs/tail HTTP/1.1\r\nHost: {addr}\r\nCookie: txsx_session=stale\r\n\r\n",
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.starts_with("HTTP/1.1 401"), "{r}");
++        assert_eq!(guard.failures, 0);
++
++        // A form posted from another site is refused even with a valid cookie, and writes nothing.
++        let body = "paths=%2Fevil";
++        let r = roundtrip(
++            &format!(
++                "POST /paths HTTP/1.1\r\nHost: {{addr}}\r\nOrigin: http://evil.example\r\nCookie: txsx_session={session}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
++                body.len()
++            ),
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.starts_with("HTTP/1.1 403"), "{r}");
++        assert!(!paths_file.exists());
++
++        // The same form from the dashboard itself goes through.
++        let r = roundtrip(
++            &format!(
++                "POST /paths HTTP/1.1\r\nHost: {{addr}}\r\nOrigin: http://{{addr}}\r\nCookie: txsx_session={session}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
++                body.len()
++            ),
++            session,
++            &mut guard,
++            &paths_file,
++        );
++        assert!(r.starts_with("HTTP/1.1 303"), "{r}");
++        assert!(r.contains("\r\nLocation: /?msg="), "{r}");
++        let _ = fs::remove_dir_all(&dir);
++    }
++
+     #[test]
+     fn generated_pin_is_six_digits() {
+         for _ in 0..32 {
+-- 
+2.48.1.windows.1
+
