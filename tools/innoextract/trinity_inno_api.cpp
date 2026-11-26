@@ -86,10 +86,17 @@ extern "C" __declspec(dllexport) int __cdecl trinity_inno_extract_utf8(
         extract_options opts;
         opts.quiet = true;
         opts.silent = true;
+        opts.warn_unused = false;
         opts.extract = true;
         opts.gog = true;
         opts.gog_galaxy = true;
         opts.extract_unknown = true;
+        opts.extract_temp = false;
+        opts.preserve_file_times = false;
+        opts.local_timestamps = false;
+        opts.codepage = 0;
+        opts.filenames.set_expand(true);
+        opts.filenames.set_lowercase(false);
         opts.collisions = OverwriteCollisions;
         opts.output_dir = out_dir;
 
