@@ -99,7 +99,13 @@ int main(int argc, char **argv)
             const char *failed_step = "runtime-sync";
             int synced = trinityxsx_sync_runtime(SEED_ROOT, STORAGE_ROOT, &failed_step);
             if (synced < 0) {
-                boot_log(failed_step, errno);
+                /* Under PS5 UID 1 sandbox, overwriting UID 0 files returns EPERM/EACCES;
+                 * pw_runner.bin repeats the sync immediately after Lapy elevates to UID 0. */
+                if (errno == EPERM || errno == EACCES) {
+                    boot_log("runtime-sync-deferred", 0);
+                } else {
+                    boot_log(failed_step, errno);
+                }
             } else if (synced > 0) {
                 boot_log("runtime-updated", 0);
             }

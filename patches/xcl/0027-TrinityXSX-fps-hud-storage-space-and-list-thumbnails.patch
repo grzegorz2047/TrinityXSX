@@ -20,7 +20,7 @@ index e800b18..d632077 100644
  use crate::{config::Config, launcher, library_i18n::Lang};
  
 -pub const TRINITYXSX_VERSION: &str = "v0.2.4";
-+pub const TRINITYXSX_VERSION: &str = "v0.2.5";
++pub const TRINITYXSX_VERSION: &str = "v0.2.6";
  
  const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
  const MAX_STORED_PATH_LEN: usize = 1024;

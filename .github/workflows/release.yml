@@ -315,10 +315,10 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **Upstream XCL rebase (+304 commits to \`b49be18368\`):** Offline whole compute pipeline reuse, direct-DXIL flat loads, compute-bind defer fixes, and updated D3D12.X / Wine compatibility.
-          - **Library cover thumbnails:** Cached \`116×72\` game cover art thumbnails directly on the library list (lazy-decoded for visible rows and shared with the preview card).
-          - **FPS HUD toggle & PS5 storage bar:** Switch \`FPS HUD Overlay\` (\`On / Off\`) in \`OPTIONS\` and Web Companion, plus live free-space readout for \`/mnt/ext1\`, \`/data\`, and USB drives.
-          - **Safe automatic runtime updates & 1-button Restart:** ProsperoStore / \`.ffpkg\` updates automatically refresh \`prefix/drive_c/XCL/\` without touching saves, profiles, or games; includes 1-button Restart in \`OPTIONS\`, Touchpad \`RESTART GAME\`, \`VKD3D_FEATURE_LEVEL\`, Clear Shader Cache, and Web Companion Live Logs.
+          - **Elevated UID 0 runtime auto-sync on PS5:** \`pw_runner.bin\` now refreshes \`prefix/drive_c/XCL/\` atomically right after Lapy elevation to \`UID 0\`, eliminating the PS5 sandbox \`EPERM\` error when upgrading over existing \`UID 0\` runtime files while preserving saves, profiles, and games.
+          - **\`vkd3d-proton\` + \`dxil-spirv\` crash fix (\`b540c8a2\`):** Updated \`vkd3d-proton\` (\`71cae091\`) and \`dxil-spirv\` (\`b540c8a2\`) to eliminate the \`CFGNode::find_common_dominator\` stack-overflow crash on complex Xbox Series compute shaders.
+          - **Expanded Mesa RADV shader cache:** Explicitly enables Mesa's on-disk shader cache and raises \`MESA_SHADER_CACHE_MAX_SIZE\` to \`4G\` so compiled RDNA2 pipelines are not evicted between launches.
+          - **Verified on real PS5 hardware:** Includes upstream XCL rebase (\`+304\` commits to \`b49be18368\`), cached library cover thumbnails, \`FPS HUD Overlay\` toggle, PS5 disk free-space bar, and 1-button Restart.
 
           ### Included CI-built assets
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
