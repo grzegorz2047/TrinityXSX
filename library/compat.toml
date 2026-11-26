@@ -1,0 +1,43 @@
+# TrinityXSX game compatibility database.
+#
+# One [[title]] per game. The library is built with this file: it shows the status and applies
+# [title.xcl] on top of the PS5 defaults when a game has no xcl.toml of its own yet.
+# docs/COMPATIBILITY.md is generated from it (python tools/compat.py --write).
+# New entries usually come from a "Game compatibility report" issue labelled compat-verified
+# (.github/workflows/compat-report.yml opens a PR); edit by hand when needed.
+#
+# Fields:
+#   title_id   8 hex digits from MicrosoftGame.config (TitleId), or "" when the package has none
+#   identity   Identity Name from MicrosoftGame.config
+#   name       display name
+#   versions   tested package versions
+#   status     playable | ingame | menus | boots | nothing
+#   release    TrinityXSX release it was tested on
+#   notes      one line, shown in the library and the table
+#   reports    GitHub issue numbers
+#   [title.xcl] xcl.toml keys applied on top of the PS5 defaults (library.rs default_config_for_title)
+
+[[title]]
+title_id = "639AA8DD"
+identity = "Microsoft.MinecraftBeta"
+name = "Minecraft Preview"
+versions = ["1.18.3064.0"]
+status = "playable"
+release = "v0.2.7"
+notes = "~60 FPS offline: DualSense (OreUI and gameplay), 3D worlds, persistent saves and WASAPI audio verified."
+reports = []
+
+[title.xcl]
+title_memory = "standard"
+pls_mb = 2048
+uma_mb = 2048
+
+[[title]]
+title_id = ""
+identity = "XCL.TestTitle"
+name = "XCL Test Title"
+versions = []
+status = "playable"
+release = "v0.2.7"
+notes = "Passes 51/51: full D3D12.X + vkd3d-proton + RADV verification suite, 60 FPS fullscreen."
+reports = []

@@ -1326,7 +1326,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
 
                     let cfg_label = if menu.preview_has_custom_cfg {
                         t("Config: Custom xcl.toml")
-                    } else if library::has_tested_preset(&game.identity) {
+                    } else if library::has_tested_preset(&game.title_id, &game.identity) {
                         t("Config: Tested PS5 preset")
                     } else {
                         t("Config: Auto PS5 defaults")

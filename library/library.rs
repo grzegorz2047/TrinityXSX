@@ -626,14 +626,107 @@ pub const NAMED_PRESETS: &[CompatPreset] = &[
     },
 ];
 
+/// The game compatibility database, `library/compat.toml`, built into the library. It gives each
+/// known title a status and the `xcl.toml` keys it needs on top of the PS5 defaults;
+/// `docs/COMPATIBILITY.md` is generated from the same file (`tools/compat.py`).
+pub mod compat {
+    use std::sync::OnceLock;
+
+    use serde::Deserialize;
+
+    use crate::config::Config;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Status {
+        Playable,
+        Ingame,
+        Menus,
+        Boots,
+        Nothing,
+    }
+
+    impl Status {
+        pub fn label(self) -> &'static str {
+            match self {
+                Status::Playable => "Playable",
+                Status::Ingame => "In-game (issues)",
+                Status::Menus => "Menus",
+                Status::Boots => "Boots / loading",
+                Status::Nothing => "Does not start",
+            }
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Entry {
+        pub title_id: String,
+        pub identity: String,
+        pub name: String,
+        pub versions: Vec<String>,
+        pub status: Status,
+        pub release: String,
+        pub notes: String,
+        pub reports: Vec<u32>,
+        /// `xcl.toml` keys applied on top of the PS5 defaults
+        #[serde(default)]
+        pub xcl: toml::Table,
+        /// "<name> — <status> (<release>)", made when the database is read
+        #[serde(skip)]
+        pub label: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Database {
+        title: Vec<Entry>,
+    }
+
+    pub(super) const SOURCE: &str = include_str!("compat.toml");
+
+    pub(super) fn parse(text: &str) -> Result<Vec<Entry>, String> {
+        let mut titles = toml::from_str::<Database>(text).map_err(|e| e.to_string())?.title;
+        for t in &mut titles {
+            t.label = format!("{} \u{2014} {} ({})", t.name, t.status.label(), t.release);
+        }
+        Ok(titles)
+    }
+
+    /// Every known title. The built-in file is checked by the tests; a broken one gives no entries
+    /// rather than a library that does not start.
+    pub fn all() -> &'static [Entry] {
+        static DB: OnceLock<Vec<Entry>> = OnceLock::new();
+        DB.get_or_init(|| parse(SOURCE).unwrap_or_default())
+    }
+
+    /// The entry for a game, matched by TitleId when the entry has one, else by Identity Name.
+    pub fn lookup(title_id: &str, identity: &str) -> Option<&'static Entry> {
+        all().iter().find(|e| {
+            (!e.title_id.is_empty() && e.title_id.eq_ignore_ascii_case(title_id))
+                || e.identity.eq_ignore_ascii_case(identity)
+        })
+    }
+
+    /// `config` with the entry's `xcl.toml` keys set.
+    pub fn apply(entry: &Entry, config: &Config) -> Result<Config, String> {
+        if entry.xcl.is_empty() {
+            return Ok(config.clone());
+        }
+        let mut table = toml::Table::try_from(config).map_err(|e| e.to_string())?;
+        for (key, value) in &entry.xcl {
+            if !table.contains_key(key) {
+                return Err(format!("{}: {key} is not an xcl.toml key", entry.name));
+            }
+            table.insert(key.clone(), value.clone());
+        }
+        table.try_into().map_err(|e: toml::de::Error| format!("{}: {e}", entry.name))
+    }
+}
+
+/// The library's label for a game the compatibility database knows ("Name — Status (release)").
 pub fn lookup_tested_preset_label(title_id: &str, identity: &str) -> Option<&'static str> {
-    if title_id.eq_ignore_ascii_case("639AA8DD") || identity.eq_ignore_ascii_case("Microsoft.MinecraftBeta") {
-        return Some("Minecraft Preview (Verified 60 FPS)");
-    }
-    if identity.eq_ignore_ascii_case("XCL.TestTitle") {
-        return Some("XCL Test Title (Verified 51/51)");
-    }
-    None
+    compat::lookup(title_id, identity).map(|e| e.label.as_str())
 }
 
 /// Recommended PS5 defaults (plus known tested title presets matched by TitleId or Identity).
@@ -655,10 +748,11 @@ pub fn default_config_for_title(title_id: &str, identity: &str) -> Config {
         window_pos: "0,0".into(),
         ..Config::default()
     };
-    if title_id.eq_ignore_ascii_case("639AA8DD") || identity.eq_ignore_ascii_case("Microsoft.MinecraftBeta") {
-        config.title_memory = "standard".into();
-        config.pls_mb = 2048;
-        config.uma_mb = 2048;
+    if let Some(entry) = compat::lookup(title_id, identity) {
+        match compat::apply(entry, &config) {
+            Ok(tested) => config = tested,
+            Err(e) => crate::xlog_warn!("compat: {e}"),
+        }
     }
     config
 }
@@ -716,8 +810,9 @@ pub fn apply_named_preset(game: &Game, current: &Config, preset_id: &str) -> Con
     cfg
 }
 
-pub fn has_tested_preset(identity: &str) -> bool {
-    lookup_tested_preset_label("", identity).is_some()
+/// Whether the compatibility database has `xcl.toml` settings for this game.
+pub fn has_tested_preset(title_id: &str, identity: &str) -> bool {
+    compat::lookup(title_id, identity).is_some_and(|e| !e.xcl.is_empty())
 }
 
 pub fn config_path_for_title(title: &str) -> PathBuf {
@@ -2082,5 +2177,84 @@ mod tests {
             assert!(s.total_bytes > 0);
             assert!(s.free_bytes <= s.total_bytes);
         }
+    }
+
+    #[test]
+    fn compat_database_is_valid_and_its_presets_are_real_xcl_toml_keys() {
+        let titles = compat::parse(compat::SOURCE).expect("library/compat.toml");
+        assert!(!titles.is_empty());
+        assert_eq!(compat::all().len(), titles.len());
+        let defaults = Config::default();
+        for t in &titles {
+            compat::apply(t, &defaults).unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                t.title_id.is_empty() || (t.title_id.len() == 8 && t.title_id.bytes().all(|b| b.is_ascii_hexdigit()))
+            );
+        }
+    }
+
+    #[test]
+    fn compat_tool_only_accepts_keys_that_xcl_toml_has() {
+        // tools/compat.py takes these keys from issue reports and drops values equal to the PS5
+        // default: each must be an xcl.toml key of that type, with that default
+        let defaults = toml::Table::try_from(default_config_for_title("", "")).unwrap();
+        let mut count = 0;
+        for line in include_str!("compat_keys.txt").lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(3, ' ');
+            let (key, kind, default) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+            let value =
+                defaults.get(key).unwrap_or_else(|| panic!("compat_keys.txt allows {key}, not an xcl.toml key"));
+            let ok = match kind {
+                "str" => value.is_str(),
+                "u32" | "u64" => value.is_integer(),
+                "bool" => value.is_bool(),
+                other => panic!("compat_keys.txt: unknown type {other}"),
+            };
+            assert!(ok, "compat_keys.txt: {key} is not {kind} in xcl.toml");
+            let listed: toml::Table = toml::from_str(&format!("v = {default}")).unwrap();
+            assert_eq!(&listed["v"], value, "compat_keys.txt: the PS5 default of {key}");
+            count += 1;
+        }
+        assert!(count >= 10, "{count} keys");
+        // the Rust types behind u32 / u64: a preset outside them would not load
+        let mut t = defaults.clone();
+        t.insert("window_width".into(), toml::Value::Integer(i64::from(u32::MAX) + 1));
+        assert!(toml::Value::Table(t).try_into::<Config>().is_err());
+    }
+
+    #[test]
+    fn compat_presets_reach_new_game_configs_like_before() {
+        // the Minecraft preset that used to be hard-coded
+        let mc = default_config_for_title("639aa8dd", "");
+        assert_eq!((mc.title_memory.as_str(), mc.pls_mb, mc.uma_mb), ("standard", 2048, 2048));
+        assert_eq!((mc.device_type.as_str(), mc.title_memory_mb, mc.direct_dxil.as_str()), ("lockhart", 6144, "all"));
+        assert_eq!(default_config("Microsoft.MinecraftBeta").pls_mb, 2048);
+        assert!(has_tested_preset("", "microsoft.minecraftbeta"));
+        assert!(lookup_tested_preset_label("639AA8DD", "").unwrap().starts_with("Minecraft Preview"));
+        // known, but with nothing to set
+        assert!(lookup_tested_preset_label("", "XCL.TestTitle").is_some());
+        assert!(!has_tested_preset("", "XCL.TestTitle"));
+        // unknown: the PS5 defaults only
+        let other = default_config_for_title("0BADF00D", "Publisher.Unknown");
+        assert_eq!(
+            (other.pls_mb, other.title_memory.as_str()),
+            (Config::default().pls_mb, Config::default().title_memory.as_str())
+        );
+        assert!(lookup_tested_preset_label("0BADF00D", "Publisher.Unknown").is_none());
+    }
+
+    #[test]
+    fn compat_rejects_presets_with_unknown_keys_or_wrong_types() {
+        let bad_key = "[[title]]\ntitle_id = \"\"\nidentity = \"A.B\"\nname = \"A\"\nversions = []\nstatus = \"menus\"\nrelease = \"v1.0.0\"\nnotes = \"\"\nreports = []\n[title.xcl]\nexe_typo = 1\n";
+        let t = compat::parse(bad_key).unwrap();
+        assert!(compat::apply(&t[0], &Config::default()).is_err());
+        let bad_type = bad_key.replace("exe_typo = 1", "pls_mb = \"lots\"");
+        let t = compat::parse(&bad_type).unwrap();
+        assert!(compat::apply(&t[0], &Config::default()).is_err());
+        assert!(compat::parse(&bad_key.replace("menus", "great")).is_err());
     }
 }

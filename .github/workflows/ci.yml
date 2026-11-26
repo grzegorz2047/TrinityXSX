@@ -20,6 +20,9 @@ on:
       - tools/build-innoextract.sh
       - tools/innoextract/**
       - tools/sync_upstream.py
+      - tools/compat.py
+      - tools/test_compat.py
+      - docs/COMPATIBILITY.md
       - .github/workflows/ci.yml
   pull_request:
     paths:
@@ -35,6 +38,9 @@ on:
       - tools/build-innoextract.sh
       - tools/innoextract/**
       - tools/sync_upstream.py
+      - tools/compat.py
+      - tools/test_compat.py
+      - docs/COMPATIBILITY.md
       - .github/workflows/ci.yml
   workflow_dispatch:
     inputs:
@@ -60,6 +66,11 @@ jobs:
 
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
+
+      - name: Compatibility database (library/compat.toml) and its generated table
+        run: |
+          python3 -m unittest tools.test_compat -v
+          python3 tools/compat.py --check
 
       - name: Verify sce_sys ProsperoStore metadata
         run: |

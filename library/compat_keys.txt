@@ -1,0 +1,21 @@
+# xcl.toml keys a compatibility entry may set in library/compat.toml ([title.xcl]): name, type
+# (str | bool | u32 | u64) and the PS5 default the library gives a game without a preset
+# (library.rs default_config_for_title). tools/compat.py takes only these keys from a report and
+# drops values equal to the default; the library's tests check names, types and defaults.
+device_type str "lockhart"
+console_type_raw u32 5
+title_memory_mb u64 6144
+title_memory str "auto"
+pls_mb u64 0
+uma_mb u64 0
+coherent_mb u64 1024
+raytracing str "off"
+direct_dxil str "all"
+vkd3d_feature_level str ""
+graphics str "d3d12"
+present str "auto"
+network bool false
+xbox_live_tokens bool false
+keyboard_mouse bool false
+window_width u32 1920
+window_height u32 1080
