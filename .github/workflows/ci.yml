@@ -216,9 +216,51 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  innoextract:
+    name: trinity_innoextract.dll (MSYS2 UCRT64)
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+
+      - name: Restore cached innoextract output
+        id: out
+        uses: actions/cache@v6
+        with:
+          path: out/innoextract
+          key: innoextract-out-v1-${{ hashFiles('pins.env', 'tools/build-innoextract.sh', 'tools/innoextract/**') }}
+
+      - name: Toolchain (MSYS2 UCRT64)
+        if: steps.out.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: >-
+            git
+            python
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-xz
+
+      - name: Build static trinity_innoextract.dll
+        if: steps.out.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash tools/build-innoextract.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: innoextract
+          path: out/innoextract
+          if-no-files-found: error
+
   package:
     name: PS5 package (prospero-win & xcl-library)
-    needs: [xcl, vkd3d-proton, standalone]
+    needs: [xcl, vkd3d-proton, innoextract, standalone]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -237,6 +279,11 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: xcl-release
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: innoextract
+          path: innoextract
 
       - uses: actions/download-artifact@v8
         with:
@@ -266,7 +313,7 @@ jobs:
   standalone-ffpkg:
     name: Standalone PPSA83601.ffpkg (optional / dispatch)
     if: github.event_name == 'workflow_dispatch' && inputs.build_ffpkg == true
-    needs: [xcl, vkd3d-proton, standalone]
+    needs: [xcl, vkd3d-proton, innoextract, standalone]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

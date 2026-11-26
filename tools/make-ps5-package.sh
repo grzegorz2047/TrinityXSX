@@ -35,6 +35,10 @@ cp "$root/vkd3d-proton/COPYING" "$dir/licenses/vkd3d-proton-COPYING.txt"
 cp "$root/vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT" "$dir/licenses/dxil-spirv-MIT.txt"
 cp "$root/tools/dxvk/LICENSE" "$dir/licenses/dxvk-zlib.txt"
 cp "$root/tools/dxc/x/LICENSE-LLVM.txt" "$root/tools/dxc/x/LICENSE-MS.txt" "$dir/licenses/"
+if [ -f "$root/innoextract/trinity_innoextract.dll" ]; then
+  cp "$root/innoextract/trinity_innoextract.dll" "$dir/"
+  [ -f "$root/innoextract/innoextract-zlib.txt" ] && cp "$root/innoextract/innoextract-zlib.txt" "$dir/licenses/"
+fi
 
 cat > "$out/profiles/xcl-testtitle.profile" <<'EOF'
 ; XCL (Xbox Series X|S compatibility layer) running its own test title.

@@ -220,6 +220,9 @@ def stage(
         xcl.mkdir(parents=True)
         for name in runtime_files:
             shutil.copy2(runtime / name, xcl / name)
+        inno_dll = runtime / "trinity_innoextract.dll"
+        if inno_dll.is_file():
+            shutil.copy2(inno_dll, xcl / "trinity_innoextract.dll")
         if library_exe is not None:
             (xcl / LIBRARY_EXE).write_bytes(library_code)
         hashes = {}

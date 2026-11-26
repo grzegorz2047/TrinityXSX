@@ -1,0 +1,168 @@
+From b5a04c8d1083eb8f33c6aa78bae81b4f31c683d1 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 11:16:42 +0100
+Subject: [PATCH] Support TrinityXSX PC/GOG dynamic game profile handoff
+
+---
+ native/wine64_main.c | 118 +++++++++++++++++++++++++++++++------------
+ 1 file changed, 85 insertions(+), 33 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 9a22090..e8746d5 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -752,12 +752,84 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+     }
+ }
+ 
+-/* Wine ends the process with exit() when its last program ends: go back to
+- * the launcher. */
++static void populate_catalog(void)
++{
++    catalog_count = 0;
++    for (uint32_t i = 0; i < library.count; i++) {
++        const PwWineLibraryEntry *entry = &library.entries[i];
++        if (entry->status != PW_OK) {
++            PS5LOG_LOG("PW_WINE64 profile refused file=%s status=%s", entry->file,
++                       pw_result_name(entry->status));
++            continue;
++        }
++        const PwGameProfile *game = &entry->profile;
++        if (game->display.width)
++            snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s  %ux%u",
++                     game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
++                     game->app.graphics == PW_APP_GRAPHICS_DXVK ? "dxvk" :
++                     game->app.graphics == PW_APP_GRAPHICS_ZINK ? "opengl" : "gdi",
++                     (unsigned)game->display.width, (unsigned)game->display.height);
++        else
++            snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s",
++                     game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
++                     game->app.graphics == PW_APP_GRAPHICS_DXVK ? "dxvk" :
++                     game->app.graphics == PW_APP_GRAPHICS_ZINK ? "opengl" : "gdi");
++        catalog[catalog_count] = (PwWineApp){ game->app.id, game->app.name,
++                                              catalog_detail[catalog_count], game->app.executable };
++        catalog_count++;
++    }
++}
++
++static const PwWineApp *find_catalog_app(const char *id)
++{
++    if (!id || !id[0]) return NULL;
++    for (uint32_t i = 0; i < catalog_count; i++) {
++        if (catalog[i].id && strcmp(catalog[i].id, id) == 0) return &catalog[i];
++    }
++    return NULL;
++}
++
++/* Wine ends the process with exit() when its last program ends: check for a
++ * TrinityXSX PC/GOG game handoff first, or return to TrinityXSX library when a
++ * launched PC game exits cleanly. */
+ static void on_exit_report(void)
+ {
+     trinityxsx_startup("wine-exit", 0, (int)sink_calls);
+     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
++    if (library_root && launch.app && launch.app->id &&
++        strcmp(launch.app->id, "trinityxsx-library") == 0) {
++        char flag_path[256];
++        snprintf(flag_path, sizeof(flag_path), "%s/pc_launch.flag", library_root);
++        int ffd = open(flag_path, O_RDONLY | O_NOFOLLOW);
++        if (ffd >= 0) {
++            char target_id[64];
++            ssize_t got = read(ffd, target_id, sizeof(target_id) - 1);
++            close(ffd);
++            (void)unlink(flag_path);
++            if (got > 0) {
++                target_id[got] = '\0';
++                while (got > 0 && (target_id[got - 1] == '\n' || target_id[got - 1] == '\r' || target_id[got - 1] == ' ')) {
++                    target_id[--got] = '\0';
++                }
++                if (target_id[0] && pw_wine_library_load(&library, library_root) == PW_OK) {
++                    populate_catalog();
++                    const PwWineApp *pc_app = find_catalog_app(target_id);
++                    if (pc_app) {
++                        PS5LOG_LOG("PW_WINE64 pc_handoff target=%s", pc_app->id);
++                        restart_title(pc_app, launch.cycle + 1u, "trinityxsx-pc-launch");
++                    } else {
++                        PS5LOG_LOG("PW_WINE64 pc_handoff missing target=%s", target_id);
++                    }
++                }
++            }
++        }
++    } else if (launch.app && launch.app->id &&
++               strcmp(launch.app->id, "trinityxsx-library") != 0) {
++        const PwWineApp *lib_app = find_catalog_app("trinityxsx-library");
++        if (lib_app) {
++            restart_title(lib_app, launch.cycle + 1u, "pc-game-exit-to-library");
++        }
++    }
+     restart_title(NULL, launch.cycle + 1u, "wine-exit");
+     pw_diagnostics_close("wine64-exit");
+ }
+@@ -949,30 +1021,7 @@ static int open_library(void)
+     if (status != 0) return -1;
+     trinityxsx_sync_runtime_elevated(library_root);
+     status = pw_wine_library_load(&library, library_root);
+-    catalog_count = 0;
+-    for (uint32_t i = 0; i < library.count; i++) {
+-        const PwWineLibraryEntry *entry = &library.entries[i];
+-        if (entry->status != PW_OK) {
+-            PS5LOG_LOG("PW_WINE64 profile refused file=%s status=%s", entry->file,
+-                       pw_result_name(entry->status));
+-            continue;
+-        }
+-        const PwGameProfile *game = &entry->profile;
+-        if (game->display.width)
+-            snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s  %ux%u",
+-                     game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
+-                     game->app.graphics == PW_APP_GRAPHICS_DXVK ? "dxvk" :
+-                     game->app.graphics == PW_APP_GRAPHICS_ZINK ? "opengl" : "gdi",
+-                     (unsigned)game->display.width, (unsigned)game->display.height);
+-        else
+-            snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s",
+-                     game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
+-                     game->app.graphics == PW_APP_GRAPHICS_DXVK ? "dxvk" :
+-                     game->app.graphics == PW_APP_GRAPHICS_ZINK ? "opengl" : "gdi");
+-        catalog[catalog_count] = (PwWineApp){ game->app.id, game->app.name,
+-                                              catalog_detail[catalog_count], game->app.executable };
+-        catalog_count++;
+-    }
++    populate_catalog();
+     PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
+                    "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
+                (unsigned)library.count, (unsigned)catalog_count, library_root);
+@@ -1753,12 +1802,14 @@ int main(int argc, char **argv)
+                     PS5LOG_LOG("PW_WINE64 menu action=dump-diag");
+                     menu_drawn_open = 0; /* redraw menu with notice banner */
+                 } else if (view.action == PW_GAME_MENU_ACTION_RESTART_GAME) {
+-                    char flag_path[256];
+-                    snprintf(flag_path, sizeof(flag_path), "%s/restart_game.flag", PW_WINE64_ROOT_DATA);
+-                    int ffd = open(flag_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+-                    if (ffd >= 0) {
+-                        (void)write(ffd, "1\n", 2);
+-                        close(ffd);
++                    if (!launch.app || !launch.app->id || strcmp(launch.app->id, "trinityxsx-library") == 0) {
++                        char flag_path[256];
++                        snprintf(flag_path, sizeof(flag_path), "%s/restart_game.flag", PW_WINE64_ROOT_DATA);
++                        int ffd = open(flag_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++                        if (ffd >= 0) {
++                            (void)write(ffd, "1\n", 2);
++                            close(ffd);
++                        }
+                     }
+                     PS5LOG_LOG("PW_WINE64 menu action=restart-game");
+                     if (rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
+@@ -1767,9 +1818,10 @@ int main(int argc, char **argv)
+                 } else if (view.action == PW_GAME_MENU_ACTION_KEYBOARD && osk_status == PW_OK) {
+                     pw_osk_open(&osk);
+                 } else if (view.action == PW_GAME_MENU_ACTION_LIBRARY) {
++                    const PwWineApp *lib_app = find_catalog_app("trinityxsx-library");
+                     PS5LOG_LOG("PW_WINE64 menu action=library");
+                     if (rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
+-                    restart_title(launch.app, launch.cycle + 1u, "menu-library");
++                    restart_title(lib_app ? lib_app : launch.app, launch.cycle + 1u, "menu-library");
+                     break;
+                 } else if (view.action == PW_GAME_MENU_ACTION_EXIT) {
+                     PS5LOG_LOG("PW_WINE64 menu action=exit");
+-- 
+2.48.1.windows.1
+

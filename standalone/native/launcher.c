@@ -58,18 +58,21 @@ static const char *const targets[] = { "/app0/runtime/pw_runner.bin", "exit" };
 
 int main(int argc, char **argv)
 {
-    char profile[] = "profile=trinityxsx-library";
-    char cycle[] = "cycle=1";
-    char *arguments[] = { profile, cycle, NULL };
+    char default_profile[] = "profile=trinityxsx-library";
+    char default_cycle[] = "cycle=1";
+    char *arguments[] = { default_profile, default_cycle, NULL };
     const char *target = targets[0];
     char *const *target_arguments = arguments;
 
-    for (int i = 0; i < argc; ++i) {
-        if (argv[i] && strcmp(argv[i], "launcher=1") == 0) {
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i]) continue;
+        if (strcmp(argv[i], "launcher=1") == 0) {
 #ifdef TRINITYXSX_WITH_SEED
             if (unlink(STORAGE_ROOT RESTART_FLAG) == 0) {
                 /* TrinityXSX requested a clean restart (e.g. to apply Frame Generation). */
                 boot_log("restart-requested", 0);
+                arguments[0] = default_profile;
+                arguments[1] = default_cycle;
                 break;
             }
 #endif
@@ -77,6 +80,11 @@ int main(int argc, char **argv)
             target = targets[1];
             target_arguments = NULL;
             break;
+        }
+        if (strncmp(argv[i], "profile=", 8) == 0 && argv[i][8] != '\0') {
+            arguments[0] = argv[i];
+        } else if (strncmp(argv[i], "cycle=", 6) == 0 && argv[i][6] != '\0') {
+            arguments[1] = argv[i];
         }
     }
 

@@ -179,9 +179,51 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  innoextract:
+    name: Build trinity_innoextract.dll (MSYS2 UCRT64)
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+
+      - name: Restore cached innoextract output
+        id: out
+        uses: actions/cache@v6
+        with:
+          path: out/innoextract
+          key: innoextract-out-v1-${{ hashFiles('pins.env', 'tools/build-innoextract.sh', 'tools/innoextract/**') }}
+
+      - name: Toolchain (MSYS2 UCRT64)
+        if: steps.out.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: >-
+            git
+            python
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-xz
+
+      - name: Build static trinity_innoextract.dll
+        if: steps.out.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash tools/build-innoextract.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: innoextract
+          path: out/innoextract
+          if-no-files-found: error
+
   standalone-ffpkg:
     name: Build standalone PPSA83601.ffpkg
-    needs: [xcl, vkd3d-proton, standalone]
+    needs: [xcl, vkd3d-proton, innoextract, standalone]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -223,6 +265,11 @@ jobs:
         with:
           name: vkd3d-proton
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: innoextract
+          path: innoextract
+
       - name: Assemble XCL runtime & build PPSA83601.ffpkg
         run: |
           set -euo pipefail
@@ -260,7 +307,7 @@ jobs:
 
   publish:
     name: Assemble & publish GitHub Release
-    needs: [xcl, vkd3d-proton, standalone, standalone-ffpkg]
+    needs: [xcl, vkd3d-proton, innoextract, standalone, standalone-ffpkg]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
@@ -285,6 +332,11 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: vkd3d-proton
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: innoextract
+          path: innoextract
 
       - uses: actions/download-artifact@v8
         with:
@@ -315,10 +367,10 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **Elevated UID 0 runtime auto-sync on PS5:** \`pw_runner.bin\` now refreshes \`prefix/drive_c/XCL/\` atomically right after Lapy elevation to \`UID 0\`, eliminating the PS5 sandbox \`EPERM\` error when upgrading over existing \`UID 0\` runtime files while preserving saves, profiles, and games.
-          - **\`vkd3d-proton\` + \`dxil-spirv\` crash fix (\`b540c8a2\`):** Updated \`vkd3d-proton\` (\`71cae091\`) and \`dxil-spirv\` (\`b540c8a2\`) to eliminate the \`CFGNode::find_common_dominator\` stack-overflow crash on complex Xbox Series compute shaders.
-          - **Expanded Mesa RADV shader cache:** Explicitly enables Mesa's on-disk shader cache and raises \`MESA_SHADER_CACHE_MAX_SIZE\` to \`4G\` so compiled RDNA2 pipelines are not evicted between launches.
-          - **Verified on real PS5 hardware:** Includes upstream XCL rebase (\`+304\` commits to \`b49be18368\`), cached library cover thumbnails, \`FPS HUD Overlay\` toggle, PS5 disk free-space bar, and 1-button Restart.
+          - **On-Console GOG Offline Installer Importer (100% Open Source):** Drop DRM-free GOG offline installers (\`setup_*.exe\` + \`.bin\` slices) into \`/mnt/ext1/xboxseries/installers/\` and install them right from \`OPTIONS -> Install GOG offline games\` with a live progress bar via bundled \`trinity_innoextract.dll\` (zlib), automatic \`goggame-*.info\` parsing, \`Cover.png\` extraction from \`.ico\`, and \`MicrosoftGame.config\` generation.
+          - **Seamless PC/GOG Game Handoff (\`prospero-win\`):** Automatically detects \`[XSX]\` vs \`[PC64]\`/\`[PC32]\` executables — Xbox Series titles run in-process through XCL, while standard 64-bit & 32-bit PC/GOG games hand off directly to \`pw_runner.bin\` (\`DXVK\` / \`vkd3d-proton\` / \`Zink\` + WoW64) with Touchpad Return-to-Library support and zero XCL UMA overhead.
+          - **Flicker-free double-buffered Library UI:** Offscreen GDI memory DC + atomic \`BitBlt\` + \`WM_ERASEBKGND\` suppression eliminates list-scroll flicker on PS5 VideoOut.
+          - **Stability base:** Elevated \`UID 0\` runtime auto-sync, \`vkd3d-proton 71cae091\` + \`dxil-spirv b540c8a2\` crash fix, and \`MESA_SHADER_CACHE_MAX_SIZE=4G\`.
 
           ### Included CI-built assets
           - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
