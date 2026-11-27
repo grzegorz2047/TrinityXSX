@@ -1,0 +1,135 @@
+From adeba7164bc0169467b260c43b4a6589f1247610 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 22:48:35 +0100
+Subject: [PATCH] Add Wine-PS5 patch 0991 to reserve upper 2 GiB LAA address
+ space
+
+Adds wine/patches/0991-ntdll-ps5-reserve-laa-upper-2gib.patch so 32-bit
+LARGE_ADDRESS_AWARE titles on PS5 get the full 4 GiB VA space backed by
+direct memory instead of exhausting the low 2 GiB and hitting
+MapViewOfFile ERROR_NOT_ENOUGH_MEMORY.
+---
+ ...991-ntdll-ps5-reserve-laa-upper-2gib.patch | 111 ++++++++++++++++++
+ 1 file changed, 111 insertions(+)
+ create mode 100644 wine/patches/0991-ntdll-ps5-reserve-laa-upper-2gib.patch
+
+diff --git a/wine/patches/0991-ntdll-ps5-reserve-laa-upper-2gib.patch b/wine/patches/0991-ntdll-ps5-reserve-laa-upper-2gib.patch
+new file mode 100644
+index 0000000..54138a3
+--- /dev/null
++++ b/wine/patches/0991-ntdll-ps5-reserve-laa-upper-2gib.patch
+@@ -0,0 +1,111 @@
++From a93ae336ee89b2b2a26674ed8d3e65ff6e4eab92 Mon Sep 17 00:00:00 2001
++From: TrinityXSX <trinityxsx@users.noreply.github.com>
++Date: Fri, 27 Nov 2026 22:48:16 +0100
++Subject: [PATCH] ntdll: Reserve upper 2 GiB LAA address space on PS5.
++
++mmap_init() with 0570+0895 reserves 0x00010000-0x7fff0000 (low 2 GiB),
++while virtual_set_large_address_space() only reserves 0xfff00000-0xffff0000
++(1 MiB), leaving 0x80000000-0xfff00000 (2,047 MiB) unreserved. On PS5,
++32-bit LARGE_ADDRESS_AWARE games (such as UE3 + DXVK D3D9 titles) pack
++into the low 2 GiB until it fragments and then fall back to map_free_area(),
++where individual fixed reservations compete with host mappings and the
++64-region pw_wine_dmem limit, causing MapViewOfFile ERROR_NOT_ENOUGH_MEMORY.
++
++Reserve 0x80000000-0xfff00000 up front for LAA WoW64 processes (with a
++16 MiB halving floor so any pre-existing host mapping cannot fragment the
++dmem region table), log the granted MiB/region count once at startup, and
++log the first 8 map_view() OOM ranges if exhaustion still occurs.
++---
++ dlls/ntdll/unix/virtual.c | 59 +++++++++++++++++++++++++++++++++++++++
++ 1 file changed, 59 insertions(+)
++
++diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
++index 1608c38..f9f16f1 100644
++--- a/dlls/ntdll/unix/virtual.c
+++++ b/dlls/ntdll/unix/virtual.c
++@@ -2798,7 +2798,16 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
++         if (start > address_space_start || end < host_addr_space_limit || top_down)
++         {
++             if (!(ptr = map_free_area( start, end, host_size, top_down, unix_prot, align_mask )))
+++            {
+++#ifdef __PROSPERO__
+++                static unsigned int oom_logged;
+++                if (oom_logged++ < 8)
+++                    ERR( "map_view OOM: start=%p end=%p size=%#lx top_down=%d unix_prot=%#x wow_limit=%#lx\n",
+++                         start, end, (unsigned long)host_size, top_down, unix_prot,
+++                         (unsigned long)user_space_wow_limit );
+++#endif
++                 return STATUS_NO_MEMORY;
+++            }
++             TRACE( "got mem with map_free_area %p-%p\n", ptr, (char *)ptr + size );
++             goto done;
++         }
++@@ -5836,6 +5845,30 @@ static void virtual_release_address_space(void)
++  *
++  * Enable use of a large address space when allowed by the application.
++  */
+++#ifdef __PROSPERO__
+++/* Reserve the upper 2 GiB (0x80000000-0xfff00000) for LAA 32-bit processes
+++ * with a 16 MiB halving floor so any pre-existing host mapping cannot split
+++ * the range into dozens of tiny pw_wine_dmem regions (capped at 64). */
+++static void ps5_reserve_laa_area( void *addr, void *end )
+++{
+++    static const size_t min_chunk = 16u << 20;
+++    size_t size = (char *)end - (char *)addr;
+++
+++    if (!size) return;
+++    if (anon_mmap_tryfixed( addr, size, PROT_NONE, MAP_NORESERVE ) != MAP_FAILED)
+++    {
+++        mmap_add_reserved_area( addr, size );
+++        return;
+++    }
+++    size = (size / 2) & ~granularity_mask;
+++    if (size >= min_chunk)
+++    {
+++        ps5_reserve_laa_area( addr, (char *)addr + size );
+++        ps5_reserve_laa_area( (char *)addr + size, end );
+++    }
+++}
+++#endif
+++
++ void virtual_set_large_address_space(void)
++ {
++     if (is_win64)
++@@ -5852,8 +5885,34 @@ void virtual_set_large_address_space(void)
++         else if (main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE)
++         {
++             user_space_wow_limit = limit_4g - 1;
+++#ifdef __PROSPERO__
+++            /* Reserve the upper 2 GiB into reserved_areas + pw_wine_dmem up
+++             * front, just like 0895 does for 0x68000000-0x7f000000, so LAA
+++             * 32-bit games get the full 4 GiB VA space backed by direct
+++             * memory instead of exhausting the low 2 GiB and falling back to
+++             * map_free_area() / single-view dmem regions. */
+++            ps5_reserve_laa_area( (void *)0x80000000, (void *)0xfff00000 );
+++#endif
++             /* reserve space for top-down allocations; some apps break if the entire high 2G is available */
++             reserve_area( (void *)0xfff00000, (void *)0xffff0000 );
+++#ifdef __PROSPERO__
+++            {
+++                struct reserved_area *area;
+++                size_t upper_bytes = 0;
+++                unsigned int upper_regions = 0;
+++
+++                LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
+++                {
+++                    if (area->base >= (void *)0x80000000 && area->base < (void *)0xffff0000)
+++                    {
+++                        upper_bytes += area->size;
+++                        upper_regions++;
+++                    }
+++                }
+++                fprintf( stderr, "wine-ps5: LAA upper 2 GiB reserved: %zu MiB in %u region(s)\n",
+++                         upper_bytes >> 20, upper_regions );
+++            }
+++#endif
++         }
++         else user_space_wow_limit = limit_2g - 1;
++     }
++-- 
++2.43.0
++
+-- 
+2.43.0
+

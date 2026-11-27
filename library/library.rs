@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{config::Config, launcher, library_gog::PcInputMode, library_i18n::Lang};
 
-pub const TRINITYXSX_VERSION: &str = "v0.2.16";
+pub const TRINITYXSX_VERSION: &str = "v0.2.17";
 
 const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
 const MAX_STORED_PATH_LEN: usize = 1024;
