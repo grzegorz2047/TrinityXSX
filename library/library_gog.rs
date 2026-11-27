@@ -585,7 +585,11 @@ pub fn find_pc_executables(dir: &Path) -> Vec<String> {
             }
             let name = entry.file_name().to_string_lossy().to_string();
             let low = name.to_ascii_lowercase();
-            if low.contains("unins") || low.contains("setup") || low.contains("redist") || low.contains("crashhandler")
+            if low.contains("unins")
+                || low.starts_with("setup_")
+                || low.contains("dxsetup")
+                || low.contains("redist")
+                || low.contains("crashhandler")
             {
                 continue;
             }
@@ -1435,6 +1439,21 @@ mod tests {
         let fin = finalize_gog_game(&tmp, "Classic Game").unwrap();
         assert_eq!(fin.executable_rel, "app\\GameMain.exe");
         assert!(tmp.join("MicrosoftGame.config").is_file());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_pc_executables_keeps_config_setup_tools_as_secondary_and_excludes_installers() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-setup-exes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("MainGame.exe"), vec![b'M', b'Z', 0x90, 0x00, 1, 2, 3, 4]).unwrap();
+        fs::write(tmp.join("Game_Setup_DX8.exe"), vec![b'M', b'Z', 0x90, 0x00, 1, 2]).unwrap();
+        fs::write(tmp.join("unins000.exe"), b"MZ\x90\x00").unwrap();
+        fs::write(tmp.join("dxsetup.exe"), b"MZ\x90\x00").unwrap();
+        fs::write(tmp.join("setup_offline_installer.exe"), b"MZ\x90\x00").unwrap();
+        let exes = find_pc_executables(&tmp);
+        assert_eq!(exes, vec!["MainGame.exe".to_owned(), "Game_Setup_DX8.exe".to_owned()]);
         let _ = fs::remove_dir_all(&tmp);
     }
 
