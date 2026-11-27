@@ -75,6 +75,7 @@ struct InstallJob {
     done: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
     started: Instant,
+    last_paint: Instant,
     result: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
@@ -778,7 +779,8 @@ impl Menu {
         });
 
         self.status = format!("{} {}...", tr(lang, "Installing"), game_name);
-        self.install_job = Some(InstallJob { game_name, done, total, started: Instant::now(), result });
+        let now = Instant::now();
+        self.install_job = Some(InstallJob { game_name, done, total, started: now, last_paint: now, result });
     }
 
     fn poll_install_job(&mut self) -> bool {
@@ -801,7 +803,15 @@ impl Menu {
             }
             return true;
         }
-        true // repaint live progress bar while running
+        // Throttle live progress repaints to ~4 Hz while extracting so software 1080p UI
+        // rendering doesn't compete with parallel zlib decompression threads for CPU.
+        if let Some(job) = &mut self.install_job {
+            if job.last_paint.elapsed() >= Duration::from_millis(250) {
+                job.last_paint = Instant::now();
+                return true;
+            }
+        }
+        false
     }
 
     fn input_installers(&mut self, buttons: u16) -> bool {
