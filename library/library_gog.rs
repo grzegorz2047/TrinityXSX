@@ -271,6 +271,280 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
     Some((is_64bit, imports))
 }
 
+/// Read exported symbol names from a PE32/PE32+ file using targeted seeks (no full-file read).
+fn read_pe_export_names(pe_path: &Path) -> Option<Vec<String>> {
+    let mut f = File::open(pe_path).ok()?;
+    let mut header = vec![0u8; 64 * 1024];
+    let n = f.read(&mut header).unwrap_or(0);
+    header.truncate(n);
+    if header.len() < 0x100 || &header[0..2] != b"MZ" {
+        return None;
+    }
+    let pe_off = read_u32_le(&header, 0x3C)? as usize;
+    if header.get(pe_off..pe_off + 4) != Some(b"PE\0\0") {
+        return None;
+    }
+    let num_sections = read_u16_le(&header, pe_off + 6).unwrap_or(0) as usize;
+    let opt_size = read_u16_le(&header, pe_off + 20).unwrap_or(0) as usize;
+    let opt_off = pe_off + 24;
+    let magic = read_u16_le(&header, opt_off).unwrap_or(0);
+    let data_dir_off = match magic {
+        0x20B => opt_off + 112,
+        0x10B => opt_off + 96,
+        _ => return None,
+    };
+    let exp_rva = read_u32_le(&header, data_dir_off).unwrap_or(0);
+    if exp_rva == 0 {
+        return Some(Vec::new());
+    }
+    let sec_off = opt_off + opt_size;
+    let mut sections = Vec::with_capacity(num_sections.min(64));
+    for i in 0..num_sections.min(64) {
+        let s = sec_off + i * 40;
+        let Some(va) = read_u32_le(&header, s + 12) else { break };
+        let Some(vsize) = read_u32_le(&header, s + 8) else { break };
+        let Some(raw_size) = read_u32_le(&header, s + 16) else { break };
+        let Some(raw_ptr) = read_u32_le(&header, s + 20) else { break };
+        sections.push((va, vsize.max(raw_size), raw_ptr, raw_size));
+    }
+    let rva_to_off = |rva: u32| -> Option<usize> {
+        for &(va, span, raw_ptr, raw_size) in &sections {
+            if rva >= va && rva < va.saturating_add(span) {
+                let delta = rva - va;
+                if delta < raw_size {
+                    return Some((raw_ptr + delta) as usize);
+                }
+            }
+        }
+        None
+    };
+
+    let exp_off = rva_to_off(exp_rva)?;
+    let mut dir_buf = [0u8; 40];
+    f.seek(SeekFrom::Start(exp_off as u64)).ok()?;
+    f.read_exact(&mut dir_buf).ok()?;
+    let num_names = read_u32_le(&dir_buf, 24).unwrap_or(0).min(256) as usize;
+    let names_rva = read_u32_le(&dir_buf, 32).unwrap_or(0);
+    if num_names == 0 || names_rva == 0 {
+        return Some(Vec::new());
+    }
+    let names_off = rva_to_off(names_rva)?;
+    let mut rvas_buf = vec![0u8; num_names * 4];
+    f.seek(SeekFrom::Start(names_off as u64)).ok()?;
+    f.read_exact(&mut rvas_buf).ok()?;
+
+    let mut out = Vec::with_capacity(num_names);
+    let mut name_buf = [0u8; 128];
+    for i in 0..num_names {
+        let Some(nrva) = read_u32_le(&rvas_buf, i * 4) else { break };
+        if let Some(noff) = rva_to_off(nrva) {
+            if f.seek(SeekFrom::Start(noff as u64)).is_ok() {
+                let rn = f.read(&mut name_buf).unwrap_or(0);
+                let slice = &name_buf[..rn];
+                let end = slice.iter().position(|&b| b == 0).unwrap_or(rn);
+                if end > 0 {
+                    if let Ok(s) = std::str::from_utf8(&slice[..end]) {
+                        out.push(s.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Build a minimal valid PE32 DLL whose export table forwards all standard DirectDraw symbols
+/// (`DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerate*`, etc.) to `ddraw.dll`.
+/// Used to neutrally bypass Win10/11-only `DDrawCompat` shims (e.g. GOG Win11 `xdd.dll`) under
+/// Wine without modifying the game executable.
+pub fn build_ddraw_forwarder_pe32(dll_name: &str) -> Vec<u8> {
+    let mut exports: Vec<&str> = vec![
+        "AcquireDDThreadLock",
+        "CompleteCreateSysmemSurface",
+        "D3DParseUnknownCommand",
+        "DDGetAttachedSurfaceLcl",
+        "DDInternalLock",
+        "DDInternalUnlock",
+        "DSoundHelp",
+        "DirectDrawCreate",
+        "DirectDrawCreateClipper",
+        "DirectDrawCreateEx",
+        "DirectDrawEnumerateA",
+        "DirectDrawEnumerateExA",
+        "DirectDrawEnumerateExW",
+        "DirectDrawEnumerateW",
+        "DllCanUnloadNow",
+        "DllGetClassObject",
+        "GetDDSurfaceLocal",
+        "GetOLEThunkData",
+        "GetSurfaceFromDC",
+        "RegisterSpecialCase",
+        "ReleaseDDThreadLock",
+        "SetAppCompatData",
+    ];
+    exports.sort_unstable();
+    let count = exports.len();
+
+    // Lay out `.edata` at RVA 0x2000:
+    //   0x00..0x28: IMAGE_EXPORT_DIRECTORY (40 bytes)
+    //   eat_off:    AddressOfFunctions (count * 4)
+    //   ent_off:    AddressOfNames     (count * 4)
+    //   eot_off:    AddressOfNameOrdinals (count * 2)
+    //   strings:    dll_name\0, export names\0, "ddraw.<name>\0" forwarder targets
+    const EDATA_RVA: u32 = 0x2000;
+    let eat_off = 40usize;
+    let ent_off = eat_off + count * 4;
+    let eot_off = ent_off + count * 4;
+    let str_start = (eot_off + count * 2 + 3) & !3;
+
+    let mut edata = vec![0u8; str_start];
+    let dll_name_rva = EDATA_RVA + edata.len() as u32;
+    edata.extend_from_slice(dll_name.as_bytes());
+    edata.push(0);
+
+    let mut name_rvas = Vec::with_capacity(count);
+    for name in &exports {
+        name_rvas.push(EDATA_RVA + edata.len() as u32);
+        edata.extend_from_slice(name.as_bytes());
+        edata.push(0);
+    }
+
+    let mut fwd_rvas = Vec::with_capacity(count);
+    for name in &exports {
+        fwd_rvas.push(EDATA_RVA + edata.len() as u32);
+        edata.extend_from_slice(b"ddraw.");
+        edata.extend_from_slice(name.as_bytes());
+        edata.push(0);
+    }
+
+    let edata_vsize = edata.len() as u32;
+    // Populate IMAGE_EXPORT_DIRECTORY
+    edata[12..16].copy_from_slice(&dll_name_rva.to_le_bytes()); // Name
+    edata[16..20].copy_from_slice(&1u32.to_le_bytes()); // Base = 1
+    edata[20..24].copy_from_slice(&(count as u32).to_le_bytes()); // NumberOfFunctions
+    edata[24..28].copy_from_slice(&(count as u32).to_le_bytes()); // NumberOfNames
+    edata[28..32].copy_from_slice(&(EDATA_RVA + eat_off as u32).to_le_bytes());
+    edata[32..36].copy_from_slice(&(EDATA_RVA + ent_off as u32).to_le_bytes());
+    edata[36..40].copy_from_slice(&(EDATA_RVA + eot_off as u32).to_le_bytes());
+    for i in 0..count {
+        edata[eat_off + i * 4..eat_off + i * 4 + 4].copy_from_slice(&fwd_rvas[i].to_le_bytes());
+        edata[ent_off + i * 4..ent_off + i * 4 + 4].copy_from_slice(&name_rvas[i].to_le_bytes());
+        edata[eot_off + i * 2..eot_off + i * 2 + 2].copy_from_slice(&(i as u16).to_le_bytes());
+    }
+
+    let edata_raw_size = (edata.len() + 0x1FF) & !0x1FF;
+    let edata_vspan = (edata.len() + 0xFFF) & !0xFFF;
+    let size_of_image = 0x2000u32 + edata_vspan as u32;
+
+    let mut pe = vec![0u8; 0x400 + edata_raw_size];
+    // DOS header
+    pe[0..2].copy_from_slice(b"MZ");
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+
+    // PE signature + COFF header (0x80..0x98)
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+    pe[0x86..0x88].copy_from_slice(&2u16.to_le_bytes()); // 2 sections (.text, .edata)
+    pe[0x94..0x96].copy_from_slice(&0x00E0u16.to_le_bytes()); // SizeOfOptionalHeader
+    pe[0x96..0x98].copy_from_slice(&0x2102u16.to_le_bytes()); // EXECUTABLE | 32BIT | DLL
+
+    // PE32 Optional Header (0x98..0x178)
+    pe[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32 magic
+    pe[0x9A] = 14;
+    pe[0x9C..0xA0].copy_from_slice(&0x0200u32.to_le_bytes()); // SizeOfCode
+    pe[0xA0..0xA4].copy_from_slice(&(edata_raw_size as u32).to_le_bytes()); // SizeOfInitializedData
+    pe[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes()); // AddressOfEntryPoint
+    pe[0xAC..0xB0].copy_from_slice(&0x1000u32.to_le_bytes()); // BaseOfCode
+    pe[0xB0..0xB4].copy_from_slice(&EDATA_RVA.to_le_bytes()); // BaseOfData
+    pe[0xB4..0xB8].copy_from_slice(&0x1000_0000u32.to_le_bytes()); // ImageBase
+    pe[0xB8..0xBC].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+    pe[0xBC..0xC0].copy_from_slice(&0x0200u32.to_le_bytes()); // FileAlignment
+    pe[0xC0..0xC2].copy_from_slice(&5u16.to_le_bytes()); // MajorOperatingSystemVersion
+    pe[0xC2..0xC4].copy_from_slice(&1u16.to_le_bytes()); // MinorOperatingSystemVersion
+    pe[0xC4..0xC6].copy_from_slice(&1u16.to_le_bytes()); // MajorImageVersion
+    pe[0xC8..0xCA].copy_from_slice(&5u16.to_le_bytes()); // MajorSubsystemVersion
+    pe[0xCA..0xCC].copy_from_slice(&1u16.to_le_bytes()); // MinorSubsystemVersion
+    pe[0xD0..0xD4].copy_from_slice(&size_of_image.to_le_bytes()); // SizeOfImage
+    pe[0xD4..0xD8].copy_from_slice(&0x0200u32.to_le_bytes()); // SizeOfHeaders
+    pe[0xDC..0xDE].copy_from_slice(&2u16.to_le_bytes()); // Subsystem = WINDOWS_GUI
+    pe[0xDE..0xE0].copy_from_slice(&0x0100u16.to_le_bytes()); // DllCharacteristics = NX_COMPAT
+    pe[0xE0..0xE4].copy_from_slice(&0x0010_0000u32.to_le_bytes()); // SizeOfStackReserve
+    pe[0xE4..0xE8].copy_from_slice(&0x0000_1000u32.to_le_bytes()); // SizeOfStackCommit
+    pe[0xE8..0xEC].copy_from_slice(&0x0010_0000u32.to_le_bytes()); // SizeOfHeapReserve
+    pe[0xEC..0xF0].copy_from_slice(&0x0000_1000u32.to_le_bytes()); // SizeOfHeapCommit
+    pe[0xF4..0xF8].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+                                                          // DataDirectory[0] = Export Table (at 0x98 + 96 = 0xF8)
+    pe[0xF8..0xFC].copy_from_slice(&EDATA_RVA.to_le_bytes());
+    pe[0xFC..0x100].copy_from_slice(&edata_vsize.to_le_bytes());
+
+    // Section 0: .text (at 0x178)
+    pe[0x178..0x17D].copy_from_slice(b".text");
+    pe[0x180..0x184].copy_from_slice(&8u32.to_le_bytes()); // VirtualSize
+    pe[0x184..0x188].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    pe[0x188..0x18C].copy_from_slice(&0x0200u32.to_le_bytes()); // SizeOfRawData
+    pe[0x18C..0x190].copy_from_slice(&0x0200u32.to_le_bytes()); // PointerToRawData
+    pe[0x19C..0x1A0].copy_from_slice(&0x6000_0020u32.to_le_bytes()); // CODE | EXECUTE | READ
+
+    // Section 1: .edata (at 0x1A0)
+    pe[0x1A0..0x1A6].copy_from_slice(b".edata");
+    pe[0x1A8..0x1AC].copy_from_slice(&edata_vsize.to_le_bytes()); // VirtualSize
+    pe[0x1AC..0x1B0].copy_from_slice(&EDATA_RVA.to_le_bytes()); // VirtualAddress
+    pe[0x1B0..0x1B4].copy_from_slice(&(edata_raw_size as u32).to_le_bytes()); // SizeOfRawData
+    pe[0x1B4..0x1B8].copy_from_slice(&0x0400u32.to_le_bytes()); // PointerToRawData
+    pe[0x1C4..0x1C8].copy_from_slice(&0x4000_0040u32.to_le_bytes()); // INITIALIZED_DATA | READ
+
+    // .text body: `BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }`
+    // x86: `mov eax, 1; ret 0x0C`
+    pe[0x200..0x208].copy_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x0C, 0x00]);
+
+    // .edata body
+    pe[0x400..0x400 + edata.len()].copy_from_slice(&edata);
+    pe
+}
+
+/// Detect and neutrally replace a renamed Win10/11-only `DDrawCompat` shim (`xdd.dll`) with a
+/// tiny PE32 forwarder to Wine's built-in `ddraw.dll`. Preserves the original file once as
+/// `xdd.dll.ddrawcompat.bak` and leaves the game executable completely untouched.
+pub fn replace_ddrawcompat_xdd_if_needed(exe_path: &Path) -> bool {
+    let Some((is_64bit, exe_imports)) = read_pe_imports(exe_path) else { return false };
+    if is_64bit || !exe_imports.iter().any(|d| d == "xdd.dll") {
+        return false;
+    }
+    let Some(dir) = exe_path.parent() else { return false };
+    let Ok(rd) = fs::read_dir(dir) else { return false };
+    let xdd_path = rd
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("xdd.dll")));
+    let Some(xdd_path) = xdd_path else { return false };
+
+    // Skip already-replaced tiny forwarders (< 64 KiB)
+    let size = fs::metadata(&xdd_path).map(|m| m.len()).unwrap_or(0);
+    if size < 64 * 1024 {
+        return false;
+    }
+    let Some((xdd_is_64, xdd_imports)) = read_pe_imports(&xdd_path) else { return false };
+    if xdd_is_64 {
+        return false;
+    }
+    let imports_dwm = xdd_imports.iter().any(|d| d == "dwmapi.dll");
+    let imports_d3d9 = xdd_imports.iter().any(|d| d == "d3d9.dll");
+    if !imports_dwm || imports_d3d9 {
+        return false;
+    }
+    let Some(xdd_exports) = read_pe_export_names(&xdd_path) else { return false };
+    if !xdd_exports.iter().any(|e| e == "DirectDrawCreate") {
+        return false;
+    }
+
+    let backup = dir.join("xdd.dll.ddrawcompat.bak");
+    if !backup.exists() && fs::copy(&xdd_path, &backup).is_err() {
+        return false;
+    }
+    let forwarder = build_ddraw_forwarder_pe32("xdd.dll");
+    fs::write(&xdd_path, forwarder).is_ok()
+}
+
 /// Inspect sibling `.dll` modules next to the executable for XInput / controller API imports.
 /// Handles modular engines (e.g. CryEngine, Unity, Unreal, SDL2) where a small stub `.exe`
 /// delegates engine and controller initialization to a sibling DLL in the same folder.
@@ -871,6 +1145,7 @@ pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<Fin
     let ui_lang = library::load_ui_settings(&library::ui_settings_file()).language;
     let _ = sync_gog_info_language(unpacked_dir, ui_lang);
     let _ = apply_gog_script_registry(unpacked_dir, is_64bit);
+    let _ = replace_ddrawcompat_xdd_if_needed(&exe_path);
     Ok(FinalizedGog { name, identity, executable_rel: exe_rel_clean, has_cover, pe_kind })
 }
 
@@ -1333,6 +1608,11 @@ pub fn write_pc_handoff(
     let arch = if is_64bit { "pe64" } else { "pe32" };
     let gfx = if prefer_opengl { "zink" } else { "dxvk" };
     let use_local_ddraw = !prefer_opengl && has_local_d3d9_ddraw_wrapper(exe_path);
+    if !is_64bit && replace_ddrawcompat_xdd_if_needed(exe_path) {
+        println!(
+            "TrinityXSX: replaced DDrawCompat xdd.dll with DirectDraw forwarder (backup: xdd.dll.ddrawcompat.bak)"
+        );
+    }
 
     // Apply standard GOG metadata fixes (language sync for multi-language installers +
     // `goggame-*.script` registry/folder actions), walking up to 5 levels for deep binary trees.
@@ -1846,6 +2126,98 @@ mod tests {
             detect_pe_kind(&stub_exe),
             PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, has_gamepad_api: true }
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    fn build_minimal_pe32_with_imports_and_export(imports: &[&str], export: Option<&str>, pad_to: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; 0x800.max(pad_to)];
+        buf[0..2].copy_from_slice(b"MZ");
+        buf[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        buf[0x80..0x84].copy_from_slice(b"PE\0\0");
+        buf[0x84..0x86].copy_from_slice(&0x014Cu16.to_le_bytes());
+        buf[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        buf[0x94..0x96].copy_from_slice(&0xE0u16.to_le_bytes());
+        buf[0x98..0x9A].copy_from_slice(&0x010Bu16.to_le_bytes()); // PE32
+                                                                   // DataDirectory[0] (Export) at 0x98 + 96 = 0xF8; DataDirectory[1] (Import) at 0x100
+        if export.is_some() {
+            buf[0xF8..0xFC].copy_from_slice(&0x1200u32.to_le_bytes());
+            buf[0xFC..0x100].copy_from_slice(&0x100u32.to_le_bytes());
+        }
+        if !imports.is_empty() {
+            buf[0x100..0x104].copy_from_slice(&0x1000u32.to_le_bytes());
+        }
+        // Section header #0 at 0x98 + 0xE0 = 0x178: VA=0x1000, VSize=0x600, RawSize=0x600, RawPtr=0x200
+        buf[0x180..0x184].copy_from_slice(&0x600u32.to_le_bytes());
+        buf[0x184..0x188].copy_from_slice(&0x1000u32.to_le_bytes());
+        buf[0x188..0x18C].copy_from_slice(&0x600u32.to_le_bytes());
+        buf[0x18C..0x190].copy_from_slice(&0x200u32.to_le_bytes());
+        let mut str_off = 0x300usize;
+        for (i, dll) in imports.iter().enumerate() {
+            let desc = 0x200 + i * 20;
+            let name_rva = 0x1000u32 + (str_off - 0x200) as u32;
+            buf[desc + 12..desc + 16].copy_from_slice(&name_rva.to_le_bytes());
+            buf[desc + 16..desc + 20].copy_from_slice(&0x1004u32.to_le_bytes());
+            let bytes = dll.as_bytes();
+            buf[str_off..str_off + bytes.len()].copy_from_slice(bytes);
+            buf[str_off + bytes.len()] = 0;
+            str_off += bytes.len() + 1;
+        }
+        if let Some(exp) = export {
+            // Export directory at file offset 0x400 (RVA 0x1200)
+            buf[0x418..0x41C].copy_from_slice(&1u32.to_le_bytes()); // NumberOfNames = 1
+            buf[0x420..0x424].copy_from_slice(&0x1240u32.to_le_bytes()); // AddressOfNames RVA
+            buf[0x440..0x444].copy_from_slice(&0x1250u32.to_le_bytes()); // name[0] RVA
+            let bytes = exp.as_bytes();
+            buf[0x450..0x450 + bytes.len()].copy_from_slice(bytes);
+            buf[0x450 + bytes.len()] = 0;
+        }
+        buf
+    }
+
+    #[test]
+    fn ddraw_forwarder_pe32_is_valid_and_replaces_ddrawcompat_xdd_idempotently() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-xdd-fwd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let fwd_path = tmp.join("fwd_check.dll");
+        let fwd_bytes = build_ddraw_forwarder_pe32("xdd.dll");
+        fs::write(&fwd_path, &fwd_bytes).unwrap();
+        let exports = read_pe_export_names(&fwd_path).unwrap();
+        assert!(exports.contains(&"DirectDrawCreate".to_owned()));
+        assert!(exports.contains(&"DirectDrawCreateEx".to_owned()));
+        assert!(exports.windows(2).all(|w| w[0] < w[1]), "PE AddressOfNames must be sorted");
+        assert!(fwd_bytes.windows(b"ddraw.DirectDrawCreate\0".len()).any(|w| w == b"ddraw.DirectDrawCreate\0"));
+
+        // Create a PE32 game importing xdd.dll + a 70 KiB DDrawCompat-like xdd.dll
+        let exe = tmp.join("ClassicGame.exe");
+        let xdd = tmp.join("xdd.dll");
+        fs::write(&exe, build_minimal_pe32_with_imports_and_export(&["KERNEL32.dll", "xdd.dll"], None, 0x800)).unwrap();
+        let fake_ddrawcompat = build_minimal_pe32_with_imports_and_export(
+            &["dwmapi.dll", "USER32.dll"],
+            Some("DirectDrawCreate"),
+            70 * 1024,
+        );
+        fs::write(&xdd, &fake_ddrawcompat).unwrap();
+
+        assert!(replace_ddrawcompat_xdd_if_needed(&exe));
+        assert!(tmp.join("xdd.dll.ddrawcompat.bak").is_file());
+        assert_eq!(fs::read(tmp.join("xdd.dll.ddrawcompat.bak")).unwrap().len(), 70 * 1024);
+        assert_eq!(fs::read(&xdd).unwrap(), fwd_bytes);
+        // Second call must be a no-op (forwarder already installed)
+        assert!(!replace_ddrawcompat_xdd_if_needed(&exe));
+
+        // Must NOT replace a D3D9 wrapper named xdd.dll
+        let _ = fs::remove_file(tmp.join("xdd.dll.ddrawcompat.bak"));
+        let d3d9_wrap = build_minimal_pe32_with_imports_and_export(
+            &["dwmapi.dll", "d3d9.dll"],
+            Some("DirectDrawCreate"),
+            70 * 1024,
+        );
+        fs::write(&xdd, &d3d9_wrap).unwrap();
+        assert!(!replace_ddrawcompat_xdd_if_needed(&exe));
+        assert!(!tmp.join("xdd.dll.ddrawcompat.bak").exists());
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
