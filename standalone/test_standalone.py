@@ -358,6 +358,9 @@ class StandaloneTests(unittest.TestCase):
         src = (repo_root / "standalone/native/build_runner.py").read_text(encoding="utf-8")
         self.assertIn("ps5-pie-high.ld", src)
         self.assertNotIn('"ps5-pie.ld"', src)
+        ffpkg_sh = (repo_root / "tools/build-standalone-ffpkg.sh").read_text(encoding="utf-8")
+        self.assertIn('app_native_tool="$foundation/build/host/ps5-native-tool"', ffpkg_sh)
+        self.assertIn('"$app_native_tool"', ffpkg_sh)
 
 
 if __name__ == "__main__":

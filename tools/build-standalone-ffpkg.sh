@@ -102,23 +102,33 @@ pw_zip="$work/prospero-win-${PROSPERO_WIN_TAG}.zip"
 download_checked "https://github.com/mpereiraesaa/prospero-win/releases/download/${PROSPERO_WIN_TAG}/prospero-win-${PROSPERO_WIN_TAG}.zip" \
   "$pw_zip" "$PROSPERO_WIN_ZIP_SHA256"
 
-# 2. Native app boilerplate (app CRT + ps5-native-tool) and PRX foundation (for wineserver.prx)
+# 2. Native app boilerplate (app CRT + high-base ps5-native-tool) and PRX foundation (for wineserver.prx)
 foundation="$work/foundation"
 fetch_commit "$BOILERPLATE_REPO" "$BOILERPLATE_REV" "$foundation"
 
 prx_foundation="$work/prx-foundation"
 fetch_commit "$BOILERPLATE_REPO" "$BOILERPLATE_PRX_REV" "$prx_foundation"
 
-mkdir -p "$prx_foundation/build/host"
-native_tool="$prx_foundation/build/host/ps5-native-tool"
-if [ ! -x "$native_tool" ]; then
-  echo "==> Building ps5-native-tool"
+mkdir -p "$foundation/build/host" "$prx_foundation/build/host"
+app_native_tool="$foundation/build/host/ps5-native-tool"
+if [ ! -x "$app_native_tool" ]; then
+  echo "==> Building app ps5-native-tool (supports ps5-pie-high.ld)"
+  "$llvm_bin/clang++" -std=c++20 -O2 \
+    "$foundation/tooling/native/native_app_builder.cpp" \
+    "$foundation/tooling/native/self_container.cpp" \
+    "$foundation/tooling/native/elf_object.cpp" \
+    "$foundation/tooling/native/sce_module_writer.cpp" \
+    -lz -o "$app_native_tool"
+fi
+prx_native_tool="$prx_foundation/build/host/ps5-native-tool"
+if [ ! -x "$prx_native_tool" ]; then
+  echo "==> Building PRX ps5-native-tool"
   "$llvm_bin/clang++" -std=c++20 -O2 \
     "$prx_foundation/tooling/native/native_app_builder.cpp" \
     "$prx_foundation/tooling/native/self_container.cpp" \
     "$prx_foundation/tooling/native/elf_object.cpp" \
     "$prx_foundation/tooling/native/sce_module_writer.cpp" \
-    -lz -o "$native_tool"
+    -lz -o "$prx_native_tool"
 fi
 
 # 3. UFS2Tool (.NET 8)
@@ -237,7 +247,7 @@ echo "==> Building MIT native launcher (eboot.bin)"
 PYTHONPATH="$root" python3 -m standalone.native.build_launcher \
   --sdk "$sdk" \
   --llvm-bin "$llvm_bin" \
-  --native-tool "$native_tool" \
+  --native-tool "$app_native_tool" \
   --output "$launcher_bin" \
   --with-seed
 
@@ -250,7 +260,7 @@ runner_dir="$work/runner-standalone"
 rm -rf "$runner_dir"
 echo "==> Building patched TrinityXSX runner (with Wine Mono ${WINE_MONO_VERSION})"
 PYTHONPATH="$root" python3 -m standalone.native.build_runner \
-  "$pw_src" "$foundation" "$sdk" "$llvm_bin" "$native_tool" "$pw_zip" "$runner_dir" \
+  "$pw_src" "$foundation" "$sdk" "$llvm_bin" "$app_native_tool" "$pw_zip" "$runner_dir" \
   --wine-build "$cached_wine" \
   --lapy-elf "$lapy_elf" \
   --wine-mono "$wine_mono_tar" \
