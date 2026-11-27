@@ -1,48 +1,47 @@
-From 762c191f9ebf48ad49478108e5eabd26067a8467 Mon Sep 17 00:00:00 2001
+From 4e1e7bcf943442e754c7baca0ab414ddf83bfc3d Mon Sep 17 00:00:00 2001
 From: TrinityXSX <trinityxsx@users.noreply.github.com>
-Date: Fri, 27 Nov 2026 17:51:05 +0100
-Subject: [PATCH] Add Wine-PS5 patch 0990 to park regular-file descriptors on
- PS5
+Date: Fri, 27 Nov 2026 18:16:06 +0100
+Subject: [PATCH] Add Wine-PS5 patch 0990 for regular-file & directory LRU FD
+ parking and EMFILE census
 
 Adds wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
-so streaming-heavy PC/GOG games (such as Unreal Engine 3 titles) do not
-exhaust PS5's ~268-file per-process kernel cap with EMFILE.
+to keep streaming PC/GOG games within PS5's ~268-file per-process cap
+and emit a one-shot kernel+wineserver FD census if EMFILE still occurs.
 ---
- ...er-ps5-park-regular-file-descriptors.patch | 342 ++++++++++++++++++
- 1 file changed, 342 insertions(+)
+ ...er-ps5-park-regular-file-descriptors.patch | 519 ++++++++++++++++++
+ 1 file changed, 519 insertions(+)
  create mode 100644 wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
 
 diff --git a/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch b/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
 new file mode 100644
-index 0000000..e4cbf7e
+index 0000000..45c9188
 --- /dev/null
 +++ b/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
-@@ -0,0 +1,342 @@
-+From 78f3f00a7e67008a5bbde8dc484b7b7904a86d32 Mon Sep 17 00:00:00 2001
+@@ -0,0 +1,519 @@
++From b9f8dddb76b18202f92766490a480fb72626af11 Mon Sep 17 00:00:00 2001
 +From: TrinityXSX <trinityxsx@users.noreply.github.com>
-+Date: Fri, 27 Nov 2026 17:51:05 +0100
-+Subject: [PATCH] server: Park idle read-only regular-file descriptors on PS5.
++Date: Fri, 27 Nov 2026 18:16:05 +0100
++Subject: [PATCH] server: Park idle regular-file and directory descriptors on
++ PS5 with EMFILE census.
 +
 +PS5 caps distinct kernel open-file descriptions at ~268 per process even
-+when RLIMIT_NOFILE reports 13952, and patch 0871 only parked directories.
++when RLIMIT_NOFILE reports 13952. Patch 0871 kept up to 64 directories
++open and never re-parked unparked directories.
 +
-+Extend server/fd.c on PS5 so that past 24 live regular-file descriptors
-+(tunable via WINE_PS5_PARK_FILES, 0 disables), new read-only non-delete
-+regular files disable client-side ntdll fd_cache and share a bounded LRU
-+pool of open server Unix FDs. Least-recently-used handles (preferring
-+overlapped/pread handles before idle synchronous ones) are closed with
-+their lseek() offset preserved and transparently reopened with device and
-+inode verification on demand, and open()/dup() EMFILE retries evict up to
-+32 idle descriptors (logging a one-shot census if EMFILE still persists).
++Lower directory threshold to 16 with LRU re-parking, park read-only
++regular files past 24 (uncached in ntdll, LRU window 24, preserving
++lseek() offset and falling back to strdup(path) if realpath_dup fails),
++evict both pools on EMFILE, and log a one-shot kernel+wineserver FD
++census if EMFILE still persists.
 +---
-+ server/fd.c | 205 +++++++++++++++++++++++++++++++++++++++++++++++++---
-+ 1 file changed, 194 insertions(+), 11 deletions(-)
++ server/fd.c | 356 +++++++++++++++++++++++++++++++++++++++++++++++++---
++ 1 file changed, 342 insertions(+), 14 deletions(-)
 +
 +diff --git a/server/fd.c b/server/fd.c
-+index 4c046f4..207d230 100644
++index 4c046f4..d8e7128 100644
 +--- a/server/fd.c
 ++++ b/server/fd.c
-+@@ -166,15 +166,26 @@ struct fd
++@@ -166,15 +166,31 @@ struct fd
 +     apc_param_t          comp_key;    /* completion key to set in completion events */
 +     unsigned int         comp_flags;  /* completion flags */
 + #ifdef PS5_PARK_DIRECTORIES
@@ -51,75 +50,91 @@ index 0000000..e4cbf7e
 +-    int                  ps5_park_flags; /* open() flags to open it again with */
 ++    unsigned int         ps5_parked :1;      /* directory or regular file whose unix_fd is closed until needed */
 ++    unsigned int         ps5_counted :1;     /* counted in ps5_directory_fds */
+++    unsigned int         ps5_park_dir :1;    /* eligible directory (uncached, LRU re-parkable) */
 ++    unsigned int         ps5_park_reg :1;    /* eligible read-only regular file (uncached, LRU-parkable) */
 ++    unsigned int         ps5_reg_counted :1; /* counted in ps5_reg_total_fds */
 ++    int                  ps5_park_flags;     /* open() flags to open it again with */
 ++    off_t                ps5_park_offset;    /* saved lseek() offset while a regular file is parked */
-++    struct list          ps5_reg_lru_entry;  /* node in ps5_reg_open_lru while unparked */
+++    struct list          ps5_lru_entry;      /* node in ps5_reg_open_lru or ps5_dir_open_lru while unparked */
 + #endif
 + };
 + 
 + #ifdef PS5_PARK_DIRECTORIES
 + static unsigned int ps5_directory_fds;  /* directory fds alive, parked or not (see ps5_park_directory) */
+++static unsigned int ps5_dir_open_count; /* unparked parkable directory fds in ps5_dir_open_lru */
+++static unsigned int ps5_dir_parked_total;
 ++static unsigned int ps5_reg_total_fds;  /* regular-file fds alive, parked or not */
 ++static unsigned int ps5_reg_open_count; /* unparked parkable regular-file fds in ps5_reg_open_lru */
 ++static unsigned int ps5_reg_parked_total;
+++static struct list ps5_dir_open_lru = LIST_INIT( ps5_dir_open_lru );
 ++static struct list ps5_reg_open_lru = LIST_INIT( ps5_reg_open_lru );
 + static int ps5_reopen_directory( struct fd *fd );
-++static void ps5_reg_lru_detach( struct fd *fd );
-++static void ps5_reg_lru_touch( struct fd *fd );
-++static unsigned int ps5_evict_reg_fds( unsigned int want, const struct fd *keep );
+++static void ps5_lru_detach( struct fd *fd );
+++static void ps5_lru_touch( struct fd *fd );
+++static unsigned int ps5_evict_fds( unsigned int want, const struct fd *keep );
+++static void ps5_log_emfile_census( const char *where, int rw_mode, const char *path );
 + 
 + /* 0 when the fd has its unix_fd (again), -1 with the error set. Inline, so
 +  * an fd that is not parked costs one test and no call. */
-+@@ -1680,6 +1691,8 @@ static void fd_destroy( struct object *obj )
++@@ -1680,6 +1696,8 @@ static void fd_destroy( struct object *obj )
 + 
 + #ifdef PS5_PARK_DIRECTORIES
 +     if (fd->ps5_counted) ps5_directory_fds--;
 ++    if (fd->ps5_reg_counted) ps5_reg_total_fds--;
-++    ps5_reg_lru_detach( fd );
+++    ps5_lru_detach( fd );
 + #endif
 +     if (fd->map_addr) free_map_addr( fd->map_addr, fd->map_size );
 +     if (fd->completion) release_object( fd->completion );
-+@@ -1793,6 +1806,8 @@ static inline void unmount_fd( struct fd *fd )
++@@ -1793,6 +1811,9 @@ static inline void unmount_fd( struct fd *fd )
 +     fd->closed->unix_fd = -1;
 + #ifdef PS5_PARK_DIRECTORIES
 +     fd->ps5_parked = 0;  /* dismounted for good: never open it again */
+++    fd->ps5_park_dir = 0;
 ++    fd->ps5_park_reg = 0;
-++    ps5_reg_lru_detach( fd );
+++    ps5_lru_detach( fd );
 + #endif
 +     fd->closed->disp_flags = 0;
 + 
-+@@ -1827,7 +1842,11 @@ static struct fd *alloc_fd_object(void)
++@@ -1827,7 +1848,12 @@ static struct fd *alloc_fd_object(void)
 + #ifdef PS5_PARK_DIRECTORIES
 +     fd->ps5_parked = 0;
 +     fd->ps5_counted = 0;
+++    fd->ps5_park_dir = 0;
 ++    fd->ps5_park_reg = 0;
 ++    fd->ps5_reg_counted = 0;
 +     fd->ps5_park_flags = 0;
 ++    fd->ps5_park_offset = 0;
-++    list_init( &fd->ps5_reg_lru_entry );
+++    list_init( &fd->ps5_lru_entry );
 + #endif
 +     fd->completion = NULL;
 +     fd->comp_flags = 0;
-+@@ -1877,7 +1896,11 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
++@@ -1877,7 +1903,12 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
 + #ifdef PS5_PARK_DIRECTORIES
 +     fd->ps5_parked = 0;
 +     fd->ps5_counted = 0;
+++    fd->ps5_park_dir = 0;
 ++    fd->ps5_park_reg = 0;
 ++    fd->ps5_reg_counted = 0;
 +     fd->ps5_park_flags = 0;
 ++    fd->ps5_park_offset = 0;
-++    list_init( &fd->ps5_reg_lru_entry );
+++    list_init( &fd->ps5_lru_entry );
 + #endif
 +     init_async_queue( &fd->read_q );
 +     init_async_queue( &fd->write_q );
-+@@ -1945,26 +1968,161 @@ static void ps5_park_directory( struct fd *fd, int flags )
-+     fd->ps5_parked = 1;
++@@ -1907,7 +1938,8 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
++  * handle no longer follows a rename of a directory above it: hence the
++  * threshold, so ordinary use keeps Wine's behaviour.
++  * WINE_PS5_PARK_DIRECTORIES=0 parks nothing; =N moves the threshold to N. */
++-#define PS5_PARK_THRESHOLD 64
+++#define PS5_PARK_THRESHOLD 16
+++#define PS5_REG_PARK_THRESHOLD 24
++ 
++ static int ps5_park_threshold(void)
++ {
++@@ -1923,6 +1955,224 @@ static int ps5_park_threshold(void)
++     return threshold;
 + }
 + 
-++#define PS5_REG_PARK_THRESHOLD 24
-++
 ++static int ps5_reg_park_threshold(void)
 ++{
 ++    static int threshold = -1;
@@ -134,51 +149,85 @@ index 0000000..e4cbf7e
 ++    return threshold;
 ++}
 ++
-++static void ps5_reg_lru_detach( struct fd *fd )
+++static void ps5_lru_detach( struct fd *fd )
 ++{
-++    if (!list_empty( &fd->ps5_reg_lru_entry ))
+++    if (!list_empty( &fd->ps5_lru_entry ))
 ++    {
-++        list_remove( &fd->ps5_reg_lru_entry );
-++        list_init( &fd->ps5_reg_lru_entry );
-++        if (ps5_reg_open_count) ps5_reg_open_count--;
+++        list_remove( &fd->ps5_lru_entry );
+++        list_init( &fd->ps5_lru_entry );
+++        if (fd->ps5_park_reg && ps5_reg_open_count) ps5_reg_open_count--;
+++        else if (fd->ps5_park_dir && ps5_dir_open_count) ps5_dir_open_count--;
 ++    }
 ++}
 ++
-++static void ps5_reg_lru_touch( struct fd *fd )
+++static void ps5_lru_touch( struct fd *fd )
 ++{
-++    if (!fd->ps5_park_reg || fd->ps5_parked || fd->unix_fd == -1) return;
-++    if (!list_empty( &fd->ps5_reg_lru_entry ))
-++        list_remove( &fd->ps5_reg_lru_entry );
-++    else
+++    if ((!fd->ps5_park_reg && !fd->ps5_park_dir) || fd->ps5_parked || fd->unix_fd == -1) return;
+++    if (!list_empty( &fd->ps5_lru_entry ))
+++        list_remove( &fd->ps5_lru_entry );
+++    else if (fd->ps5_park_reg)
 ++        ps5_reg_open_count++;
-++    list_add_head( &ps5_reg_open_lru, &fd->ps5_reg_lru_entry );
+++    else
+++        ps5_dir_open_count++;
+++    list_add_head( fd->ps5_park_reg ? &ps5_reg_open_lru : &ps5_dir_open_lru, &fd->ps5_lru_entry );
 ++}
 ++
-++static int ps5_can_park_reg( struct fd *fd )
+++static int ps5_can_park_fd( struct fd *fd )
 ++{
-++    if (!fd->ps5_park_reg || fd->ps5_parked || fd->unix_fd == -1) return 0;
+++    if ((!fd->ps5_park_reg && !fd->ps5_park_dir) || fd->ps5_parked || fd->unix_fd == -1) return 0;
 ++    if (!fd->inode || !fd->closed || !fd->unix_name) return 0;
 ++    if (fd->closed->unix_fd != fd->unix_fd || fd->closed->disp_flags) return 0;
 ++    if (fd->cacheable || fd->poll_index != -1) return 0;
-++    if ((fd->options & FILE_DELETE_ON_CLOSE) || (fd->access & (FILE_UNIX_WRITE_ACCESS | DELETE))) return 0;
+++    if ((fd->options & FILE_DELETE_ON_CLOSE)) return 0;
+++    if (fd->ps5_park_reg && (fd->access & (FILE_UNIX_WRITE_ACCESS | DELETE))) return 0;
 ++    if (!list_empty( &fd->locks ) || !list_empty( &fd->inode->locks )) return 0;
 ++    if (async_queued( &fd->read_q ) || async_queued( &fd->write_q ) || async_queued( &fd->wait_q )) return 0;
 ++    return 1;
 ++}
 ++
-++static void ps5_park_one_reg( struct fd *fd )
+++static void ps5_park_one_fd( struct fd *fd )
 ++{
-++    off_t pos = lseek( fd->unix_fd, 0, SEEK_CUR );
-++
-++    fd->ps5_park_offset = (pos == (off_t)-1) ? 0 : pos;
+++    if (fd->ps5_park_reg)
+++    {
+++        off_t pos = lseek( fd->unix_fd, 0, SEEK_CUR );
+++        fd->ps5_park_offset = (pos == (off_t)-1) ? 0 : pos;
+++    }
 ++    close( fd->unix_fd );
 ++    fd->unix_fd = fd->closed->unix_fd = -1;
 ++    fd->ps5_parked = 1;
-++    ps5_reg_lru_detach( fd );
-++    ps5_reg_parked_total++;
-++    if (ps5_reg_parked_total == 1 || (ps5_reg_parked_total % 256) == 0)
-++        fprintf( stderr, "wine-ps5: parked regular-file fds=%u (open_lru=%u total_reg=%u)\n",
-++                 ps5_reg_parked_total, ps5_reg_open_count, ps5_reg_total_fds );
+++    ps5_lru_detach( fd );
+++    if (fd->ps5_park_reg)
+++    {
+++        ps5_reg_parked_total++;
+++        if (ps5_reg_parked_total == 1 || (ps5_reg_parked_total % 256) == 0)
+++            fprintf( stderr, "wine-ps5: parked regular-file fds=%u (open_lru=%u total_reg=%u)\n",
+++                     ps5_reg_parked_total, ps5_reg_open_count, ps5_reg_total_fds );
+++    }
+++    else
+++    {
+++        ps5_dir_parked_total++;
+++        if (ps5_dir_parked_total == 1 || (ps5_dir_parked_total % 256) == 0)
+++            fprintf( stderr, "wine-ps5: parked directory fds=%u (open_lru=%u total_dir=%u)\n",
+++                     ps5_dir_parked_total, ps5_dir_open_count, ps5_directory_fds );
+++    }
+++}
+++
+++static unsigned int ps5_evict_dir_fds( unsigned int want, const struct fd *keep )
+++{
+++    unsigned int parked = 0;
+++    struct list *ptr = list_tail( &ps5_dir_open_lru );
+++
+++    while (ptr && parked < want)
+++    {
+++        struct list *prev = list_prev( &ps5_dir_open_lru, ptr );
+++        struct fd *fd = LIST_ENTRY( ptr, struct fd, ps5_lru_entry );
+++
+++        ptr = prev;
+++        if (fd == keep || !ps5_can_park_fd( fd )) continue;
+++        ps5_park_one_fd( fd );
+++        parked++;
+++    }
+++    return parked;
 ++}
 ++
 ++/* Park up to want least-recently-used read-only regular files, preferring
@@ -196,25 +245,140 @@ index 0000000..e4cbf7e
 ++        while (ptr && parked < want)
 ++        {
 ++            struct list *prev = list_prev( &ps5_reg_open_lru, ptr );
-++            struct fd *fd = LIST_ENTRY( ptr, struct fd, ps5_reg_lru_entry );
+++            struct fd *fd = LIST_ENTRY( ptr, struct fd, ps5_lru_entry );
 ++
 ++            ptr = prev;
-++            if (fd == keep || !ps5_can_park_reg( fd )) continue;
+++            if (fd == keep || !ps5_can_park_fd( fd )) continue;
 ++            if (pass == 0 && (fd->options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
 ++                continue;
-++            ps5_park_one_reg( fd );
+++            ps5_park_one_fd( fd );
 ++            parked++;
 ++        }
 ++    }
 ++    return parked;
 ++}
 ++
-++/* Streaming engines (e.g. Unreal Engine 3) keep hundreds of read-only archive
-++ * handles (.upk/.tfc/.pck) open across levels, exhausting PS5's sandbox FD
-++ * limit (EMFILE) even when RLIMIT_NOFILE reports 13952. Past the threshold,
-++ * disable client-side ntdll fd_cache for new read-only regular files and keep
-++ * only a bounded LRU pool of open server descriptors, parking older idle ones
-++ * and reopening them transparently on demand. */
+++static unsigned int ps5_evict_fds( unsigned int want, const struct fd *keep )
+++{
+++    unsigned int parked = ps5_evict_reg_fds( want, keep );
+++    if (parked < want) parked += ps5_evict_dir_fds( want - parked, keep );
+++    return parked;
+++}
+++
+++/* One-shot diagnostic census printed only if open()/dup() still hits EMFILE
+++ * after eviction: reports kernel fstat breakdown across 0..1024 and wineserver
+++ * inode-backed descriptors + sample paths so any remaining FD consumer is visible. */
+++static void ps5_log_emfile_census( const char *where, int rw_mode, const char *path )
+++{
+++    static int logged;
+++    unsigned int k_valid = 0, k_reg = 0, k_dir = 0, k_sock = 0, k_fifo = 0, k_chr = 0, k_other = 0;
+++    unsigned int ws_reg_ro = 0, ws_reg_rw = 0, ws_reg_cached = 0, ws_reg_parked = 0;
+++    unsigned int ws_dir_open = 0, ws_dir_parked = 0, ws_map = 0, ws_noname = 0, ws_closed = 0;
+++    unsigned int samples = 0, d_idx, i_idx;
+++    int ufd;
+++
+++    if (logged++) return;
+++    for (ufd = 0; ufd < 1024; ufd++)
+++    {
+++        struct stat st;
+++        if (fstat( ufd, &st ) == -1) continue;
+++        k_valid++;
+++        if (S_ISREG( st.st_mode )) k_reg++;
+++        else if (S_ISDIR( st.st_mode )) k_dir++;
+++        else if (S_ISSOCK( st.st_mode )) k_sock++;
+++        else if (S_ISFIFO( st.st_mode )) k_fifo++;
+++        else if (S_ISCHR( st.st_mode )) k_chr++;
+++        else k_other++;
+++    }
+++    fprintf( stderr,
+++             "wine-ps5: EMFILE(%s rw=%d path=%s) kernel_fds=%u(reg=%u dir=%u sock=%u fifo=%u chr=%u other=%u) "
+++             "counters(reg_tot=%u reg_lru=%u reg_pk=%u dir_tot=%u dir_lru=%u dir_pk=%u)\n",
+++             where, rw_mode, path ? path : "(null)",
+++             k_valid, k_reg, k_dir, k_sock, k_fifo, k_chr, k_other,
+++             ps5_reg_total_fds, ps5_reg_open_count, ps5_reg_parked_total,
+++             ps5_directory_fds, ps5_dir_open_count, ps5_dir_parked_total );
+++
+++    for (d_idx = 0; d_idx < DEVICE_HASH_SIZE; d_idx++)
+++    {
+++        struct device *device;
+++        if (!device_hash[d_idx].next) continue;
+++        LIST_FOR_EACH_ENTRY( device, &device_hash[d_idx], struct device, entry )
+++        {
+++            for (i_idx = 0; i_idx < INODE_HASH_SIZE; i_idx++)
+++            {
+++                struct inode *inode;
+++                LIST_FOR_EACH_ENTRY( inode, &device->inode_hash[i_idx], struct inode, entry )
+++                {
+++                    struct fd *f;
+++                    struct closed_fd *cf;
+++                    LIST_FOR_EACH_ENTRY( cf, &inode->closed, struct closed_fd, entry )
+++                        if (cf->unix_fd != -1) ws_closed++;
+++                    LIST_FOR_EACH_ENTRY( f, &inode->open, struct fd, inode_entry )
+++                    {
+++                        if (!f->unix_name) ws_noname++;
+++                        if (f->access & FILE_MAPPING_ACCESS)
+++                        {
+++                            if (f->unix_fd != -1) ws_map++;
+++                        }
+++                        else if (f->ps5_counted)
+++                        {
+++                            if (f->ps5_parked) ws_dir_parked++;
+++                            else if (f->unix_fd != -1) ws_dir_open++;
+++                        }
+++                        else
+++                        {
+++                            if (f->ps5_parked) ws_reg_parked++;
+++                            else if (f->unix_fd != -1)
+++                            {
+++                                if (f->access & (FILE_UNIX_WRITE_ACCESS | DELETE)) ws_reg_rw++;
+++                                else ws_reg_ro++;
+++                                if (f->cacheable) ws_reg_cached++;
+++                            }
+++                        }
+++                        if (f->unix_fd != -1 && samples < 16)
+++                        {
+++                            samples++;
+++                            fprintf( stderr, "wine-ps5: EMFILE sample[%u] fd=%d acc=%#x opt=%#x cache=%u dir=%u preg=%u name=%s\n",
+++                                     samples, f->unix_fd, f->access, f->options, f->cacheable,
+++                                     f->ps5_counted, f->ps5_park_reg, f->unix_name ? f->unix_name : "(null)" );
+++                        }
+++                    }
+++                }
+++            }
+++        }
+++    }
+++    fprintf( stderr,
+++             "wine-ps5: EMFILE ws_inodes(reg_ro=%u reg_rw=%u reg_cache=%u reg_pk=%u dir_open=%u dir_pk=%u map=%u closed=%u noname=%u)\n",
+++             ws_reg_ro, ws_reg_rw, ws_reg_cached, ws_reg_parked,
+++             ws_dir_open, ws_dir_parked, ws_map, ws_closed, ws_noname );
+++}
+++
++ static void ps5_park_directory( struct fd *fd, int flags )
++ {
++     int threshold = ps5_park_threshold();
++@@ -1936,13 +2186,44 @@ static void ps5_park_directory( struct fd *fd, int flags )
++     if (fd->unix_fd == -1 || !fd->inode || !fd->closed || !fd->unix_name || fd->closed->disp_flags ||
++         !list_empty( &fd->inode->locks ))
++         return;
++-    close( fd->unix_fd );
++-    fd->unix_fd = fd->closed->unix_fd = -1;
+++    fd->cacheable = 0;
+++    fd->ps5_park_dir = 1;
++     fd->ps5_park_flags = O_RDONLY | (flags & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC));
++ #ifdef O_DIRECTORY
++     fd->ps5_park_flags |= O_DIRECTORY;  /* never block on, or open, whatever took the name */
++ #endif
+++    close( fd->unix_fd );
+++    fd->unix_fd = fd->closed->unix_fd = -1;
++     fd->ps5_parked = 1;
+++    ps5_dir_parked_total++;
+++}
+++
+++/* PS5 caps distinct kernel open-file descriptions at ~268 per process even
+++ * when RLIMIT_NOFILE reports 13952. Past the threshold, disable client-side
+++ * ntdll fd_cache for new read-only regular files and keep only a bounded LRU
+++ * pool of open server descriptors, parking older idle ones and reopening them
+++ * transparently on demand. */
 ++static void ps5_track_reg_file( struct fd *fd, int flags, int rw_mode, unsigned int access,
 ++                                unsigned int options )
 ++{
@@ -233,14 +397,13 @@ index 0000000..e4cbf7e
 ++    fd->cacheable = 0;
 ++    fd->ps5_park_reg = 1;
 ++    fd->ps5_park_flags = O_RDONLY | (flags & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC));
-++    ps5_reg_lru_touch( fd );
+++    ps5_lru_touch( fd );
 ++    if (ps5_reg_open_count > (unsigned int)threshold)
 ++        ps5_evict_reg_fds( ps5_reg_open_count - (unsigned int)threshold, fd );
-++}
-++
++ }
++ 
 + /* a parked fd's unix_fd, opened again by its name (see ps5_unpark_directory) */
-+ static int ps5_reopen_directory( struct fd *fd )
-+ {
++@@ -1951,20 +2232,42 @@ static int ps5_reopen_directory( struct fd *fd )
 +     struct stat st;
 +     int unix_fd;
 + 
@@ -250,14 +413,21 @@ index 0000000..e4cbf7e
 ++        if (threshold > 0 && ps5_reg_open_count >= (unsigned int)threshold)
 ++            ps5_evict_reg_fds( ps5_reg_open_count - (unsigned int)threshold + 1, fd );
 ++    }
+++    else if (fd->ps5_park_dir)
+++    {
+++        int threshold = ps5_park_threshold();
+++        if (threshold > 0 && ps5_dir_open_count >= (unsigned int)threshold)
+++            ps5_evict_dir_fds( ps5_dir_open_count - (unsigned int)threshold + 1, fd );
+++    }
 +     if ((unix_fd = open( fd->unix_name, fd->ps5_park_flags )) == -1)
 +     {
 +-        file_set_error();
 +-        return -1;
-++        if ((errno == EMFILE || errno == ENFILE) && ps5_evict_reg_fds( 32, fd ) > 0)
+++        if ((errno == EMFILE || errno == ENFILE) && ps5_evict_fds( 32, fd ) > 0)
 ++            unix_fd = open( fd->unix_name, fd->ps5_park_flags );
 ++        if (unix_fd == -1)
 ++        {
+++            if (errno == EMFILE || errno == ENFILE) ps5_log_emfile_census( "reopen", O_RDONLY, fd->unix_name );
 ++            file_set_error();
 ++            return -1;
 ++        }
@@ -275,11 +445,11 @@ index 0000000..e4cbf7e
 ++        lseek( unix_fd, fd->ps5_park_offset, SEEK_SET );
 +     fd->unix_fd = fd->closed->unix_fd = unix_fd;
 +     fd->ps5_parked = 0;
-++    if (fd->ps5_park_reg) ps5_reg_lru_touch( fd );
+++    if (fd->ps5_park_reg || fd->ps5_park_dir) ps5_lru_touch( fd );
 +     return 0;
 + }
 + #define PS5_UNPARK_OR_RETURN(fd) do { if (ps5_unpark_directory( fd ) == -1) return; } while (0)
-+@@ -2003,9 +2161,16 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
++@@ -2003,9 +2306,18 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
 +         if (!closed) goto failed;
 +         if ((fd->unix_fd = dup( orig->unix_fd )) == -1)
 +         {
@@ -287,8 +457,10 @@ index 0000000..e4cbf7e
 +-            free( closed );
 +-            goto failed;
 ++#ifdef PS5_PARK_DIRECTORIES
-++            if ((errno == EMFILE || errno == ENFILE) && ps5_evict_reg_fds( 32, orig ) > 0)
+++            if ((errno == EMFILE || errno == ENFILE) && ps5_evict_fds( 32, orig ) > 0)
 ++                fd->unix_fd = dup( orig->unix_fd );
+++            if (fd->unix_fd == -1 && (errno == EMFILE || errno == ENFILE))
+++                ps5_log_emfile_census( "dup", 0, orig->unix_name );
 ++#endif
 ++            if (fd->unix_fd == -1)
 ++            {
@@ -299,20 +471,15 @@ index 0000000..e4cbf7e
 +         }
 +         closed->unix_fd = fd->unix_fd;
 +         closed->disp_flags = 0;
-+@@ -2252,8 +2417,19 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++@@ -2252,8 +2564,14 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 + 
 +     if ((fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode )) == -1)
 +     {
 ++#ifdef PS5_PARK_DIRECTORIES
-++        if ((errno == EMFILE || errno == ENFILE) && ps5_evict_reg_fds( 32, fd ) > 0)
+++        if ((errno == EMFILE || errno == ENFILE) && ps5_evict_fds( 32, fd ) > 0)
 ++            fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode );
 ++        if (fd->unix_fd == -1 && (errno == EMFILE || errno == ENFILE))
-++        {
-++            static int logged_emfile;
-++            if (!logged_emfile++)
-++                fprintf( stderr, "wine-ps5: open EMFILE reg_total=%u reg_lru=%u reg_parked=%u dir_total=%u rw=%d path=%s\n",
-++                         ps5_reg_total_fds, ps5_reg_open_count, ps5_reg_parked_total, ps5_directory_fds, rw_mode, name );
-++        }
+++            ps5_log_emfile_census( "open", rw_mode, name );
 ++#endif
 +         /* if we tried to open a directory for write access, retry read-only */
 +-        if (errno == EISDIR)
@@ -320,7 +487,17 @@ index 0000000..e4cbf7e
 +         {
 +             if ((access & FILE_UNIX_WRITE_ACCESS) || (flags & O_CREAT))
 +                 fd->unix_fd = open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
-+@@ -2366,6 +2542,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++@@ -2292,6 +2610,9 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++         if ((path = dup_fd_name( root, name )))
++         {
++             fd->unix_name = realpath_dup( path );
+++#ifdef PS5_PARK_DIRECTORIES
+++            if (!fd->unix_name && path[0] == '/') fd->unix_name = strdup( path );
+++#endif
++             free( path );
++         }
++ 
++@@ -2366,6 +2687,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 + 
 + #ifdef PS5_PARK_DIRECTORIES
 +     if (S_ISDIR( st.st_mode )) ps5_park_directory( fd, flags );
@@ -328,30 +505,30 @@ index 0000000..e4cbf7e
 + #endif
 +     if (root_fd != -1) fchdir( server_dir_fd ); /* go back to the server dir */
 +     return fd;
-+@@ -2424,6 +2601,7 @@ int get_unix_fd( struct fd *fd )
++@@ -2424,6 +2746,7 @@ int get_unix_fd( struct fd *fd )
 + {
 + #ifdef PS5_PARK_DIRECTORIES
 +     if (ps5_unpark_directory( fd ) == -1) return -1;
-++    if (fd->ps5_park_reg) ps5_reg_lru_touch( fd );
+++    if (fd->ps5_park_reg || fd->ps5_park_dir) ps5_lru_touch( fd );
 + #endif
 +     if (fd->unix_fd == -1) set_error( fd->no_fd_status );
 +     return fd->unix_fd;
-+@@ -2452,6 +2630,9 @@ int is_same_file_fd( struct fd *fd1, struct fd *fd2 )
++@@ -2452,6 +2775,9 @@ int is_same_file_fd( struct fd *fd1, struct fd *fd2 )
 + /* allow the fd to be cached (can't be reset once set) */
 + void allow_fd_caching( struct fd *fd )
 + {
 ++#ifdef PS5_PARK_DIRECTORIES
-++    if (fd->ps5_park_reg) return;
+++    if (fd->ps5_park_reg || fd->ps5_park_dir) return;
 ++#endif
 +     fd->cacheable = 1;
 + }
 + 
-+@@ -3226,7 +3407,9 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
++@@ -3226,7 +3552,9 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
 + 
 +         LIST_FOR_EACH_ENTRY( fd_ptr, &fd->inode->open, struct fd, inode_entry )
 +         {
 +-            if (!fd_ptr->ps5_parked || !(unix_name = strdup( fd->unix_name ))) continue;
-++            if (fd_ptr == fd || (!fd_ptr->ps5_parked && !fd_ptr->ps5_park_reg) ||
+++            if (fd_ptr == fd || (!fd_ptr->ps5_parked && !fd_ptr->ps5_park_reg && !fd_ptr->ps5_park_dir) ||
 ++                !(unix_name = strdup( fd->unix_name )))
 ++                continue;
 +             free( fd_ptr->unix_name );
