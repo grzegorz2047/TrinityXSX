@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Registry::{
     KEY_WOW64_32KEY, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 
-use crate::library;
+use crate::{library, library_i18n::Lang};
 
 const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
 const PC_PROFILE_ID: &str = "trinityxsx-pc-game";
@@ -188,25 +188,18 @@ fn read_u32_le(buf: &[u8], off: usize) -> Option<u32> {
     Some(u32::from_le_bytes(buf.get(off..off + 4)?.try_into().ok()?))
 }
 
-/// Inspect a PE executable's architecture (PE32 vs PE32+) and import table to determine
-/// whether it is a native Xbox Series X|S binary or a standard Windows PC/GOG game.
-pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
-    let Ok(mut f) = File::open(exe_path) else {
-        return PeLaunchKind::XboxSeries;
-    };
-    // Read up to 4 MiB (headers + import directory live near the front in virtually all PEs;
-    // if the import table sits further out we fall back to reading the exact slice).
+/// Read a PE file's bitness (`true` = PE32+, `false` = PE32) and lowercased imported DLL names.
+fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
+    let mut f = File::open(pe_path).ok()?;
     let mut header = vec![0u8; 64 * 1024];
     let n = f.read(&mut header).unwrap_or(0);
     header.truncate(n);
     if header.len() < 0x100 || &header[0..2] != b"MZ" {
-        return PeLaunchKind::XboxSeries;
+        return None;
     }
-    let Some(pe_off) = read_u32_le(&header, 0x3C).map(|v| v as usize) else {
-        return PeLaunchKind::XboxSeries;
-    };
+    let pe_off = read_u32_le(&header, 0x3C)? as usize;
     if header.get(pe_off..pe_off + 4) != Some(b"PE\0\0") {
-        return PeLaunchKind::XboxSeries;
+        return None;
     }
     let num_sections = read_u16_le(&header, pe_off + 6).unwrap_or(0) as usize;
     let opt_size = read_u16_le(&header, pe_off + 20).unwrap_or(0) as usize;
@@ -215,7 +208,7 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
     let (is_64bit, data_dir_off) = match magic {
         0x20B => (true, opt_off + 112), // PE32+
         0x10B => (false, opt_off + 96), // PE32
-        _ => return PeLaunchKind::XboxSeries,
+        _ => return None,
     };
 
     let import_rva = read_u32_le(&header, data_dir_off + 8).unwrap_or(0);
@@ -245,7 +238,7 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
     let mut imports = Vec::new();
     if import_rva != 0 {
         if let Some(imp_file_off) = rva_to_off(import_rva) {
-            if let Ok(full) = fs::read(exe_path) {
+            if let Ok(full) = fs::read(pe_path) {
                 let mut idx = 0usize;
                 while idx < 256 {
                     let desc = imp_file_off + idx * 20;
@@ -266,6 +259,33 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
             }
         }
     }
+    Some((is_64bit, imports))
+}
+
+/// True when the executable's directory ships a local `ddraw.dll` that wraps DirectDraw onto
+/// Direct3D 9 (e.g. GOG's bundled `dxcfg`/`ddraw.dll` wrapper) rather than OpenGL. Enabling
+/// `ddraw=n,b` for such wrappers moves presentation from Wine's CPU GDI path onto DXVK / GPU.
+pub fn has_local_d3d9_ddraw_wrapper(exe_path: &Path) -> bool {
+    let Some(dir) = exe_path.parent() else { return false };
+    let Ok(rd) = fs::read_dir(dir) else { return false };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() && entry.file_name().to_string_lossy().eq_ignore_ascii_case("ddraw.dll") {
+            let Some((_, imports)) = read_pe_imports(&p) else { return false };
+            let has_d3d9 = imports.iter().any(|d| d == "d3d9.dll");
+            let has_gl = imports.iter().any(|d| d == "opengl32.dll");
+            return has_d3d9 && !has_gl;
+        }
+    }
+    false
+}
+
+/// Inspect a PE executable's architecture (PE32 vs PE32+) and import table to determine
+/// whether it is a native Xbox Series X|S binary or a standard Windows PC/GOG game.
+pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
+    let Some((is_64bit, imports)) = read_pe_imports(exe_path) else {
+        return PeLaunchKind::XboxSeries;
+    };
 
     let is_console = imports.iter().any(|dll| {
         matches!(
@@ -809,8 +829,120 @@ pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<Fin
 
     let pe_kind = detect_pe_kind(&exe_path);
     let is_64bit = matches!(pe_kind, PeLaunchKind::PcNative { is_64bit: true, .. });
+    let ui_lang = library::load_ui_settings(&library::ui_settings_file()).language;
+    let _ = sync_gog_info_language(unpacked_dir, ui_lang);
     let _ = apply_gog_script_registry(unpacked_dir, is_64bit);
     Ok(FinalizedGog { name, identity, executable_rel: exe_rel_clean, has_cover, pe_kind })
+}
+
+fn gog_lang_spec(lang: Lang) -> (&'static str, &'static str, &'static [&'static str]) {
+    match lang {
+        Lang::Pl => ("Polish", "pl-PL", &["polish", "pl-pl", "pl_pl", "_pl."]),
+        Lang::Pt => ("Portuguese (Brazilian)", "pt-BR", &["portuguese", "pt-br", "pt_br", "brazilian"]),
+        Lang::Es => ("Spanish", "es-ES", &["spanish", "es-es", "es_es"]),
+        Lang::En => ("English", "en-US", &["english", "en-us", "en_us"]),
+    }
+}
+
+fn dir_has_lang_token(dir: &Path, tokens: &[&str]) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else { return false };
+    for entry in rd.flatten() {
+        let low = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if tokens.iter().any(|tok| low.contains(tok)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn game_has_language_assets(game_dir: &Path, tokens: &[&str]) -> bool {
+    if dir_has_lang_token(game_dir, tokens) {
+        return true;
+    }
+    const LOC_DIRS: &[&str] = &["localization", "localisation", "loc", "lang", "languages", "data", "app", "gamesdk"];
+    let Ok(rd) = fs::read_dir(game_dir) else { return false };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let low = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if LOC_DIRS.iter().any(|d| *d == low) && dir_has_lang_token(&p, tokens) {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_gog_info_file(dir: &Path) -> Option<PathBuf> {
+    let rd = fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            let low = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if low.starts_with("goggame-") && low.ends_with(".info") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Multi-language GOG Inno Setup installers pack one `goggame-*.info` per language; extracting
+/// without a language filter leaves the last language in the archive (often `zh-Hans` / Chinese).
+/// Reconcile `goggame-*.info` with the active TrinityXSX UI language (when matching localization
+/// assets exist in the game folder) or fall back to English when an unrelated language won.
+pub fn sync_gog_info_language(game_dir: &Path, ui_lang: Lang) -> Option<String> {
+    let info_path = find_gog_info_file(game_dir).or_else(|| find_gog_info_file(&game_dir.join("app")))?;
+    let text = fs::read_to_string(&info_path).ok()?;
+    let mut val: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let obj = val.as_object_mut()?;
+
+    let cur_lang = obj.get("language").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let cur_code = obj
+        .get("languages")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    let (wanted_name, wanted_code, wanted_tokens) = gog_lang_spec(ui_lang);
+    let already_wanted = cur_lang.eq_ignore_ascii_case(wanted_name) || cur_code.eq_ignore_ascii_case(wanted_code);
+    if already_wanted {
+        return None;
+    }
+
+    let (target_name, target_code) = if ui_lang != Lang::En && game_has_language_assets(game_dir, wanted_tokens) {
+        (wanted_name, wanted_code)
+    } else {
+        let cur_is_english =
+            cur_lang.eq_ignore_ascii_case("english") || cur_code.to_ascii_lowercase().starts_with("en");
+        if cur_is_english {
+            return None;
+        }
+        ("English", "en-US")
+    };
+
+    obj.insert("language".into(), serde_json::Value::String(target_name.to_owned()));
+    obj.insert("languages".into(), serde_json::json!([target_code]));
+    let formatted = serde_json::to_string_pretty(&val).ok()?;
+    fs::write(&info_path, formatted).ok()?;
+    Some(format!("{target_name} ({target_code})"))
+}
+
+/// Walk up to 5 ancestor directories from an executable to find the root folder containing
+/// `goggame-*.info` or `goggame-*.script` (handles deep trees like `Binaries/.../Release/Game.exe`).
+fn find_gog_root_dir(exe_path: &Path) -> Option<PathBuf> {
+    let mut cur = exe_path.parent()?;
+    for _ in 0..=5 {
+        if find_gog_info_file(cur).is_some() || find_gog_script_in_dir(cur).is_some() {
+            return Some(cur.to_path_buf());
+        }
+        let Some(parent) = cur.parent() else { break };
+        cur = parent;
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,6 +1089,30 @@ pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
     };
     let app_dir_win = strip_verbatim_prefix(&game_dir.to_string_lossy());
     let entries = parse_gog_script_registry(&text, &app_dir_win);
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(actions) = val.get("actions").and_then(|v| v.as_array()) {
+            for item in actions {
+                let Some(install) = item.get("install") else { continue };
+                if !install
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|a| a.eq_ignore_ascii_case("supportData"))
+                {
+                    continue;
+                }
+                let Some(args) = install.get("arguments") else { continue };
+                if !args.get("type").and_then(|v| v.as_str()).is_some_and(|t| t.eq_ignore_ascii_case("folder")) {
+                    continue;
+                }
+                let Some(target) = args.get("target").and_then(|v| v.as_str()) else { continue };
+                if let Some(rel) = target.strip_prefix("{app}/").or_else(|| target.strip_prefix("{app}\\")) {
+                    if !rel.contains("..") && !rel.contains(':') && !rel.is_empty() {
+                        let _ = fs::create_dir_all(game_dir.join(rel.replace('/', "\\")));
+                    }
+                }
+            }
+        }
+    }
     let mut written = 0usize;
     let mut touched_hklm = false;
     let mut touched_hkcu = false;
@@ -1137,16 +1293,16 @@ pub fn write_pc_handoff(
     let fps_val = if show_fps { "true" } else { "false" };
     let arch = if is_64bit { "pe64" } else { "pe32" };
     let gfx = if prefer_opengl { "zink" } else { "dxvk" };
+    let use_local_ddraw = !prefer_opengl && has_local_d3d9_ddraw_wrapper(exe_path);
 
-    // Apply standard GOG `goggame-*.script` registry actions (e.g. InstallDir) before launch
-    // for games unpacked via innoextract, checking both exe directory and its parent (bin/app).
-    if let Some(exe_dir) = exe_path.parent() {
-        let mut applied = apply_gog_script_registry(exe_dir, is_64bit);
-        if applied == 0 {
-            if let Some(parent) = exe_dir.parent() {
-                applied = apply_gog_script_registry(parent, is_64bit);
-            }
+    // Apply standard GOG metadata fixes (language sync for multi-language installers +
+    // `goggame-*.script` registry/folder actions), walking up to 5 levels for deep binary trees.
+    if let Some(gog_root) = find_gog_root_dir(exe_path) {
+        let ui_lang = library::load_ui_settings(&library::ui_settings_file()).language;
+        if let Some(lang_label) = sync_gog_info_language(&gog_root, ui_lang) {
+            println!("TrinityXSX: synced GOG game language to {lang_label}");
         }
+        let applied = apply_gog_script_registry(&gog_root, is_64bit);
         if applied > 0 {
             println!("TrinityXSX: applied {applied} GOG script registry key(s)");
         }
@@ -1184,6 +1340,7 @@ pub fn write_pc_handoff(
         fps_val,
         resolved_mode,
         is_config_tool,
+        use_local_ddraw,
     );
 
     let profile_file = format!("{PC_PROFILE_ID}.profile");
@@ -1300,9 +1457,15 @@ fn format_pc_handoff_profile(
     fps_val: &str,
     resolved_mode: PcInputMode,
     is_config_tool: bool,
+    use_local_ddraw: bool,
 ) -> String {
     let input_block = pc_input_section(resolved_mode, is_config_tool);
     let view_mode = if is_config_tool { "desktop" } else { "window" };
+    let dx_list = if use_local_ddraw {
+        "d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8,ddraw"
+    } else {
+        "d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8"
+    };
     format!(
         "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
          [application]\n\
@@ -1310,7 +1473,7 @@ fn format_pc_handoff_profile(
          name = {safe_name}\n\
          executable = {clean_exe}\n\
          working_directory = {work_dir}\n\
-         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
+         dll_overrides = {dx_list}=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
          prefix = default\n\
          runtime = wine-wow64\n\
          architecture = {arch}\n\
@@ -1440,6 +1603,7 @@ mod tests {
             "true",
             PcInputMode::Gamepad,
             false,
+            false,
         );
         assert!(profile.contains(
             "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
@@ -1462,7 +1626,9 @@ mod tests {
             "true",
             PcInputMode::MouseKeyboard,
             false,
+            true,
         );
+        assert!(profile.contains("dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8,ddraw=n,b;"));
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
         assert!(profile.contains("cross = mouse_left\n"));
         assert!(profile.contains("square = mouse_right\n"));
@@ -1482,6 +1648,7 @@ mod tests {
             "true",
             PcInputMode::ArrowsAction,
             false,
+            false,
         );
         assert!(arrows.contains("view = window\n"));
         assert!(arrows.contains("mouse = right_stick\n"));
@@ -1498,6 +1665,7 @@ mod tests {
             "off",
             "true",
             PcInputMode::FpsWasd,
+            false,
             false,
         );
         assert!(fps.contains("mouse = right_stick\n"));
@@ -1521,10 +1689,47 @@ mod tests {
             "true",
             PcInputMode::Gamepad,
             true,
+            false,
         );
         assert!(profile.contains("view = desktop\n"));
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
         assert!(profile.contains("up = up\ndown = down\nleft = left\nright = right\n"));
+    }
+
+    #[test]
+    fn sync_gog_info_language_fixes_overwritten_multilang_archive_and_respects_assets() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-lang-sync-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("Localization")).unwrap();
+        fs::write(tmp.join("Localization").join("polish.pak"), b"PK").unwrap();
+        fs::write(tmp.join("Localization").join("english.pak"), b"PK").unwrap();
+        let info = tmp.join("goggame-1158493447.info");
+        fs::write(&info, r#"{"gameId":"1158493447","language":"Chinese (Simplified)","languages":["zh-Hans"]}"#)
+            .unwrap();
+
+        // Polish UI + polish.pak -> switches to Polish
+        let updated = sync_gog_info_language(&tmp, Lang::Pl);
+        assert_eq!(updated.as_deref(), Some("Polish (pl-PL)"));
+        let txt = fs::read_to_string(&info).unwrap();
+        assert!(txt.contains("\"Polish\"") && txt.contains("\"pl-PL\""));
+        // Calling again is a no-op
+        assert_eq!(sync_gog_info_language(&tmp, Lang::Pl), None);
+
+        // Spanish UI without Spanish assets -> falls back to English
+        let fallback = sync_gog_info_language(&tmp, Lang::Es);
+        assert_eq!(fallback.as_deref(), Some("English (en-US)"));
+        let txt2 = fs::read_to_string(&info).unwrap();
+        assert!(txt2.contains("\"English\"") && txt2.contains("\"en-US\""));
+        // Already English with no Spanish assets -> no-op
+        assert_eq!(sync_gog_info_language(&tmp, Lang::Es), None);
+
+        // Deep binary path finds GOG root up to 5 levels
+        let deep_exe = tmp.join("Binaries").join("Danielle").join("x64-GOG").join("Release").join("Game.exe");
+        fs::create_dir_all(deep_exe.parent().unwrap()).unwrap();
+        fs::write(&deep_exe, b"MZ").unwrap();
+        assert_eq!(find_gog_root_dir(&deep_exe).as_deref(), Some(tmp.as_path()));
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
