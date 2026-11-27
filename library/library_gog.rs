@@ -18,8 +18,8 @@ use std::sync::Arc;
 use windows_sys::Win32::Foundation::FreeLibrary;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY,
-    KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegFlushKey, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+    KEY_WOW64_32KEY, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 
 use crate::library;
@@ -929,17 +929,38 @@ pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
     let app_dir_win = strip_verbatim_prefix(&game_dir.to_string_lossy());
     let entries = parse_gog_script_registry(&text, &app_dir_win);
     let mut written = 0usize;
+    let mut touched_hklm = false;
+    let mut touched_hkcu = false;
     for entry in &entries {
         let ok = match entry.root {
             GogRegRoot::LocalMachine => {
                 let wow32 = !is_64bit && write_registry_entry(entry, KEY_WRITE | KEY_WOW64_32KEY);
                 let native64 = write_registry_entry(entry, KEY_WRITE | KEY_WOW64_64KEY);
+                if wow32 || native64 {
+                    touched_hklm = true;
+                }
                 wow32 || native64
             }
-            GogRegRoot::CurrentUser => write_registry_entry(entry, KEY_WRITE),
+            GogRegRoot::CurrentUser => {
+                let res = write_registry_entry(entry, KEY_WRITE);
+                if res {
+                    touched_hkcu = true;
+                }
+                res
+            }
         };
         if ok {
             written += 1;
+        }
+    }
+    // Synchronously flush modified Wine registry hives to disk before the library exits into
+    // `sceSystemServiceLoadExec`, which replaces the process before wineserver's lazy flush runs.
+    unsafe {
+        if touched_hklm {
+            let _ = RegFlushKey(HKEY_LOCAL_MACHINE);
+        }
+        if touched_hkcu {
+            let _ = RegFlushKey(HKEY_CURRENT_USER);
         }
     }
     written
@@ -1079,11 +1100,14 @@ pub fn write_pc_handoff(
     // Apply standard GOG `goggame-*.script` registry actions (e.g. InstallDir) before launch
     // for games unpacked via innoextract, checking both exe directory and its parent (bin/app).
     if let Some(exe_dir) = exe_path.parent() {
-        let applied = apply_gog_script_registry(exe_dir, is_64bit);
+        let mut applied = apply_gog_script_registry(exe_dir, is_64bit);
         if applied == 0 {
             if let Some(parent) = exe_dir.parent() {
-                let _ = apply_gog_script_registry(parent, is_64bit);
+                applied = apply_gog_script_registry(parent, is_64bit);
             }
+        }
+        if applied > 0 {
+            println!("TrinityXSX: applied {applied} GOG script registry key(s)");
         }
     }
 
