@@ -26,7 +26,7 @@ const SETTINGS_ROWS: usize = 8;
 /// Rows of the app settings screen; the last one restarts TrinityXSX.
 const APP_ROWS: usize = 7;
 const SETTINGS_COUNT: usize = 13;
-const PC_SETTINGS_COUNT: usize = 4;
+const PC_SETTINGS_COUNT: usize = 5;
 
 const UP: u16 = 0x0001;
 const DOWN: u16 = 0x0002;
@@ -122,6 +122,7 @@ struct Menu {
     cover_cache: library_art::CoverCache,
     preview_key: Option<PathBuf>,
     preview_pe_kind: PeLaunchKind,
+    preview_pc_exes: Vec<String>,
     preview_has_custom_cfg: bool,
     preview_saves: (usize, u64),
     /// Shader cache size, counted once per session: the caches are shared by all titles, and RADV's
@@ -233,19 +234,33 @@ impl Menu {
         self.cache_visible_covers();
         let Some(game) = self.catalog.games.get(self.selected) else {
             self.preview_key = None;
+            self.preview_pc_exes.clear();
             self.preview_has_custom_cfg = false;
             self.preview_saves = (0, 0);
             return;
         };
-        if self.preview_key.as_ref() == Some(&game.executable) {
+        let active_exe = library::resolve_game_executable(game, &self.ui);
+        if self.preview_key.as_ref() == Some(&active_exe) {
             return;
         }
-        self.preview_key = Some(game.executable.clone());
+        self.preview_key = Some(active_exe.clone());
         if let Some(path) = &game.logo {
             self.cover_cache.load(path, CARD_BG_RGB);
         }
         let (_, has_cfg) = library::load_game_config(game);
-        self.preview_pe_kind = library_gog::detect_pe_kind(&game.executable);
+        self.preview_pe_kind = library_gog::detect_pe_kind(&active_exe);
+        self.preview_pc_exes = if self.is_pc_preview() {
+            let mut exes = library_gog::find_pc_executables(&game.root_dir);
+            if let Ok(rel) = game.executable.strip_prefix(&game.root_dir) {
+                let rel_s = rel.to_string_lossy().replace('/', "\\");
+                if !rel_s.is_empty() && !exes.iter().any(|e| e.eq_ignore_ascii_case(&rel_s)) {
+                    exes.insert(0, rel_s);
+                }
+            }
+            exes
+        } else {
+            Vec::new()
+        };
         self.preview_has_custom_cfg = has_cfg;
         self.preview_saves = library::saves_summary(game);
     }
@@ -284,17 +299,52 @@ impl Menu {
             let lang = self.ui.language;
             match self.settings_row {
                 2 => {
+                    if self.preview_pc_exes.len() > 1 {
+                        if let Some(game) = self.catalog.games.get(self.selected) {
+                            let id = game.identity.clone();
+                            let active_exe = library::resolve_game_executable(game, &self.ui);
+                            let active_rel = active_exe
+                                .strip_prefix(&game.root_dir)
+                                .map(|p| p.to_string_lossy().replace('/', "\\"))
+                                .unwrap_or_default();
+                            let cur = self
+                                .preview_pc_exes
+                                .iter()
+                                .position(|e| e.eq_ignore_ascii_case(&active_rel))
+                                .unwrap_or(0);
+                            let len = self.preview_pc_exes.len();
+                            let next_idx = if forward { (cur + 1) % len } else { (cur + len - 1) % len };
+                            let chosen_rel = self.preview_pc_exes[next_idx].clone();
+                            let default_rel = game
+                                .executable
+                                .strip_prefix(&game.root_dir)
+                                .map(|p| p.to_string_lossy().replace('/', "\\"))
+                                .unwrap_or_default();
+                            let override_val = if chosen_rel.eq_ignore_ascii_case(&default_rel) {
+                                None
+                            } else {
+                                Some(chosen_rel.as_str())
+                            };
+                            self.ui.set_pc_executable(&id, override_val);
+                            let _ = library::save_ui_settings(&self.ui_file, &self.ui);
+                            self.preview_key = None;
+                            self.refresh_preview();
+                            self.status = format!("{}: {chosen_rel}", tr(lang, "Executable"));
+                        }
+                    }
+                }
+                3 => {
                     if let Some(game) = self.catalog.games.get(self.selected) {
                         let id = game.identity.clone();
                         let cur = self.ui.pc_input_mode(&id);
                         let next = if forward { cur.next() } else { cur.prev() };
                         self.ui.set_pc_input_mode(&id, next);
                         let _ = library::save_ui_settings(&self.ui_file, &self.ui);
-                        let (_, label, _) = self.setting_row_info(2);
+                        let (_, label, _) = self.setting_row_info(3);
                         self.status = format!("{}: {label}", tr(lang, "PC Controls"));
                     }
                 }
-                3 => {
+                4 => {
                     let (files, bytes) = library::clear_shader_cache();
                     self.preview_shader_cache = Some(library::shader_cache_summary());
                     let files_lbl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
@@ -467,6 +517,35 @@ impl Menu {
                     )
                 }
                 2 => {
+                    let value = if let Some(game) = self.catalog.games.get(self.selected) {
+                        let active_exe = library::resolve_game_executable(game, &self.ui);
+                        let rel = active_exe
+                            .strip_prefix(&game.root_dir)
+                            .map(|p| p.to_string_lossy().replace('/', "\\"))
+                            .unwrap_or_else(|_| {
+                                active_exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                            });
+                        if self.preview_pc_exes.len() > 1 {
+                            let idx = self
+                                .preview_pc_exes
+                                .iter()
+                                .position(|e| e.eq_ignore_ascii_case(&rel))
+                                .map(|i| i + 1)
+                                .unwrap_or(1);
+                            format!("{rel}  ({idx}/{})", self.preview_pc_exes.len())
+                        } else {
+                            rel
+                        }
+                    } else {
+                        String::new()
+                    };
+                    (
+                        t("Executable"),
+                        value,
+                        t("Choose which .exe to launch when a PC game folder contains multiple executables (e.g. expansions or patches)."),
+                    )
+                }
+                3 => {
                     let has_gamepad_api = match self.preview_pe_kind {
                         PeLaunchKind::PcNative { has_gamepad_api, .. } => has_gamepad_api,
                         PeLaunchKind::XboxSeries => true,
@@ -985,10 +1064,12 @@ impl Menu {
         }
         if buttons & CROSS != 0 {
             if let Some(game) = self.catalog.games.get(self.selected) {
-                let exe = game.executable.clone();
+                let exe = library::resolve_game_executable(game, &self.ui);
                 let name = game.name.clone();
                 let id = game.identity.clone();
-                match library::prepare_with_profile(game, self.ui.current_profile()) {
+                let mut effective_game = game.clone();
+                effective_game.executable = exe.clone();
+                match library::prepare_with_profile(&effective_game, self.ui.current_profile()) {
                     Ok(()) => {
                         let input_mode = self.ui.pc_input_mode(&id);
                         self.ui.record_recent(&id);
@@ -2462,6 +2543,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, 
         cover_cache: library_art::CoverCache::default(),
         preview_key: None,
         preview_pe_kind: PeLaunchKind::XboxSeries,
+        preview_pc_exes: Vec::new(),
         preview_has_custom_cfg: false,
         preview_saves: (0, 0),
         preview_shader_cache: None,

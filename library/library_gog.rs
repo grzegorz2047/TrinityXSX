@@ -674,6 +674,7 @@ pub fn discover_unpacked_pc_game(dir: &Path, folder_name: &str, source_label: &s
         version: "1.0.0.0".into(),
         title_id,
         executable: exe_path,
+        root_dir: dir.to_path_buf(),
         folder: source_label.to_owned(),
         logo,
     })

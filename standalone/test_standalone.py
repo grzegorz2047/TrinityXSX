@@ -353,6 +353,12 @@ class StandaloneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             extract_wine_mono(bad, self.root / "mono-bad-out")
 
+    def test_runner_links_at_high_address_for_pe32_games(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        src = (repo_root / "standalone/native/build_runner.py").read_text(encoding="utf-8")
+        self.assertIn("ps5-pie-high.ld", src)
+        self.assertNotIn('"ps5-pie.ld"', src)
+
 
 if __name__ == "__main__":
     unittest.main()

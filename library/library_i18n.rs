@@ -397,6 +397,10 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         }
         (Lang::Pl, "Library updated automatically") => "Biblioteka odświeżona automatycznie",
         (Lang::Pl, "PC Controls") => "Sterowanie (PC)",
+        (Lang::Pl, "Executable") => "Plik uruchomieniowy",
+        (Lang::Pl, "Choose which .exe to launch when a PC game folder contains multiple executables (e.g. expansions or patches).") => {
+            "Wybierz plik .exe do uruchomienia, jeśli folder gry PC ma kilka plików (np. dodatki lub patche)."
+        }
         (Lang::Pl, "Auto") => "Auto",
         (Lang::Pl, "Gamepad") => "Pad",
         (Lang::Pl, "Mouse & KB") => "Mysz + KB",
@@ -408,6 +412,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
 
         // Portuguese
         (Lang::Pt, "PC Controls") => "Controles (PC)",
+        (Lang::Pt, "Executable") => "Executável",
         (Lang::Pt, "Gamepad") => "Controle",
         (Lang::Pt, "Mouse & KB") => "Mouse + Teclado",
         (Lang::Pt, "Gamepad (XInput)") => "Controle (XInput)",
@@ -428,6 +433,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
 
         // Spanish
         (Lang::Es, "PC Controls") => "Controles (PC)",
+        (Lang::Es, "Executable") => "Ejecutable",
         (Lang::Es, "Gamepad") => "Mando",
         (Lang::Es, "Mouse & KB") => "Ratón + Teclado",
         (Lang::Es, "Gamepad (XInput)") => "Mando (XInput)",

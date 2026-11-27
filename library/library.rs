@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{config::Config, launcher, library_gog::PcInputMode, library_i18n::Lang};
 
-pub const TRINITYXSX_VERSION: &str = "v0.2.11";
+pub const TRINITYXSX_VERSION: &str = "v0.2.12";
 
 const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
 const MAX_STORED_PATH_LEN: usize = 1024;
@@ -20,6 +20,7 @@ pub struct Game {
     pub version: String,
     pub title_id: String,
     pub executable: PathBuf,
+    pub root_dir: PathBuf,
     pub folder: String,
     pub logo: Option<PathBuf>,
 }
@@ -194,6 +195,7 @@ fn from_folder(folder: &Path, source: &str) -> Result<Game, String> {
         version: info.version,
         title_id: info.title_id,
         executable,
+        root_dir: folder,
         folder: source.to_owned(),
         logo,
     })
@@ -1225,6 +1227,7 @@ pub struct UiSettings {
     pub favorites: Vec<String>,
     pub recent: Vec<String>,
     pub pc_input_modes: BTreeMap<String, String>,
+    pub pc_executables: BTreeMap<String, String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1240,6 +1243,8 @@ struct UiSettingsFile {
     recent: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pc_input_modes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pc_executables: BTreeMap<String, String>,
 }
 
 impl Default for UiSettings {
@@ -1257,6 +1262,7 @@ impl Default for UiSettings {
             favorites: Vec::new(),
             recent: Vec::new(),
             pc_input_modes: BTreeMap::new(),
+            pc_executables: BTreeMap::new(),
         }
     }
 }
@@ -1302,6 +1308,21 @@ impl UiSettings {
         }
         if mode != PcInputMode::Auto {
             self.pc_input_modes.insert(identity.to_owned(), mode.code().to_owned());
+        }
+    }
+
+    pub fn pc_executable(&self, identity: &str) -> Option<&str> {
+        self.pc_executables.iter().find(|(k, _)| k.eq_ignore_ascii_case(identity)).map(|(_, v)| v.as_str())
+    }
+
+    pub fn set_pc_executable(&mut self, identity: &str, rel: Option<&str>) {
+        let existing: Vec<String> =
+            self.pc_executables.keys().filter(|k| k.eq_ignore_ascii_case(identity)).cloned().collect();
+        for key in existing {
+            self.pc_executables.remove(&key);
+        }
+        if let Some(rel) = rel.map(str::trim).filter(|s| !s.is_empty()) {
+            self.pc_executables.insert(identity.to_owned(), rel.to_owned());
         }
     }
 
@@ -1878,6 +1899,24 @@ pub fn format_storage_line(items: &[StorageSpace]) -> String {
         .join("  ·  ")
 }
 
+/// Resolve the effective executable path for `game`, honoring any user-selected relative `.exe`
+/// override in `ui` as long as it remains safely inside `game.root_dir` and exists on disk.
+pub fn resolve_game_executable(game: &Game, ui: &UiSettings) -> PathBuf {
+    if let Some(rel) = ui.pc_executable(&game.identity) {
+        let clean = rel.replace('/', "\\");
+        let safe = !clean.is_empty()
+            && !Path::new(&clean).is_absolute()
+            && Path::new(&clean).components().all(|c| matches!(c, Component::Normal(_)));
+        if safe {
+            let candidate = game.root_dir.join(&clean);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    game.executable.clone()
+}
+
 pub fn load_ui_settings(file: &Path) -> UiSettings {
     let Ok(text) = fs::read_to_string(file) else {
         return UiSettings::default();
@@ -1895,6 +1934,7 @@ pub fn load_ui_settings(file: &Path) -> UiSettings {
         favorites: parsed.favorites,
         recent: parsed.recent,
         pc_input_modes: parsed.pc_input_modes,
+        pc_executables: parsed.pc_executables,
     }
 }
 
@@ -1912,6 +1952,7 @@ pub fn save_ui_settings(file: &Path, settings: &UiSettings) -> io::Result<()> {
         favorites: settings.favorites.clone(),
         recent: settings.recent.clone(),
         pc_input_modes: settings.pc_input_modes.clone(),
+        pc_executables: settings.pc_executables.clone(),
     })
     .map_err(io::Error::other)?;
     let tmp = PathBuf::from(format!("{}.tmp", file.display()));
@@ -2157,6 +2198,7 @@ mod tests {
             version: "1.0".into(),
             title_id: String::new(),
             executable: dir.join("game.exe"),
+            root_dir: dir.clone(),
             folder: "/mnt/ext1".into(),
             logo: None,
         };
@@ -2694,6 +2736,7 @@ mod tests {
             version: "1.0.0.0".into(),
             title_id: "12345678".into(),
             executable: exe,
+            root_dir: dir.clone(),
             folder: "/mnt/ext1/xboxseries".into(),
             logo: None,
         };
@@ -2721,6 +2764,45 @@ mod tests {
         cleared.set_pc_input_mode("gog.1207658930", PcInputMode::Auto);
         assert_eq!(cleared.pc_input_mode("GOG.1207658930"), PcInputMode::Auto);
         assert!(!cleared.pc_input_modes.contains_key("GOG.1207658930"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_game_executable_honors_override_and_rejects_traversal() {
+        let dir = temp_dir("pc-exe-override");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let default_exe = dir.join("default.exe");
+        let alt_exe = dir.join("sub").join("alt.exe");
+        fs::write(&default_exe, b"MZ").unwrap();
+        fs::write(&alt_exe, b"MZ").unwrap();
+
+        let game = Game {
+            name: "Multi-EXE".into(),
+            identity: "PC.MultiExe".into(),
+            version: "1.0".into(),
+            title_id: "00000001".into(),
+            executable: default_exe.clone(),
+            root_dir: dir.clone(),
+            folder: "/mnt/ext1".into(),
+            logo: None,
+        };
+        let mut ui = UiSettings::default();
+        assert_eq!(resolve_game_executable(&game, &ui), default_exe);
+
+        ui.set_pc_executable("PC.MultiExe", Some("sub\\alt.exe"));
+        assert_eq!(resolve_game_executable(&game, &ui), alt_exe);
+
+        let file = dir.join("ui_settings.toml");
+        save_ui_settings(&file, &ui).unwrap();
+        let reloaded = load_ui_settings(&file);
+        assert_eq!(resolve_game_executable(&game, &reloaded), alt_exe);
+
+        // Traversal and missing paths safely fall back to default executable.
+        let mut bad = reloaded;
+        bad.set_pc_executable("PC.MultiExe", Some("..\\outside.exe"));
+        assert_eq!(resolve_game_executable(&game, &bad), default_exe);
+        bad.set_pc_executable("PC.MultiExe", Some("missing.exe"));
+        assert_eq!(resolve_game_executable(&game, &bad), default_exe);
         let _ = fs::remove_dir_all(&dir);
     }
 }

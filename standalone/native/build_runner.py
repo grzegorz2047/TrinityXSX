@@ -226,7 +226,9 @@ def build(
 
         pie = scratch / "runner-pie.elf"
         elf = scratch / "runner-sce.elf"
-        run(lld, *link_flags, "-pie", "-T", native / "ps5-pie.ld", "-e", "_start", "-o", pie,
+        # Link pw_runner.bin at 0x100000000 (ps5-pie-high.ld, matching upstream prospero-win)
+        # so the low 32-bit address space (0x00400000) stays free for fixed-base PE32 games.
+        run(lld, *link_flags, "-pie", "-T", native / "ps5-pie-high.ld", "-e", "_start", "-o", pie,
             *objects, "--as-needed", *sorted(libs.glob("*.so")), *imports)
         run(tool, "link", "--in", pie, "--out", elf, "--stub-dir", libs, "--stub", imports[0], "--stub", imports[1],
             "--module-sdk", "0x02000009", "--companion-sdk", "0x08050001", "--file-name", "pw_runner.elf")
