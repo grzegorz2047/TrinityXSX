@@ -102,12 +102,13 @@ impl PcInputMode {
     }
 }
 
+/// Only APIs backed by prospero-win's DualSense XInput bridge count as gamepad-ready.
+/// Legacy DirectInput (`dinput.dll` / `dinput8.dll`) is widely imported solely for PC keyboard
+/// and mouse input and is not bridged to XInput on PS5, so DirectInput-only games default to
+/// DualSense Mouse & Keyboard mode under `Auto`.
 fn is_gamepad_import(dll_lower: &str) -> bool {
     dll_lower.starts_with("xinput")
-        || matches!(
-            dll_lower,
-            "dinput8.dll" | "dinput.dll" | "sdl2.dll" | "sdl3.dll" | "unityplayer.dll" | "gameinput.dll"
-        )
+        || matches!(dll_lower, "sdl2.dll" | "sdl3.dll" | "unityplayer.dll" | "gameinput.dll")
 }
 
 #[derive(Debug, Clone)]
@@ -1064,6 +1065,18 @@ pub fn ps5_pc_handoff_available() -> bool {
     Path::new(PS5_STORAGE_ROOT).join("profiles").is_dir()
 }
 
+/// True when the selected executable is a setup/configuration/options utility rather than a
+/// fullscreen game binary. Such Win32 dialog tools need `view = desktop` (so dropdown lists and
+/// child popups extending outside the small dialog box are not clipped) and mouse + arrow-key
+/// controls even if they import `dinput8.dll` to probe controllers.
+pub fn is_config_utility_exe(exe_path: &Path) -> bool {
+    let Some(low) = exe_path.file_name().and_then(|s| s.to_str()).map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    const CONFIG_HINTS: &[&str] = &["setup", "config", "options", "settings", "launcher"];
+    CONFIG_HINTS.iter().any(|k| low.contains(k))
+}
+
 /// Write a dynamic `prospero-win` `.profile` (`trinityxsx-pc-game.profile`) + `pc_launch.flag`
 /// so `pw_runner.bin` launches a standard 32-bit or 64-bit PC/GOG game directly under Wine +
 /// DXVK / vkd3d-proton / Zink with zero XCL UMA overhead and Touchpad Return-to-Library support.
@@ -1136,8 +1149,18 @@ pub fn write_pc_handoff(
         }
     }
 
-    let profile_text =
-        format_pc_handoff_profile(safe_name, &clean_exe, &work_dir, arch, gfx, fg_val, fps_val, use_mouse_kb);
+    let is_config_tool = is_config_utility_exe(exe_path);
+    let profile_text = format_pc_handoff_profile(
+        safe_name,
+        &clean_exe,
+        &work_dir,
+        arch,
+        gfx,
+        fg_val,
+        fps_val,
+        use_mouse_kb || is_config_tool,
+        is_config_tool,
+    );
 
     let profile_file = format!("{PC_PROFILE_ID}.profile");
     fs::write(profiles_dir.join(&profile_file), profile_text)
@@ -1148,8 +1171,26 @@ pub fn write_pc_handoff(
     Ok(())
 }
 
-fn pc_input_section(use_mouse_kb: bool) -> &'static str {
-    if use_mouse_kb {
+fn pc_input_section(use_mouse_kb: bool, is_config_tool: bool) -> &'static str {
+    if is_config_tool {
+        "[input]\n\
+         mode = keyboard\n\
+         mouse = left_stick\n\
+         mouse_speed = 900\n\
+         cross = mouse_left\n\
+         r2 = mouse_left\n\
+         square = mouse_right\n\
+         l2 = mouse_right\n\
+         circle = escape\n\
+         options = escape\n\
+         triangle = enter\n\
+         up = up\n\
+         down = down\n\
+         left = left\n\
+         right = right\n\
+         l1 = space\n\
+         r1 = tab\n"
+    } else if use_mouse_kb {
         "[input]\n\
          mode = keyboard\n\
          mouse = left_stick\n\
@@ -1180,6 +1221,8 @@ fn pc_input_section(use_mouse_kb: bool) -> &'static str {
 ///   builtin XInput is always used even when a game bundles a native Windows `xinput*.dll`.
 /// - `thread_scheduling = true` enables `SCHED_RR` so Wine/DXVK worker threads do not starve.
 /// - `menu = true` enables `DXVK_HUD=fps,menu` so the Touchpad Quick Menu renders live over DXVK.
+/// - Config/setup utilities use `view = desktop` so Win32 dropdown popups extending below small
+///   dialog windows remain visible.
 #[allow(clippy::too_many_arguments)]
 fn format_pc_handoff_profile(
     safe_name: &str,
@@ -1190,8 +1233,10 @@ fn format_pc_handoff_profile(
     fg_val: &str,
     fps_val: &str,
     use_mouse_kb: bool,
+    is_config_tool: bool,
 ) -> String {
-    let input_block = pc_input_section(use_mouse_kb);
+    let input_block = pc_input_section(use_mouse_kb, is_config_tool);
+    let view_mode = if is_config_tool { "desktop" } else { "window" };
     format!(
         "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
          [application]\n\
@@ -1210,6 +1255,7 @@ fn format_pc_handoff_profile(
          \n\
          [display]\n\
          desktop = 1920x1080\n\
+         view = {view_mode}\n\
          framegen = {fg_val}\n\
          show_fps = {fps_val}\n\
          menu = true\n\
@@ -1327,10 +1373,12 @@ mod tests {
             "off",
             "true",
             false,
+            false,
         );
         assert!(profile.contains(
             "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
         ));
+        assert!(profile.contains("view = window\n"));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
         assert!(profile.contains("show_fps = true\nmenu = true"));
         assert!(profile.contains("[input]\nmode = xinput\n"));
@@ -1347,11 +1395,35 @@ mod tests {
             "off",
             "true",
             true,
+            false,
         );
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
         assert!(profile.contains("cross = mouse_left\n"));
         assert!(profile.contains("square = mouse_right\n"));
         assert!(profile.contains("circle = escape\n"));
+        assert!(profile.contains("up = w\n"));
+    }
+
+    #[test]
+    fn pc_handoff_profile_uses_desktop_view_and_arrow_keys_for_config_utilities() {
+        assert!(is_config_utility_exe(Path::new("Z:\\games\\foo\\R3_Setup_DX8.exe")));
+        assert!(is_config_utility_exe(Path::new("Z:\\games\\foo\\options.exe")));
+        assert!(is_config_utility_exe(Path::new("Z:\\games\\foo\\cnc-ddraw config.exe")));
+        assert!(!is_config_utility_exe(Path::new("Z:\\games\\foo\\Rayman3.exe")));
+        let profile = format_pc_handoff_profile(
+            "Setup Utility",
+            "Z:\\games\\foo\\R3_Setup_DX8.exe",
+            "Z:\\games\\foo",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            true,
+            true,
+        );
+        assert!(profile.contains("view = desktop\n"));
+        assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
+        assert!(profile.contains("up = up\ndown = down\nleft = left\nright = right\n"));
     }
 
     #[test]
@@ -1373,9 +1445,10 @@ mod tests {
     fn gamepad_import_classifier_detects_standard_windows_apis() {
         assert!(is_gamepad_import("xinput1_3.dll"));
         assert!(is_gamepad_import("xinput9_1_0.dll"));
-        assert!(is_gamepad_import("dinput8.dll"));
         assert!(is_gamepad_import("sdl2.dll"));
         assert!(is_gamepad_import("unityplayer.dll"));
+        assert!(!is_gamepad_import("dinput8.dll"));
+        assert!(!is_gamepad_import("dinput.dll"));
         assert!(!is_gamepad_import("ddraw.dll"));
         assert!(!is_gamepad_import("opengl32.dll"));
     }
