@@ -1086,6 +1086,15 @@ pub fn prepare(game: &Game) -> Result<(), String> {
 }
 
 pub fn prepare_with_profile(game: &Game, profile: &Profile) -> Result<(), String> {
+    // Standard 32-bit and 64-bit Windows PC/GOG games hand off directly to prospero-win
+    // (`wine-wow64` pe32/pe64) and do not require an Xbox 64-bit PE or `xcl.toml`.
+    if matches!(crate::library_gog::detect_pe_kind(&game.executable), crate::library_gog::PeLaunchKind::PcNative { .. })
+    {
+        if !game.executable.is_file() {
+            return Err(format!("executable missing: {}", game.executable.display()));
+        }
+        return Ok(());
+    }
     let (_, _, title) = launcher::resolve_target(&game.executable)?;
     if crate::inspect::console_imports(&game.executable).is_none() {
         return Err("the selected executable is not a valid 64-bit Windows PE program".into());
@@ -2640,5 +2649,31 @@ mod tests {
             assert!(!root.join("bench/results").exists(), "{bad}");
         }
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_with_profile_accepts_32bit_pc_executable_without_manifest() {
+        let dir = std::env::temp_dir().join(format!("txsx_prepare_pe32_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("game32.exe");
+        let mut pe = vec![0u8; 0x200];
+        pe[0..2].copy_from_slice(b"MZ");
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x80 + 24..0x80 + 26].copy_from_slice(&0x010Bu16.to_le_bytes());
+        fs::write(&exe, &pe).unwrap();
+        let game = Game {
+            name: "Classic 32-bit PC Game".into(),
+            identity: "PC.Classic32".into(),
+            version: "1.0.0.0".into(),
+            title_id: "12345678".into(),
+            executable: exe,
+            folder: "/mnt/ext1/xboxseries".into(),
+            logo: None,
+        };
+        let profile = Profile { name: "PS5Player".into(), user_id: 1 };
+        assert!(prepare_with_profile(&game, &profile).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1565,7 +1565,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     }
                     let inset = thumb_x + thumb_w + scale(20);
                     let display_title = if menu.ui.is_favorite(&game.identity) {
-                        format!("★ {}", game.name)
+                        format!("[*] {}", game.name)
                     } else {
                         game.name.clone()
                     };
