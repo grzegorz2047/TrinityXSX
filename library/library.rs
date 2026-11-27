@@ -1873,6 +1873,23 @@ fn query_disk_space(fs_path: &Path) -> Option<(u64, u64)> {
 /// Free and total space for the main PS5 storage mounts (`/mnt/ext1`, `/data`, `/mnt/usb0`)
 /// or `C:\` when running locally on Windows.
 pub fn storage_space_summary() -> Vec<StorageSpace> {
+    if ps5_environment() {
+        static PROBED: std::sync::Once = std::sync::Once::new();
+        PROBED.call_once(|| {
+            use windows_sys::Win32::Foundation::GetLastError;
+            use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceA, GetDiskFreeSpaceExW};
+            let (mut spc, mut bps, mut free_c, mut total_c) = (0u32, 0u32, 0u32, 0u32);
+            let ok_a = unsafe { GetDiskFreeSpaceA(std::ptr::null(), &mut spc, &mut bps, &mut free_c, &mut total_c) };
+            let err_a = unsafe { GetLastError() };
+            let c_root = crate::util::wide("C:\\");
+            let (mut avail, mut total, mut free_b) = (0u64, 0u64, 0u64);
+            let ok_ex = unsafe { GetDiskFreeSpaceExW(c_root.as_ptr(), &mut avail, &mut total, &mut free_b) };
+            let err_ex = unsafe { GetLastError() };
+            println!(
+                "TrinityXSX: disk-probe A(NULL) ok={ok_a} err={err_a} spc={spc} bps={bps} free={free_c} total={total_c} | ExW(C:\\) ok={ok_ex} err={err_ex} avail={avail} total={total}"
+            );
+        });
+    }
     let candidates: &[(&str, &str)] = if ps5_environment() {
         &[("/mnt/ext1", "Z:\\mnt\\ext1"), ("/data", "Z:\\data"), ("/mnt/usb0", "Z:\\mnt\\usb0")]
     } else {
