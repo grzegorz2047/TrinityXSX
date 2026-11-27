@@ -17,6 +17,10 @@ use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::FreeLibrary;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY,
+    KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+};
 
 use crate::library;
 
@@ -775,7 +779,170 @@ pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<Fin
     let _ = fs::remove_dir_all(unpacked_dir.join("tmp"));
 
     let pe_kind = detect_pe_kind(&exe_path);
+    let is_64bit = matches!(pe_kind, PeLaunchKind::PcNative { is_64bit: true, .. });
+    let _ = apply_gog_script_registry(unpacked_dir, is_64bit);
     Ok(FinalizedGog { name, identity, executable_rel: exe_rel_clean, has_cover, pe_kind })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GogRegRoot {
+    LocalMachine,
+    CurrentUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GogRegValue {
+    String(String),
+    Dword(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GogRegEntry {
+    root: GogRegRoot,
+    subkey: String,
+    name: String,
+    value: GogRegValue,
+}
+
+fn parse_gog_dword(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    u32::from_str_radix(trimmed, 16).ok().or_else(|| trimmed.parse::<u32>().ok())
+}
+
+/// Parse standard GOG Galaxy `goggame-*.script` JSON `"setRegistry"` install actions into
+/// concrete registry entries, expanding `{app}` to `app_dir_win` and skipping Windows UAC
+/// compatibility-layer shims (`AppCompatFlags\Layers`).
+fn parse_gog_script_registry(script_json: &str, app_dir_win: &str) -> Vec<GogRegEntry> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(script_json) else {
+        return Vec::new();
+    };
+    let Some(actions) = val.get("actions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let app_clean = app_dir_win.trim_end_matches(['\\', '/']);
+    let mut out = Vec::new();
+    for item in actions {
+        let Some(install) = item.get("install") else { continue };
+        if !install.get("action").and_then(|v| v.as_str()).is_some_and(|a| a.eq_ignore_ascii_case("setRegistry")) {
+            continue;
+        }
+        let Some(args) = install.get("arguments") else { continue };
+        if args.get("deleteSubkeys").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(root_str) = args.get("root").and_then(|v| v.as_str()) else { continue };
+        let root = match root_str.trim().to_ascii_uppercase().as_str() {
+            "HKEY_LOCAL_MACHINE" | "HKLM" => GogRegRoot::LocalMachine,
+            "HKEY_CURRENT_USER" | "HKCU" => GogRegRoot::CurrentUser,
+            _ => continue,
+        };
+        let Some(subkey) = args.get("subkey").and_then(|v| v.as_str()).map(str::trim) else { continue };
+        if subkey.is_empty() || subkey.to_ascii_lowercase().contains("appcompatflags\\layers") {
+            continue;
+        }
+        let Some(raw_name) = args.get("valueName").and_then(|v| v.as_str()) else { continue };
+        let Some(raw_data) = args.get("valueData").and_then(|v| v.as_str()) else { continue };
+        let value_type = args.get("valueType").and_then(|v| v.as_str()).unwrap_or("string");
+        let name = raw_name.replace("{app}", app_clean);
+        let value = if value_type.eq_ignore_ascii_case("dword") {
+            let Some(n) = parse_gog_dword(raw_data) else { continue };
+            GogRegValue::Dword(n)
+        } else {
+            GogRegValue::String(raw_data.replace("{app}", app_clean))
+        };
+        out.push(GogRegEntry { root, subkey: subkey.to_owned(), name, value });
+    }
+    out
+}
+
+fn to_wide_z(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn write_registry_entry(entry: &GogRegEntry, sam: u32) -> bool {
+    let root_hkey: HKEY = match entry.root {
+        GogRegRoot::LocalMachine => HKEY_LOCAL_MACHINE,
+        GogRegRoot::CurrentUser => HKEY_CURRENT_USER,
+    };
+    let subkey_w = to_wide_z(&entry.subkey);
+    let name_w = to_wide_z(&entry.name);
+    let mut hkey: HKEY = std::ptr::null_mut();
+    unsafe {
+        let rc = RegCreateKeyExW(
+            root_hkey,
+            subkey_w.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            sam,
+            std::ptr::null(),
+            &mut hkey,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 || hkey.is_null() {
+            return false;
+        }
+        let set_rc = match &entry.value {
+            GogRegValue::String(s) => {
+                let data_w = to_wide_z(s);
+                let byte_len = (data_w.len() * std::mem::size_of::<u16>()) as u32;
+                RegSetValueExW(hkey, name_w.as_ptr(), 0, REG_SZ, data_w.as_ptr() as *const u8, byte_len)
+            }
+            GogRegValue::Dword(n) => {
+                let bytes = n.to_le_bytes();
+                RegSetValueExW(hkey, name_w.as_ptr(), 0, REG_DWORD, bytes.as_ptr(), bytes.len() as u32)
+            }
+        };
+        let _ = RegCloseKey(hkey);
+        set_rc == 0
+    }
+}
+
+fn find_gog_script_in_dir(dir: &Path) -> Option<PathBuf> {
+    let rd = fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            let low = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if low.starts_with("goggame-") && low.ends_with(".script") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Apply standard GOG `goggame-*.script` `setRegistry` install actions into the current Wine
+/// prefix registry so unpacked GOG games find their expected `InstallDir` / configuration keys.
+/// Writes both 32-bit (WoW64) and 64-bit HKLM views for 32-bit games.
+pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
+    let Some(script_path) = find_gog_script_in_dir(game_dir).or_else(|| find_gog_script_in_dir(&game_dir.join("app")))
+    else {
+        return 0;
+    };
+    let Ok(text) = fs::read_to_string(&script_path) else {
+        return 0;
+    };
+    let app_dir_win = strip_verbatim_prefix(&game_dir.to_string_lossy());
+    let entries = parse_gog_script_registry(&text, &app_dir_win);
+    let mut written = 0usize;
+    for entry in &entries {
+        let ok = match entry.root {
+            GogRegRoot::LocalMachine => {
+                let wow32 = !is_64bit && write_registry_entry(entry, KEY_WRITE | KEY_WOW64_32KEY);
+                let native64 = write_registry_entry(entry, KEY_WRITE | KEY_WOW64_64KEY);
+                wow32 || native64
+            }
+            GogRegRoot::CurrentUser => write_registry_entry(entry, KEY_WRITE),
+        };
+        if ok {
+            written += 1;
+        }
+    }
+    written
 }
 
 /// Extract a GOG offline installer in-process using bundled `trinity_innoextract.dll` (zlib).
@@ -909,6 +1076,17 @@ pub fn write_pc_handoff(
     let arch = if is_64bit { "pe64" } else { "pe32" };
     let gfx = if prefer_opengl { "zink" } else { "dxvk" };
 
+    // Apply standard GOG `goggame-*.script` registry actions (e.g. InstallDir) before launch
+    // for games unpacked via innoextract, checking both exe directory and its parent (bin/app).
+    if let Some(exe_dir) = exe_path.parent() {
+        let applied = apply_gog_script_registry(exe_dir, is_64bit);
+        if applied == 0 {
+            if let Some(parent) = exe_dir.parent() {
+                let _ = apply_gog_script_registry(parent, is_64bit);
+            }
+        }
+    }
+
     // Ensure 64-bit vkd3d-proton D3D12 DLLs from C:\XCL are installed in system32 for PC games
     // launched outside C:\XCL (replace Wine's built-in D3D12 stubs whenever sizes differ).
     // Keep prospero-win's PS5-tuned DXVK v2.6.2-2-g1Queue (d3d11.dll / dxgi.dll) in system32
@@ -993,7 +1171,7 @@ fn format_pc_handoff_profile(
          name = {safe_name}\n\
          executable = {clean_exe}\n\
          working_directory = {work_dir}\n\
-         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
+         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
          prefix = default\n\
          runtime = wine-wow64\n\
          architecture = {arch}\n\
@@ -1123,7 +1301,7 @@ mod tests {
             false,
         );
         assert!(profile.contains(
-            "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
+            "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
         ));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
         assert!(profile.contains("show_fps = true\nmenu = true"));
@@ -1234,5 +1412,77 @@ mod tests {
         assert_eq!(fin.executable_rel, "app\\GameMain.exe");
         assert!(tmp.join("MicrosoftGame.config").is_file());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parses_gog_script_registry_actions_and_skips_compat_shims() {
+        let script = r#"{
+            "actions": [
+                {
+                    "install": {
+                        "action": "setRegistry",
+                        "arguments": {
+                            "root": "HKEY_LOCAL_MACHINE",
+                            "subkey": "SOFTWARE\\Vendor\\ClassicGame",
+                            "valueName": "InstallDir",
+                            "valueData": "{app}",
+                            "valueType": "string"
+                        }
+                    }
+                },
+                {
+                    "install": {
+                        "action": "setRegistry",
+                        "arguments": {
+                            "root": "HKEY_LOCAL_MACHINE",
+                            "subkey": "SOFTWARE\\Vendor\\ClassicGame",
+                            "valueName": "CompleteInstall",
+                            "valueData": "00000001",
+                            "valueType": "dword"
+                        }
+                    }
+                },
+                {
+                    "install": {
+                        "action": "setRegistry",
+                        "arguments": {
+                            "root": "HKEY_CURRENT_USER",
+                            "subkey": "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers",
+                            "valueName": "{app}\\Setup.exe",
+                            "valueData": "RUNASADMIN",
+                            "valueType": "string"
+                        }
+                    }
+                },
+                {
+                    "install": {
+                        "action": "setRegistry",
+                        "arguments": {
+                            "deleteSubkeys": true,
+                            "root": "HKEY_LOCAL_MACHINE",
+                            "subkey": "SOFTWARE\\Vendor\\Old"
+                        }
+                    }
+                }
+            ]
+        }"#;
+        let entries = parse_gog_script_registry(script, "Z:\\mnt\\ext1\\xboxseries\\classic\\");
+        assert_eq!(
+            entries,
+            vec![
+                GogRegEntry {
+                    root: GogRegRoot::LocalMachine,
+                    subkey: "SOFTWARE\\Vendor\\ClassicGame".into(),
+                    name: "InstallDir".into(),
+                    value: GogRegValue::String("Z:\\mnt\\ext1\\xboxseries\\classic".into()),
+                },
+                GogRegEntry {
+                    root: GogRegRoot::LocalMachine,
+                    subkey: "SOFTWARE\\Vendor\\ClassicGame".into(),
+                    name: "CompleteInstall".into(),
+                    value: GogRegValue::Dword(1),
+                },
+            ]
+        );
     }
 }
