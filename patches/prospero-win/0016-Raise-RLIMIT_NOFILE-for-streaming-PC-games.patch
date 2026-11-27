@@ -1,0 +1,72 @@
+From db5eba794cf0c592cce202b56f3bae3d7241079e Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 14:43:39 +0100
+Subject: [PATCH] Raise RLIMIT_NOFILE after elevation for streaming-heavy
+ PC/GOG games
+
+Streaming-heavy engines (e.g. Unreal Engine 3) can exceed the default
+per-process descriptor limit (~1024) on PS5 and abort with EMFILE.
+After lapy elevation (uid=0) and diagnostics init, attempt to raise
+RLIMIT_NOFILE up to PW_CWD_MAX_FDS (4096) with fallback to 2048 and
+rlim_max, logging effective before/after bounds in the session log.
+---
+ native/wine64_main.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 8d03461..e1fcc8a 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1499,6 +1499,41 @@ static void init_default_mouse_kb_input(PwGameInput *out)
+         out->bindings[i] = defaults[i];
+ }
+ 
++static void raise_nofile_limit(void)
++{
++#ifdef RLIMIT_NOFILE
++    struct rlimit before, after;
++    static const rlim_t targets[] = { 4096, 2048 };
++
++    if (getrlimit(RLIMIT_NOFILE, &before) != 0) {
++        PS5LOG_LOG("PW_WINE64 nofile getrlimit failed errno=%d", errno);
++        return;
++    }
++    after = before;
++    /* After lapy elevation (uid=0) try raising both soft and hard limits up to
++     * PW_CWD_MAX_FDS (4096) so streaming-heavy PC/GOG engines do not hit EMFILE. */
++    for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
++        if (after.rlim_cur >= targets[i]) break;
++        struct rlimit want = {
++            targets[i],
++            before.rlim_max > targets[i] ? before.rlim_max : targets[i]
++        };
++        if (setrlimit(RLIMIT_NOFILE, &want) == 0) {
++            (void)getrlimit(RLIMIT_NOFILE, &after);
++            break;
++        }
++    }
++    if (after.rlim_cur < after.rlim_max) {
++        struct rlimit want = { after.rlim_max, after.rlim_max };
++        if (setrlimit(RLIMIT_NOFILE, &want) == 0)
++            (void)getrlimit(RLIMIT_NOFILE, &after);
++    }
++    PS5LOG_LOG("PW_WINE64 nofile before=%llu/%llu after=%llu/%llu",
++               (unsigned long long)before.rlim_cur, (unsigned long long)before.rlim_max,
++               (unsigned long long)after.rlim_cur, (unsigned long long)after.rlim_max);
++#endif
++}
++
+ int main(int argc, char **argv)
+ {
+     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
+@@ -1754,6 +1789,7 @@ int main(int argc, char **argv)
+                    effective_dll_overrides[0] ? effective_dll_overrides : "-");
+         /* What Wine gives the game as NumberOfProcessors. */
+         PS5LOG_LOG("PW_WINE64 cpus online=%ld", sysconf(_SC_NPROCESSORS_ONLN));
++        raise_nofile_limit();
+         {
+             /* The temp folders the prefix names, which a prefix made on the
+              * PC may lack on the console (src/pw_prefix_temp.h). */
+-- 
+2.48.1.windows.1
+

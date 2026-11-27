@@ -1,0 +1,72 @@
+From 6a75304e1b93947f68630e521b732aa3525cc57e Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 14:43:39 +0100
+Subject: [PATCH] Add Wine-PS5 patch 0988 for fstatvfs ENOSYS volume-size
+ fallback
+
+Adds wine/patches/0988-ntdll-ps5-fallback-volume-size-when-fstatvfs-enosys.patch
+so Win32 GetDiskFreeSpace* calls succeed on PS5 instead of failing with
+STATUS_NOT_IMPLEMENTED when pw_wine_compat's fstatfs stub returns ENOSYS.
+---
+ ...ack-volume-size-when-fstatvfs-enosys.patch | 49 +++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+ create mode 100644 wine/patches/0988-ntdll-ps5-fallback-volume-size-when-fstatvfs-enosys.patch
+
+diff --git a/wine/patches/0988-ntdll-ps5-fallback-volume-size-when-fstatvfs-enosys.patch b/wine/patches/0988-ntdll-ps5-fallback-volume-size-when-fstatvfs-enosys.patch
+new file mode 100644
+index 0000000..c2fb7cb
+--- /dev/null
++++ b/wine/patches/0988-ntdll-ps5-fallback-volume-size-when-fstatvfs-enosys.patch
+@@ -0,0 +1,49 @@
++From d72f4988a293b89d731cd8594db80aa2f9c9a137 Mon Sep 17 00:00:00 2001
++From: TrinityXSX <trinityxsx@users.noreply.github.com>
++Date: Fri, 27 Nov 2026 14:43:39 +0100
++Subject: [PATCH] ntdll: Report fallback volume size on PS5 when fstatvfs
++ returns ENOSYS.
++
++On PS5, pw_wine_compat stubs fstatfs() to ENOSYS because libkernel does not
++export it, causing get_full_size_info() and all Win32 GetDiskFreeSpace* calls
++to fail with STATUS_NOT_IMPLEMENTED (0 bytes free). Return a 65 GiB volume
++with 33 GiB available (which also stays positive modulo 4 GiB for legacy
++32-bit signed callers) when fstatvfs() fails with ENOSYS on a valid fd.
++---
++ dlls/ntdll/unix/file.c | 20 +++++++++++++++++++-
++ 1 file changed, 19 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
++index 48b58c3..438638f 100644
++--- a/dlls/ntdll/unix/file.c
+++++ b/dlls/ntdll/unix/file.c
++@@ -2235,7 +2235,25 @@ static NTSTATUS get_full_size_info(int fd, FILE_FS_FULL_SIZE_INFORMATION *info)
++ 
++     /* Linux's fstatvfs is buggy */
++ #if !defined(linux) || !defined(HAVE_FSTATFS)
++-    if (fstatvfs( fd, &stfs ) < 0) return errno_to_status( errno );
+++    if (fstatvfs( fd, &stfs ) < 0)
+++    {
+++#ifdef __PROSPERO__
+++        if (errno == ENOSYS)
+++        {
+++            /* PS5 libkernel does not export fstatfs/fstatvfs (pw_wine_compat stubs
+++             * fstatfs to ENOSYS). Report 33 GiB free / 65 GiB total: plenty for 64-bit
+++             * GetDiskFreeSpaceEx*, capped to <2 GiB in Win9x mode, and +1 GiB modulo
+++             * 4 GiB so legacy 32-bit signed GetDiskFreeSpaceA never wraps negative. */
+++            info->BytesPerSector = 512;
+++            info->SectorsPerAllocationUnit = 8;
+++            info->TotalAllocationUnits.QuadPart = (ULONGLONG)65 * 256 * 1024;
+++            info->CallerAvailableAllocationUnits.QuadPart = (ULONGLONG)33 * 256 * 1024;
+++            info->ActualAvailableAllocationUnits.QuadPart = (ULONGLONG)33 * 256 * 1024;
+++            return STATUS_SUCCESS;
+++        }
+++#endif
+++        return errno_to_status( errno );
+++    }
++     bsize = stfs.f_frsize;
++ #else
++     if (fstatfs( fd, &stfs ) < 0) return errno_to_status( errno );
++-- 
++2.48.1.windows.1
++
+-- 
+2.48.1.windows.1
+
