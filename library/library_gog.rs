@@ -1391,7 +1391,61 @@ fn find_gog_script_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Apply standard GOG `goggame-*.script` `setRegistry` install actions into the current Wine
-/// prefix registry so unpacked GOG games find their expected `InstallDir` / configuration keys.
+/// Parse UTF-16LE strings inside a GOG Windows AppCompat `.sdb` database (`installSDB` action)
+/// to extract any standard Windows version-lie shim (`Win98VersionLie`, `Win95VersionLie`,
+/// `Win2000VersionLie`, `WinXP*VersionLie`) and the `.exe` filenames it targets.
+/// Applying the matching `HKCU\Software\Wine\AppDefaults\<exe>\Version` enables Wine's built-in
+/// Win9x behaviors (including the 2 GiB cap in `GetDiskFreeSpaceA` that prevents 32-bit signed
+/// overflow on large drives).
+pub fn parse_gog_sdb_wine_version(sdb_bytes: &[u8]) -> Option<(&'static str, Vec<String>)> {
+    let mut strings = Vec::new();
+    let mut current = String::new();
+    let mut i = 0usize;
+    while i + 1 < sdb_bytes.len() {
+        let cu = u16::from_le_bytes([sdb_bytes[i], sdb_bytes[i + 1]]);
+        i += 2;
+        if (0x20..=0x7E).contains(&cu) {
+            current.push(cu as u8 as char);
+        } else {
+            if current.len() >= 4 {
+                strings.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+    if current.len() >= 4 {
+        strings.push(current);
+    }
+
+    let mut version: Option<&'static str> = None;
+    let mut exes: Vec<String> = Vec::new();
+    for s in &strings {
+        let low = s.to_ascii_lowercase();
+        if version.is_none() {
+            if low.contains("win98versionlie") || low == "win98" {
+                version = Some("win98");
+            } else if low.contains("win95versionlie") || low == "win95" {
+                version = Some("win95");
+            } else if low.contains("win2000versionlie") || low.contains("win2kversionlie") {
+                version = Some("win2k");
+            } else if low.contains("winxp") && low.contains("versionlie") {
+                version = Some("winxp");
+            }
+        }
+        if low.ends_with(".exe")
+            && !s.contains(['\\', '/', ':', ' '])
+            && !exes.iter().any(|e| e.eq_ignore_ascii_case(s))
+        {
+            exes.push(s.clone());
+        }
+    }
+    version.map(|v| (v, exes))
+}
+
+/// Apply `"setRegistry"`, `"supportData"`, and `"installSDB"` actions from a GOG game's
+/// `goggame-*.script` into the Wine prefix registry so unpacked GOG games find their expected
+/// `InstallDir`, folders, and Wine AppDefaults version shims.
 /// Writes both 32-bit (WoW64) and 64-bit HKLM views for 32-bit games.
 pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
     let Some(script_path) = find_gog_script_in_dir(game_dir).or_else(|| find_gog_script_in_dir(&game_dir.join("app")))
@@ -1402,26 +1456,42 @@ pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
         return 0;
     };
     let app_dir_win = strip_verbatim_prefix(&game_dir.to_string_lossy());
-    let entries = parse_gog_script_registry(&text, &app_dir_win);
+    let mut entries = parse_gog_script_registry(&text, &app_dir_win);
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
         if let Some(actions) = val.get("actions").and_then(|v| v.as_array()) {
             for item in actions {
                 let Some(install) = item.get("install") else { continue };
-                if !install
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|a| a.eq_ignore_ascii_case("supportData"))
-                {
-                    continue;
-                }
+                let Some(action) = install.get("action").and_then(|v| v.as_str()) else { continue };
                 let Some(args) = install.get("arguments") else { continue };
-                if !args.get("type").and_then(|v| v.as_str()).is_some_and(|t| t.eq_ignore_ascii_case("folder")) {
-                    continue;
-                }
-                let Some(target) = args.get("target").and_then(|v| v.as_str()) else { continue };
-                if let Some(rel) = target.strip_prefix("{app}/").or_else(|| target.strip_prefix("{app}\\")) {
-                    if !rel.contains("..") && !rel.contains(':') && !rel.is_empty() {
-                        let _ = fs::create_dir_all(game_dir.join(rel.replace('/', "\\")));
+                if action.eq_ignore_ascii_case("supportData") {
+                    if !args.get("type").and_then(|v| v.as_str()).is_some_and(|t| t.eq_ignore_ascii_case("folder")) {
+                        continue;
+                    }
+                    let Some(target) = args.get("target").and_then(|v| v.as_str()) else { continue };
+                    if let Some(rel) = target.strip_prefix("{app}/").or_else(|| target.strip_prefix("{app}\\")) {
+                        if !rel.contains("..") && !rel.contains(':') && !rel.is_empty() {
+                            let _ = fs::create_dir_all(game_dir.join(rel.replace('/', "\\")));
+                        }
+                    }
+                } else if action.eq_ignore_ascii_case("installSDB") {
+                    let Some(sdb_raw) = args.get("sdbFile").and_then(|v| v.as_str()) else { continue };
+                    let rel =
+                        sdb_raw.strip_prefix("{app}/").or_else(|| sdb_raw.strip_prefix("{app}\\")).unwrap_or(sdb_raw);
+                    if rel.contains("..") || rel.contains(':') || rel.is_empty() {
+                        continue;
+                    }
+                    let sdb_path = game_dir.join(rel.replace('/', "\\"));
+                    if let Ok(sdb_bytes) = fs::read(&sdb_path) {
+                        if let Some((wine_ver, exes)) = parse_gog_sdb_wine_version(&sdb_bytes) {
+                            for exe_name in exes {
+                                entries.push(GogRegEntry {
+                                    root: GogRegRoot::CurrentUser,
+                                    subkey: format!("Software\\Wine\\AppDefaults\\{exe_name}"),
+                                    name: "Version".into(),
+                                    value: GogRegValue::String(wine_ver.into()),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -2219,6 +2289,27 @@ mod tests {
         assert!(!tmp.join("xdd.dll.ddrawcompat.bak").exists());
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parses_gog_sdb_version_lie_and_target_exes() {
+        let mut sdb = Vec::new();
+        for s in ["Compat DB", "SingleProcAffinity", "Win98VersionLie", "MainGame.exe", "Expansion.exe", "MainGame.exe"]
+        {
+            for u in s.encode_utf16() {
+                sdb.extend_from_slice(&u.to_le_bytes());
+            }
+            sdb.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let (ver, exes) = parse_gog_sdb_wine_version(&sdb).unwrap();
+        assert_eq!(ver, "win98");
+        assert_eq!(exes, vec!["MainGame.exe".to_owned(), "Expansion.exe".to_owned()]);
+
+        let mut no_ver = Vec::new();
+        for u in "SingleProcAffinity\0Other.exe\0".encode_utf16() {
+            no_ver.extend_from_slice(&u.to_le_bytes());
+        }
+        assert!(parse_gog_sdb_wine_version(&no_ver).is_none());
     }
 
     #[test]
