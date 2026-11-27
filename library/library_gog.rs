@@ -48,14 +48,20 @@ impl PeLaunchKind {
 /// Preferred DualSense controller mapping when launching a PC/GOG game on PS5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PcInputMode {
-    /// Auto-select Gamepad (XInput) when the executable imports a controller API,
-    /// or Mouse & Keyboard emulation when it only expects mouse/keyboard input.
+    /// Auto-select Gamepad (XInput) when the executable imports an XInput-capable API,
+    /// or Mouse + WASD emulation when it only expects mouse/keyboard input.
     #[default]
     Auto,
-    /// Always expose the DualSense as an XInput gamepad.
+    /// Always expose the DualSense as an Xbox 360 XInput gamepad.
     Gamepad,
-    /// Map DualSense left stick to the mouse cursor and buttons to clicks / keys.
+    /// Left stick = mouse cursor, D-pad = WASD, X/R2 = LMB, Square/L2 = RMB (RTS, RPG, strategy).
     MouseKeyboard,
+    /// Classic Arrow-key platformer/arcade preset: D-pad = Arrows, Right stick = mouse camera,
+    /// X/R2 = Space, Square = C, Circle = Backspace, Triangle = Enter, R1 = Ctrl, L1 = Shift, L2 = Z.
+    ArrowsAction,
+    /// Classic 3D/FPS keyboard+mouse preset: D-pad = WASD, Right stick = mouse look,
+    /// R2/X = LMB, L2/Square = RMB, L1 = Space, R1 = E, Circle = Ctrl, Triangle = R.
+    FpsWasd,
 }
 
 impl PcInputMode {
@@ -64,6 +70,8 @@ impl PcInputMode {
             PcInputMode::Auto => "auto",
             PcInputMode::Gamepad => "gamepad",
             PcInputMode::MouseKeyboard => "mouse_kb",
+            PcInputMode::ArrowsAction => "arrows",
+            PcInputMode::FpsWasd => "fps",
         }
     }
 
@@ -71,6 +79,8 @@ impl PcInputMode {
         match raw.trim().to_ascii_lowercase().as_str() {
             "gamepad" | "xinput" => PcInputMode::Gamepad,
             "mouse_kb" | "mouse" | "keyboard" => PcInputMode::MouseKeyboard,
+            "arrows" | "arcade" | "platformer" => PcInputMode::ArrowsAction,
+            "fps" | "wasd_fps" => PcInputMode::FpsWasd,
             _ => PcInputMode::Auto,
         }
     }
@@ -79,26 +89,40 @@ impl PcInputMode {
         match self {
             PcInputMode::Auto => PcInputMode::Gamepad,
             PcInputMode::Gamepad => PcInputMode::MouseKeyboard,
-            PcInputMode::MouseKeyboard => PcInputMode::Auto,
+            PcInputMode::MouseKeyboard => PcInputMode::ArrowsAction,
+            PcInputMode::ArrowsAction => PcInputMode::FpsWasd,
+            PcInputMode::FpsWasd => PcInputMode::Auto,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            PcInputMode::Auto => PcInputMode::MouseKeyboard,
+            PcInputMode::Auto => PcInputMode::FpsWasd,
             PcInputMode::Gamepad => PcInputMode::Auto,
             PcInputMode::MouseKeyboard => PcInputMode::Gamepad,
+            PcInputMode::ArrowsAction => PcInputMode::MouseKeyboard,
+            PcInputMode::FpsWasd => PcInputMode::ArrowsAction,
         }
     }
 
-    /// Resolve whether the dynamic `prospero-win` handoff profile should start in
-    /// DualSense Mouse & Keyboard mode (`true`) or XInput Gamepad mode (`false`).
-    pub fn resolve_use_mouse_kb(self, has_gamepad_api: bool) -> bool {
+    /// Resolve `Auto` into a concrete handoff input mode (`Gamepad` vs `MouseKeyboard`),
+    /// preserving any explicit user preset selection.
+    pub fn resolve(self, has_gamepad_api: bool) -> Self {
         match self {
-            PcInputMode::Auto => !has_gamepad_api,
-            PcInputMode::Gamepad => false,
-            PcInputMode::MouseKeyboard => true,
+            PcInputMode::Auto => {
+                if has_gamepad_api {
+                    PcInputMode::Gamepad
+                } else {
+                    PcInputMode::MouseKeyboard
+                }
+            }
+            explicit => explicit,
         }
+    }
+
+    /// True when the resolved mode drives keyboard/mouse bindings instead of XInput.
+    pub fn resolve_use_mouse_kb(self, has_gamepad_api: bool) -> bool {
+        self.resolve(has_gamepad_api) != PcInputMode::Gamepad
     }
 }
 
@@ -1085,7 +1109,7 @@ pub fn write_pc_handoff(
     exe_path: &Path,
     is_64bit: bool,
     prefer_opengl: bool,
-    use_mouse_kb: bool,
+    resolved_mode: PcInputMode,
 ) -> Result<(), String> {
     let root = Path::new(PS5_STORAGE_ROOT);
     let profiles_dir = root.join("profiles");
@@ -1158,7 +1182,7 @@ pub fn write_pc_handoff(
         gfx,
         fg_val,
         fps_val,
-        use_mouse_kb || is_config_tool,
+        resolved_mode,
         is_config_tool,
     );
 
@@ -1171,46 +1195,88 @@ pub fn write_pc_handoff(
     Ok(())
 }
 
-fn pc_input_section(use_mouse_kb: bool, is_config_tool: bool) -> &'static str {
+fn pc_input_section(mode: PcInputMode, is_config_tool: bool) -> &'static str {
     if is_config_tool {
-        "[input]\n\
-         mode = keyboard\n\
-         mouse = left_stick\n\
-         mouse_speed = 900\n\
-         cross = mouse_left\n\
-         r2 = mouse_left\n\
-         square = mouse_right\n\
-         l2 = mouse_right\n\
-         circle = escape\n\
-         options = escape\n\
-         triangle = enter\n\
-         up = up\n\
-         down = down\n\
-         left = left\n\
-         right = right\n\
-         l1 = space\n\
-         r1 = tab\n"
-    } else if use_mouse_kb {
-        "[input]\n\
-         mode = keyboard\n\
-         mouse = left_stick\n\
-         mouse_speed = 900\n\
-         cross = mouse_left\n\
-         r2 = mouse_left\n\
-         square = mouse_right\n\
-         l2 = mouse_right\n\
-         circle = escape\n\
-         options = escape\n\
-         triangle = enter\n\
-         up = w\n\
-         down = s\n\
-         left = a\n\
-         right = d\n\
-         l1 = space\n\
-         r1 = tab\n"
-    } else {
-        "[input]\n\
-         mode = xinput\n"
+        return "[input]\n\
+                mode = keyboard\n\
+                mouse = left_stick\n\
+                mouse_speed = 900\n\
+                cross = mouse_left\n\
+                r2 = mouse_left\n\
+                square = mouse_right\n\
+                l2 = mouse_right\n\
+                circle = escape\n\
+                options = escape\n\
+                triangle = enter\n\
+                up = up\n\
+                down = down\n\
+                left = left\n\
+                right = right\n\
+                l1 = space\n\
+                r1 = tab\n";
+    }
+    match mode {
+        PcInputMode::Gamepad => {
+            "[input]\n\
+                                 mode = xinput\n"
+        }
+        PcInputMode::ArrowsAction => {
+            "[input]\n\
+                                      mode = keyboard\n\
+                                      mouse = right_stick\n\
+                                      mouse_speed = 900\n\
+                                      up = up\n\
+                                      down = down\n\
+                                      left = left\n\
+                                      right = right\n\
+                                      cross = space\n\
+                                      r2 = space\n\
+                                      square = c\n\
+                                      triangle = enter\n\
+                                      circle = backspace\n\
+                                      options = escape\n\
+                                      r1 = ctrl\n\
+                                      l1 = shift\n\
+                                      l2 = z\n"
+        }
+        PcInputMode::FpsWasd => {
+            "[input]\n\
+                                 mode = keyboard\n\
+                                 mouse = right_stick\n\
+                                 mouse_speed = 900\n\
+                                 up = w\n\
+                                 down = s\n\
+                                 left = a\n\
+                                 right = d\n\
+                                 r2 = mouse_left\n\
+                                 cross = mouse_left\n\
+                                 l2 = mouse_right\n\
+                                 square = mouse_right\n\
+                                 l1 = space\n\
+                                 r1 = e\n\
+                                 circle = ctrl\n\
+                                 triangle = r\n\
+                                 options = escape\n"
+        }
+        PcInputMode::MouseKeyboard | PcInputMode::Auto => {
+            "[input]\n\
+                                                           mode = keyboard\n\
+                                                           mouse = left_stick\n\
+                                                           mouse_speed = 900\n\
+                                                           cross = mouse_left\n\
+                                                           r2 = mouse_left\n\
+                                                           square = mouse_right\n\
+                                                           l2 = mouse_right\n\
+                                                           circle = escape\n\
+                                                           options = escape\n\
+                                                           triangle = enter\n\
+                                                           up = w\n\
+                                                           down = s\n\
+                                                           left = a\n\
+                                                           right = d\n\
+                                                           l1 = space\n\
+                                                           r1 = tab\n"
+        }
     }
 }
 
@@ -1232,10 +1298,10 @@ fn format_pc_handoff_profile(
     gfx: &str,
     fg_val: &str,
     fps_val: &str,
-    use_mouse_kb: bool,
+    resolved_mode: PcInputMode,
     is_config_tool: bool,
 ) -> String {
-    let input_block = pc_input_section(use_mouse_kb, is_config_tool);
+    let input_block = pc_input_section(resolved_mode, is_config_tool);
     let view_mode = if is_config_tool { "desktop" } else { "window" };
     format!(
         "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
@@ -1372,7 +1438,7 @@ mod tests {
             "dxvk",
             "off",
             "true",
-            false,
+            PcInputMode::Gamepad,
             false,
         );
         assert!(profile.contains(
@@ -1394,7 +1460,7 @@ mod tests {
             "dxvk",
             "off",
             "true",
-            true,
+            PcInputMode::MouseKeyboard,
             false,
         );
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
@@ -1402,6 +1468,41 @@ mod tests {
         assert!(profile.contains("square = mouse_right\n"));
         assert!(profile.contains("circle = escape\n"));
         assert!(profile.contains("up = w\n"));
+    }
+
+    #[test]
+    fn pc_handoff_profile_emits_arrows_action_and_fps_presets() {
+        let arrows = format_pc_handoff_profile(
+            "Classic Platformer",
+            "Z:\\games\\plat\\game.exe",
+            "Z:\\games\\plat",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            PcInputMode::ArrowsAction,
+            false,
+        );
+        assert!(arrows.contains("view = window\n"));
+        assert!(arrows.contains("mouse = right_stick\n"));
+        assert!(arrows.contains("up = up\ndown = down\nleft = left\nright = right\n"));
+        assert!(arrows.contains("cross = space\nr2 = space\nsquare = c\n"));
+        assert!(arrows.contains("r1 = ctrl\nl1 = shift\nl2 = z\n"));
+
+        let fps = format_pc_handoff_profile(
+            "Classic FPS",
+            "Z:\\games\\fps\\game.exe",
+            "Z:\\games\\fps",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            PcInputMode::FpsWasd,
+            false,
+        );
+        assert!(fps.contains("mouse = right_stick\n"));
+        assert!(fps.contains("up = w\ndown = s\nleft = a\nright = d\n"));
+        assert!(fps.contains("r2 = mouse_left\ncross = mouse_left\nl2 = mouse_right\n"));
     }
 
     #[test]
@@ -1418,7 +1519,7 @@ mod tests {
             "dxvk",
             "off",
             "true",
-            true,
+            PcInputMode::Gamepad,
             true,
         );
         assert!(profile.contains("view = desktop\n"));
@@ -1428,17 +1529,27 @@ mod tests {
 
     #[test]
     fn pc_input_mode_resolves_auto_and_explicit_overrides() {
+        assert_eq!(PcInputMode::Auto.resolve(true), PcInputMode::Gamepad);
+        assert_eq!(PcInputMode::Auto.resolve(false), PcInputMode::MouseKeyboard);
+        assert_eq!(PcInputMode::ArrowsAction.resolve(true), PcInputMode::ArrowsAction);
+        assert_eq!(PcInputMode::FpsWasd.resolve(false), PcInputMode::FpsWasd);
         assert!(!PcInputMode::Auto.resolve_use_mouse_kb(true));
         assert!(PcInputMode::Auto.resolve_use_mouse_kb(false));
         assert!(!PcInputMode::Gamepad.resolve_use_mouse_kb(false));
         assert!(PcInputMode::MouseKeyboard.resolve_use_mouse_kb(true));
+        assert!(PcInputMode::ArrowsAction.resolve_use_mouse_kb(true));
+        assert!(PcInputMode::FpsWasd.resolve_use_mouse_kb(true));
         assert_eq!(PcInputMode::parse("mouse_kb"), PcInputMode::MouseKeyboard);
         assert_eq!(PcInputMode::parse("gamepad"), PcInputMode::Gamepad);
+        assert_eq!(PcInputMode::parse("arrows"), PcInputMode::ArrowsAction);
+        assert_eq!(PcInputMode::parse("fps"), PcInputMode::FpsWasd);
         assert_eq!(PcInputMode::parse("unknown"), PcInputMode::Auto);
         assert_eq!(PcInputMode::Auto.next(), PcInputMode::Gamepad);
         assert_eq!(PcInputMode::Gamepad.next(), PcInputMode::MouseKeyboard);
-        assert_eq!(PcInputMode::MouseKeyboard.next(), PcInputMode::Auto);
-        assert_eq!(PcInputMode::Auto.prev(), PcInputMode::MouseKeyboard);
+        assert_eq!(PcInputMode::MouseKeyboard.next(), PcInputMode::ArrowsAction);
+        assert_eq!(PcInputMode::ArrowsAction.next(), PcInputMode::FpsWasd);
+        assert_eq!(PcInputMode::FpsWasd.next(), PcInputMode::Auto);
+        assert_eq!(PcInputMode::Auto.prev(), PcInputMode::FpsWasd);
     }
 
     #[test]

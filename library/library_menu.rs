@@ -558,16 +558,18 @@ impl Menu {
                         .unwrap_or(PcInputMode::Auto);
                     let value = match mode {
                         PcInputMode::Auto => {
-                            let resolved = if has_gamepad_api { t("Gamepad") } else { t("Mouse & KB") };
+                            let resolved = if has_gamepad_api { t("Gamepad") } else { t("Mouse + WASD") };
                             format!("{} ({resolved})", t("Auto"))
                         }
                         PcInputMode::Gamepad => t("Gamepad (XInput)").to_owned(),
-                        PcInputMode::MouseKeyboard => t("Mouse & Keyboard (Pad)").to_owned(),
+                        PcInputMode::MouseKeyboard => t("Mouse + WASD (RTS / RPG)").to_owned(),
+                        PcInputMode::ArrowsAction => t("Arrows + Action (Classic)").to_owned(),
+                        PcInputMode::FpsWasd => t("FPS (WASD + Right Stick)").to_owned(),
                     };
                     (
                         t("PC Controls"),
                         value,
-                        t("Auto uses Gamepad if the game supports controllers, or Stick-as-Mouse otherwise. You can also switch live via the Touchpad menu."),
+                        t("Choose Gamepad (XInput) or a DualSense keyboard/mouse preset (WASD, Arrows+Action, FPS). You can also toggle live via Touchpad."),
                     )
                 }
                 _ => {
@@ -2708,12 +2710,12 @@ pub fn run(root: Option<PathBuf>, list: bool) -> i32 {
             let _ = library::save_last_launched_game(&executable);
             if let PeLaunchKind::PcNative { is_64bit, prefer_opengl, has_gamepad_api } = pe_kind {
                 if library_gog::ps5_pc_handoff_available() {
-                    let use_mouse_kb = input_mode.resolve_use_mouse_kb(has_gamepad_api);
-                    match library_gog::write_pc_handoff(&name, &executable, is_64bit, prefer_opengl, use_mouse_kb) {
+                    let resolved_mode = input_mode.resolve(has_gamepad_api);
+                    match library_gog::write_pc_handoff(&name, &executable, is_64bit, prefer_opengl, resolved_mode) {
                         Ok(()) => {
                             println!(
                                 "TrinityXSX: handing off PC/GOG game '{name}' to prospero-win (input={})",
-                                if use_mouse_kb { "mouse+kb" } else { "xinput" }
+                                resolved_mode.code()
                             );
                             return 0;
                         }

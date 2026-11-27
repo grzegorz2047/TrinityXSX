@@ -81,3 +81,13 @@ status = "playable"
 release = "v0.2.12"
 notes = "32-bit fixed-base PE playable with audio and DualSense Mouse & Keyboard mode; pick the expansion executable in R1 Game info."
 reports = []
+
+[[title]]
+title_id = "E20307B7"
+identity = "GOG.1207658947"
+name = "Rayman 3: Hoodlum Havoc"
+versions = ["1.0.0"]
+status = "playable"
+release = "v0.2.12"
+notes = "Locked 60 FPS 1440x1080 via DXVK D3D8 with audio; run R3 Setup DX8 once to create Ubi.ini and use Arrows + Action preset (minor parchment flicker in pause menu)."
+reports = []

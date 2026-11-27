@@ -404,8 +404,15 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "Auto") => "Auto",
         (Lang::Pl, "Gamepad") => "Pad",
         (Lang::Pl, "Mouse & KB") => "Mysz + KB",
+        (Lang::Pl, "Mouse + WASD") => "Mysz + WASD",
         (Lang::Pl, "Gamepad (XInput)") => "Pad (XInput)",
         (Lang::Pl, "Mouse & Keyboard (Pad)") => "Mysz i klawiatura (Pad)",
+        (Lang::Pl, "Mouse + WASD (RTS / RPG)") => "Mysz + WASD (RTS / RPG)",
+        (Lang::Pl, "Arrows + Action (Classic)") => "Strzałki + Akcja (Klasyk)",
+        (Lang::Pl, "FPS (WASD + Right Stick)") => "FPS (WASD + Prawa gałka)",
+        (Lang::Pl, "Choose Gamepad (XInput) or a DualSense keyboard/mouse preset (WASD, Arrows+Action, FPS). You can also toggle live via Touchpad.") => {
+            "Wybierz Pad (XInput) lub preset klawiatury/myszy (WASD, Strzałki+Akcja, FPS). Tryb zmienisz też na żywo w menu Touchpada."
+        }
         (Lang::Pl, "Auto uses Gamepad if the game supports controllers, or Stick-as-Mouse otherwise. You can also switch live via the Touchpad menu.") => {
             "Auto wybiera Pad, jeśli gra obsługuje kontroler, lub Mysz na gałce. W grze przełączysz tryb w menu Touchpada."
         }
@@ -415,8 +422,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pt, "Executable") => "Executável",
         (Lang::Pt, "Gamepad") => "Controle",
         (Lang::Pt, "Mouse & KB") => "Mouse + Teclado",
+        (Lang::Pt, "Mouse + WASD") => "Mouse + WASD",
         (Lang::Pt, "Gamepad (XInput)") => "Controle (XInput)",
         (Lang::Pt, "Mouse & Keyboard (Pad)") => "Mouse e teclado (Controle)",
+        (Lang::Pt, "Mouse + WASD (RTS / RPG)") => "Mouse + WASD (RTS / RPG)",
+        (Lang::Pt, "Arrows + Action (Classic)") => "Setas + Ação (Clássico)",
+        (Lang::Pt, "FPS (WASD + Right Stick)") => "FPS (WASD + Analógico Dir.)",
         (Lang::Pt, "Game library") => "Biblioteca de jogos",
         (Lang::Pt, "games") => "jogos",
         (Lang::Pt, "folders") => "pastas",
@@ -436,8 +447,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Es, "Executable") => "Ejecutable",
         (Lang::Es, "Gamepad") => "Mando",
         (Lang::Es, "Mouse & KB") => "Ratón + Teclado",
+        (Lang::Es, "Mouse + WASD") => "Ratón + WASD",
         (Lang::Es, "Gamepad (XInput)") => "Mando (XInput)",
         (Lang::Es, "Mouse & Keyboard (Pad)") => "Ratón y teclado (Mando)",
+        (Lang::Es, "Mouse + WASD (RTS / RPG)") => "Ratón + WASD (RTS / RPG)",
+        (Lang::Es, "Arrows + Action (Classic)") => "Flechas + Acción (Clásico)",
+        (Lang::Es, "FPS (WASD + Right Stick)") => "FPS (WASD + Stick Der.)",
         (Lang::Es, "Game library") => "Biblioteca de juegos",
         (Lang::Es, "games") => "juegos",
         (Lang::Es, "folders") => "carpetas",
