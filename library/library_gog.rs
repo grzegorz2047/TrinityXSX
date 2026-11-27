@@ -1390,13 +1390,10 @@ fn find_gog_script_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Apply standard GOG `goggame-*.script` `setRegistry` install actions into the current Wine
 /// Parse UTF-16LE strings inside a GOG Windows AppCompat `.sdb` database (`installSDB` action)
-/// to extract any standard Windows version-lie shim (`Win98VersionLie`, `Win95VersionLie`,
-/// `Win2000VersionLie`, `WinXP*VersionLie`) and the `.exe` filenames it targets.
-/// Applying the matching `HKCU\Software\Wine\AppDefaults\<exe>\Version` enables Wine's built-in
-/// Win9x behaviors (including the 2 GiB cap in `GetDiskFreeSpaceA` that prevents 32-bit signed
-/// overflow on large drives).
+/// to extract any standard Windows version-lie shim and the `.exe` filenames it targets.
+/// Note: Wine's Win9x (`win95`/`win98`) modes invoke `i386_set_ldt`, which fails with `EINVAL`
+/// under the PS5 kernel, so Win9x shims are mapped to NT 5.1 (`winxp`) instead.
 pub fn parse_gog_sdb_wine_version(sdb_bytes: &[u8]) -> Option<(&'static str, Vec<String>)> {
     let mut strings = Vec::new();
     let mut current = String::new();
@@ -1423,13 +1420,12 @@ pub fn parse_gog_sdb_wine_version(sdb_bytes: &[u8]) -> Option<(&'static str, Vec
     for s in &strings {
         let low = s.to_ascii_lowercase();
         if version.is_none() {
-            if low.contains("win98versionlie") || low == "win98" {
-                version = Some("win98");
-            } else if low.contains("win95versionlie") || low == "win95" {
-                version = Some("win95");
-            } else if low.contains("win2000versionlie") || low.contains("win2kversionlie") {
+            if low.contains("win2000versionlie") || low.contains("win2kversionlie") {
                 version = Some("win2k");
-            } else if low.contains("winxp") && low.contains("versionlie") {
+            } else if low.contains("win98versionlie")
+                || low.contains("win95versionlie")
+                || (low.contains("winxp") && low.contains("versionlie"))
+            {
                 version = Some("winxp");
             }
         }
@@ -1574,7 +1570,7 @@ fn format_wine_reg_value_line(name: &str, value: &GogRegValue) -> String {
 
 /// Upsert registry entries into a Wine `.reg` file (`user.reg` or `system.reg`).
 /// Returns `Some(new_text)` only when at least one section or value changed.
-pub fn upsert_wine_reg_text(existing: &str, updates: &[(String, String, GogRegValue)]) -> Option<String> {
+fn upsert_wine_reg_text(existing: &str, updates: &[(String, String, GogRegValue)]) -> Option<String> {
     if updates.is_empty() {
         return None;
     }
@@ -1792,6 +1788,43 @@ pub fn is_config_utility_exe(exe_path: &Path) -> bool {
     CONFIG_HINTS.iter().any(|k| low.contains(k))
 }
 
+/// Ensure `prefix/drive_c/.pw-symlinks` exposes PS5 storage roots (`ext1`, `usb0`, `data`)
+/// and rewrite `Z:\mnt\ext1\...` / `Z:\mnt\usb0\...` / `Z:\data\...` paths onto `C:\...`.
+/// Wine's `GetDiskFreeSpaceA(NULL)` queries the root of the current drive; under `Z:\` that
+/// resolves to PS5's read-only `/` rootfs (`0` bytes free), breaking games that check free
+/// disk space before starting or saving. Launching via `C:\ext1\...` makes `GetDiskFreeSpaceA`
+/// query `/data` (writable internal SSD with real free space) while remaining compatible with
+/// `pw_wine_launch_host_dir`.
+fn ensure_drive_c_mount_links_and_map_path(prefix_dir: &Path, win_path: &str) -> String {
+    const MOUNTS: &[(&str, &str, &str)] = &[
+        ("z:\\mnt\\ext1\\", "ext1", "/mnt/ext1"),
+        ("z:\\mnt\\usb0\\", "usb0", "/mnt/usb0"),
+        ("z:\\data\\", "data", "/data"),
+    ];
+    let low = win_path.to_ascii_lowercase();
+    let Some((prefix_pat, link_name, unix_target)) = MOUNTS.iter().find(|(p, _, _)| low.starts_with(p)) else {
+        return win_path.to_owned();
+    };
+    let drive_c = prefix_dir.join("drive_c");
+    if !drive_c.is_dir() {
+        return win_path.to_owned();
+    }
+    let table_path = drive_c.join(".pw-symlinks");
+    let existing = fs::read_to_string(&table_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+    let entry_prefix = format!("{link_name}\t");
+    if !lines.iter().any(|l| l.starts_with(&entry_prefix)) {
+        lines.push(format!("{link_name}\t{unix_target}"));
+        let mut content = lines.join("\n");
+        content.push('\n');
+        if fs::write(&table_path, content).is_err() {
+            return win_path.to_owned();
+        }
+    }
+    let rest = &win_path[prefix_pat.len()..];
+    format!("C:\\{link_name}\\{rest}")
+}
+
 /// Write a dynamic `prospero-win` `.profile` (`trinityxsx-pc-game.profile`) + `pc_launch.flag`
 /// so `pw_runner.bin` launches a standard 32-bit or 64-bit PC/GOG game directly under Wine +
 /// DXVK / vkd3d-proton / Zink with zero XCL UMA overhead and Touchpad Return-to-Library support.
@@ -1807,9 +1840,12 @@ pub fn write_pc_handoff(
     if !profiles_dir.is_dir() {
         return Err("PS5 profiles directory not available".into());
     }
-    let clean_exe = strip_verbatim_prefix(&exe_path.to_string_lossy());
-    let work_dir =
+    let prefix_dir = root.join("prefix");
+    let clean_exe_raw = strip_verbatim_prefix(&exe_path.to_string_lossy());
+    let work_dir_raw =
         exe_path.parent().map(|p| strip_verbatim_prefix(&p.to_string_lossy())).unwrap_or_else(|| "C:\\XCL".into());
+    let clean_exe = ensure_drive_c_mount_links_and_map_path(&prefix_dir, &clean_exe_raw);
+    let work_dir = ensure_drive_c_mount_links_and_map_path(&prefix_dir, &work_dir_raw);
 
     // Sanitize display name for prospero-win profile parser (<= 90 ASCII/UTF-8 bytes, single line)
     let safe_name: String =
@@ -2453,7 +2489,7 @@ mod tests {
             sdb.extend_from_slice(&0u16.to_le_bytes());
         }
         let (ver, exes) = parse_gog_sdb_wine_version(&sdb).unwrap();
-        assert_eq!(ver, "win98");
+        assert_eq!(ver, "winxp");
         assert_eq!(exes, vec!["MainGame.exe".to_owned(), "Expansion.exe".to_owned()]);
 
         let mut no_ver = Vec::new();
@@ -2461,6 +2497,27 @@ mod tests {
             no_ver.extend_from_slice(&u.to_le_bytes());
         }
         assert!(parse_gog_sdb_wine_version(&no_ver).is_none());
+    }
+
+    #[test]
+    fn maps_ps5_storage_paths_onto_drive_c_virtual_symlinks() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-drivec-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("drive_c")).unwrap();
+
+        let mapped = ensure_drive_c_mount_links_and_map_path(&tmp, "Z:\\mnt\\ext1\\xboxseries\\demo\\Game.exe");
+        assert_eq!(mapped, "C:\\ext1\\xboxseries\\demo\\Game.exe");
+        let table = fs::read_to_string(tmp.join("drive_c").join(".pw-symlinks")).unwrap();
+        assert_eq!(table, "ext1\t/mnt/ext1\n");
+
+        // Second call is idempotent and does not duplicate the symlink line
+        let mapped2 = ensure_drive_c_mount_links_and_map_path(&tmp, "Z:\\mnt\\ext1\\xboxseries\\demo");
+        assert_eq!(mapped2, "C:\\ext1\\xboxseries\\demo");
+        assert_eq!(fs::read_to_string(tmp.join("drive_c").join(".pw-symlinks")).unwrap(), "ext1\t/mnt/ext1\n");
+
+        // Paths already on C:\ are left untouched
+        assert_eq!(ensure_drive_c_mount_links_and_map_path(&tmp, "C:\\XCL\\Game.exe"), "C:\\XCL\\Game.exe");
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
