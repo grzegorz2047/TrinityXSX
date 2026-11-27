@@ -1391,9 +1391,10 @@ fn find_gog_script_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Parse UTF-16LE strings inside a GOG Windows AppCompat `.sdb` database (`installSDB` action)
-/// to extract any standard Windows version-lie shim and the `.exe` filenames it targets.
-/// Note: Wine's Win9x (`win95`/`win98`) modes invoke `i386_set_ldt`, which fails with `EINVAL`
-/// under the PS5 kernel, so Win9x shims are mapped to NT 5.1 (`winxp`) instead.
+/// to extract any standard Windows version-lie shim (`Win98VersionLie`, `Win95VersionLie`,
+/// `Win2000VersionLie`, `WinXP*VersionLie`) and the `.exe` filenames it targets.
+/// Combined with `krnl386.exe16=d` (avoiding unsupported Win16 `i386_set_ldt` on PS5), Wine's
+/// `win98`/`win95` modes cleanly enable the built-in 2 GiB cap in `GetDiskFreeSpaceA`.
 pub fn parse_gog_sdb_wine_version(sdb_bytes: &[u8]) -> Option<(&'static str, Vec<String>)> {
     let mut strings = Vec::new();
     let mut current = String::new();
@@ -1420,12 +1421,13 @@ pub fn parse_gog_sdb_wine_version(sdb_bytes: &[u8]) -> Option<(&'static str, Vec
     for s in &strings {
         let low = s.to_ascii_lowercase();
         if version.is_none() {
-            if low.contains("win2000versionlie") || low.contains("win2kversionlie") {
+            if low.contains("win98versionlie") || low == "win98" {
+                version = Some("win98");
+            } else if low.contains("win95versionlie") || low == "win95" {
+                version = Some("win95");
+            } else if low.contains("win2000versionlie") || low.contains("win2kversionlie") {
                 version = Some("win2k");
-            } else if low.contains("win98versionlie")
-                || low.contains("win95versionlie")
-                || (low.contains("winxp") && low.contains("versionlie"))
-            {
+            } else if low.contains("winxp") && low.contains("versionlie") {
                 version = Some("winxp");
             }
         }
@@ -2016,6 +2018,8 @@ fn pc_input_section(mode: PcInputMode, is_config_tool: bool) -> &'static str {
 /// Format the dynamic `prospero-win` `.profile` for PC/GOG titles:
 /// - `windows.gaming.input=d` disables Wine's unimplemented WGI semi-stub so Unity 6 and
 ///   modern Input System games immediately fall back to DualSense XInput.
+/// - `krnl386.exe16=d` prevents `kernel32` from loading Win16 LDT support (`i386_set_ldt`,
+///   unsupported on PS5) when an older game uses `Version = "win98"` / `"win95"`.
 /// - `xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b` ensures Wine's DualSense-backed
 ///   builtin XInput is always used even when a game bundles a native Windows `xinput*.dll`.
 /// - `thread_scheduling = true` enables `SCHED_RR` so Wine/DXVK worker threads do not starve.
@@ -2049,7 +2053,7 @@ fn format_pc_handoff_profile(
          name = {safe_name}\n\
          executable = {clean_exe}\n\
          working_directory = {work_dir}\n\
-         dll_overrides = {dx_list}=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
+         dll_overrides = {dx_list}=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input,krnl386.exe16=d\n\
          prefix = default\n\
          runtime = wine-wow64\n\
          architecture = {arch}\n\
@@ -2182,7 +2186,7 @@ mod tests {
             false,
         );
         assert!(profile.contains(
-            "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
+            "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input,krnl386.exe16=d"
         ));
         assert!(profile.contains("view = window\n"));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
@@ -2489,7 +2493,7 @@ mod tests {
             sdb.extend_from_slice(&0u16.to_le_bytes());
         }
         let (ver, exes) = parse_gog_sdb_wine_version(&sdb).unwrap();
-        assert_eq!(ver, "winxp");
+        assert_eq!(ver, "win98");
         assert_eq!(exes, vec!["MainGame.exe".to_owned(), "Expansion.exe".to_owned()]);
 
         let mut no_ver = Vec::new();
