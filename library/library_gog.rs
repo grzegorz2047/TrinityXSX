@@ -10,7 +10,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -238,19 +238,28 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
     let mut imports = Vec::new();
     if import_rva != 0 {
         if let Some(imp_file_off) = rva_to_off(import_rva) {
-            if let Ok(full) = fs::read(pe_path) {
+            let mut desc_buf = vec![0u8; 256 * 20];
+            if f.seek(SeekFrom::Start(imp_file_off as u64)).is_ok() {
+                let n = f.read(&mut desc_buf).unwrap_or(0);
+                desc_buf.truncate(n);
+                let mut name_buf = [0u8; 128];
                 let mut idx = 0usize;
-                while idx < 256 {
-                    let desc = imp_file_off + idx * 20;
-                    let Some(name_rva) = read_u32_le(&full, desc + 12) else { break };
-                    let ft_rva = read_u32_le(&full, desc + 16).unwrap_or(0);
+                while idx * 20 + 20 <= desc_buf.len() {
+                    let desc = idx * 20;
+                    let Some(name_rva) = read_u32_le(&desc_buf, desc + 12) else { break };
+                    let ft_rva = read_u32_le(&desc_buf, desc + 16).unwrap_or(0);
                     if name_rva == 0 && ft_rva == 0 {
                         break;
                     }
                     if let Some(name_off) = rva_to_off(name_rva) {
-                        if let Some(end) = full.get(name_off..).and_then(|s| s.iter().position(|&b| b == 0)) {
-                            if let Ok(s) = std::str::from_utf8(&full[name_off..name_off + end.min(128)]) {
-                                imports.push(s.to_ascii_lowercase());
+                        if f.seek(SeekFrom::Start(name_off as u64)).is_ok() {
+                            let rn = f.read(&mut name_buf).unwrap_or(0);
+                            let slice = &name_buf[..rn];
+                            let end = slice.iter().position(|&b| b == 0).unwrap_or(rn);
+                            if end > 0 {
+                                if let Ok(s) = std::str::from_utf8(&slice[..end]) {
+                                    imports.push(s.to_ascii_lowercase());
+                                }
                             }
                         }
                     }
@@ -260,6 +269,35 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
         }
     }
     Some((is_64bit, imports))
+}
+
+/// Inspect sibling `.dll` modules next to the executable for XInput / controller API imports.
+/// Handles modular engines (e.g. CryEngine, Unity, Unreal, SDL2) where a small stub `.exe`
+/// delegates engine and controller initialization to a sibling DLL in the same folder.
+fn sibling_dlls_have_gamepad_api(exe_path: &Path) -> bool {
+    let Some(dir) = exe_path.parent() else { return false };
+    let Ok(rd) = fs::read_dir(dir) else { return false };
+    let mut checked = 0usize;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_file() || !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dll")) {
+            continue;
+        }
+        let low = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if is_gamepad_import(&low) {
+            return true;
+        }
+        checked += 1;
+        if checked > 64 {
+            break;
+        }
+        if let Some((_, dll_imports)) = read_pe_imports(&p) {
+            if dll_imports.iter().any(|d| is_gamepad_import(d)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// True when the executable's directory ships a local `ddraw.dll` that wraps DirectDraw onto
@@ -310,7 +348,8 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
     let has_gl = imports.iter().any(|d| d == "opengl32.dll");
     let has_unity_sibling = exe_path.parent().is_some_and(|p| p.join("UnityPlayer.dll").is_file());
     let prefer_opengl = has_gl && !has_dx_or_vk && !has_unity_sibling;
-    let has_gamepad_api = has_unity_sibling || imports.iter().any(|d| is_gamepad_import(d));
+    let has_gamepad_api =
+        has_unity_sibling || imports.iter().any(|d| is_gamepad_import(d)) || sibling_dlls_have_gamepad_api(exe_path);
 
     PeLaunchKind::PcNative { is_64bit, prefer_opengl, has_gamepad_api }
 }
@@ -1755,6 +1794,59 @@ mod tests {
         assert_eq!(PcInputMode::ArrowsAction.next(), PcInputMode::FpsWasd);
         assert_eq!(PcInputMode::FpsWasd.next(), PcInputMode::Auto);
         assert_eq!(PcInputMode::Auto.prev(), PcInputMode::FpsWasd);
+    }
+
+    fn build_minimal_pe64_with_imports(imports: &[&str]) -> Vec<u8> {
+        let mut buf = vec![0u8; 0x600];
+        buf[0..2].copy_from_slice(b"MZ");
+        buf[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        buf[0x80..0x84].copy_from_slice(b"PE\0\0");
+        buf[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // NumberOfSections = 1
+        buf[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes()); // SizeOfOptionalHeader
+        buf[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes()); // PE32+ magic
+                                                                  // DataDirectory[1] (Import Table) at opt_off (0x98) + 112 + 8 = 0x110
+        let imp_rva: u32 = if imports.is_empty() { 0 } else { 0x1000 };
+        buf[0x110..0x114].copy_from_slice(&imp_rva.to_le_bytes());
+        // Section header #0 at 0x98 + 0xF0 = 0x188: VA=0x1000, VSize=0x400, RawSize=0x400, RawPtr=0x200
+        buf[0x190..0x194].copy_from_slice(&0x400u32.to_le_bytes()); // VirtualSize
+        buf[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+        buf[0x198..0x19C].copy_from_slice(&0x400u32.to_le_bytes()); // SizeOfRawData
+        buf[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
+        let mut str_off = 0x300usize;
+        for (i, dll) in imports.iter().enumerate() {
+            let desc = 0x200 + i * 20;
+            let name_rva = 0x1000u32 + (str_off - 0x200) as u32;
+            buf[desc + 12..desc + 16].copy_from_slice(&name_rva.to_le_bytes());
+            buf[desc + 16..desc + 20].copy_from_slice(&0x1004u32.to_le_bytes());
+            let bytes = dll.as_bytes();
+            buf[str_off..str_off + bytes.len()].copy_from_slice(bytes);
+            buf[str_off + bytes.len()] = 0;
+            str_off += bytes.len() + 1;
+        }
+        buf
+    }
+
+    #[test]
+    fn detect_pe_kind_finds_xinput_in_sibling_engine_dll() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-sibling-xinput-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let stub_exe = tmp.join("GameStub.exe");
+        fs::write(&stub_exe, build_minimal_pe64_with_imports(&["KERNEL32.dll", "EngineCore.dll"])).unwrap();
+        fs::write(tmp.join("AudioCore.dll"), build_minimal_pe64_with_imports(&["KERNEL32.dll"])).unwrap();
+        assert_eq!(
+            detect_pe_kind(&stub_exe),
+            PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, has_gamepad_api: false }
+        );
+
+        fs::write(tmp.join("EngineCore.dll"), build_minimal_pe64_with_imports(&["KERNEL32.dll", "XINPUT1_3.dll"]))
+            .unwrap();
+        assert_eq!(
+            detect_pe_kind(&stub_exe),
+            PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, has_gamepad_api: true }
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

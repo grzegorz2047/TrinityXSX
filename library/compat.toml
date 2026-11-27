@@ -91,3 +91,13 @@ status = "playable"
 release = "v0.2.12"
 notes = "Locked 60 FPS 1440x1080 via DXVK D3D8 with audio; run R3 Setup DX8 once to create Ubi.ini and use Arrows + Action preset (minor parchment flicker in pause menu)."
 reports = []
+
+[[title]]
+title_id = "CFFC2F9C"
+identity = "GOG.1207658915"
+name = "Heroes of Might and Magic 4 Complete"
+versions = ["3.0"]
+status = "playable"
+release = "v0.2.12"
+notes = "Smooth 1080p (4:3 fit) gameplay via bundled ddraw.dll and DXVK D3D9 with audio, DualSense Mouse & Keyboard mode, and automatic save folder creation."
+reports = []
