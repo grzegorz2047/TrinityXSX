@@ -40,38 +40,55 @@ Step-by-step instructions to install **TrinityXSX (`PPSA83601`)**, add your own 
 
 ---
 
-## 3. Adding Your Games
+## 3. Adding Your Games (All Installation Methods)
 
-### A. Xbox Series X|S & Unpacked PC Games
-Copy each game into its **own subfolder** inside any default scan folder:
+TrinityXSX supports **4 ways to add games** — via **USB drive (no FTP needed)**, via **FTP**, via the **built-in on-PS5 GOG installer**, or by adding **custom folders** straight from the DualSense.
+
+### Method 1 — Unpacked Xbox Series X|S Game (`[XSX]`)
+1. Copy each unpacked game folder (containing `MicrosoftGame.config` with `TargetDeviceFamily="Scarlett"` and its `.exe`) into its **own subfolder** inside any default scan folder:
 
 | Location on PS5 | Best for |
 | --- | --- |
 | `/mnt/ext1/xboxseries/<GameName>/` | Extended / external storage (**recommended**, most space) |
-| `/mnt/usb0/xboxseries/<GameName>/` | USB drive (`usb0` or `usb1`) |
+| `/mnt/usb0/xboxseries/<GameName>/` | exFAT USB drive (`usb0` or `usb1`) — **no FTP**, copy on PC and plug directly into PS5 |
 | `/data/xboxseries/<GameName>/` | Internal PS5 SSD |
 | `/data/homebrew/PPSA83601/games/<GameName>/` | Internal app storage |
 
-- **Xbox Series X|S (`[XSX]`):** folder contains `MicrosoftGame.config` (Scarlett) and game assets.
-- **Unpacked PC games (`[PC64]` / `[PC32]`):** automatically discovered even without `MicrosoftGame.config`. TrinityXSX detects 32/64-bit architecture, graphics backend (`DXVK` / `vkd3d-proton` / `Zink` for OpenGL), and whether the binary imports controller APIs.
-- **Multi-`.exe` PC games** (e.g. expansions or patches): highlight the game, press **`R1` -> Game info -> Executable**, and pick the exact `.exe` from the DualSense.
+2. Press **Triangle (Δ)** in the library to rescan if TrinityXSX was already open.
 
-> **Important:** Wait until FTP upload reaches **100%** before launching!
-
-### B. Installing DRM-Free GOG Offline Installers on PS5 (No PC Needed)
-1. Download the **Offline Backup Game Installers** (`setup_<game>.exe` + all `.bin` files) from your GOG library.
-2. Copy them over FTP into:
-   ```text
-   /mnt/ext1/xboxseries/installers/
-   ```
+### Method 2 — DRM-Free GOG Offline Installers Directly on PS5 (No PC Install)
+Works with GOG offline backup installers built with **Inno Setup** (`setup_<game>.exe` + all `setup_<game>-1.bin`, `-2.bin`, ...):
+1. Download the **Offline Backup Game Installers** from your GOG library.
+2. Copy them onto an **exFAT USB drive** or over **FTP** into any automatically scanned installer folder:
+   - `/mnt/usb0/` or `/mnt/usb0/installers/` *(USB drive — installs onto your first available library drive, e.g. `/mnt/ext1/xboxseries/`)*,
+   - `/mnt/ext1/xboxseries/installers/` or `/mnt/ext1/installers/` *(1-level subfolders like `installers/witcher2/` are scanned too)*,
+   - or directly inside any library folder listed in `game_paths.txt`.
 3. In TrinityXSX press **`OPTIONS` -> Install GOG Games**, select the game, and press **`X`**.
 4. Open-source `innoextract` unpacks the game directly on PS5 with a progress bar and ETA, extracts `Cover.png`, and registers it in your library. Press **`R1`** on an installed entry to delete its installer files (or toggle **`□`** before installing to auto-delete).
 5. **Bundled Wine Mono `11.3.0`** provides built-in `.NET` / `C++/CLI` / `XNA` runtime support automatically.
 
-### C. Custom Game Folders
+### Method 3 — PC Game Installed on PC & Copied to PS5 (`[PC64]` / `[PC32]`)
+Best for classic disc/CD games, non-Inno installers (NSIS, InstallShield), patched/modded setups (e.g. *Age of Empires II* with *UserPatch*), or any DRM-free PC game folder:
+1. Install the game (and any patches or mods) on your PC as usual.
+2. Copy the entire installed game folder onto an **exFAT USB drive** at `xboxseries/<GameName>/` (`/mnt/usb0/xboxseries/<GameName>/` on PS5) **or** upload over FTP to `/mnt/ext1/xboxseries/<GameName>/`.
+3. **No `MicrosoftGame.config` needed** — TrinityXSX automatically discovers `.exe` folders, detects 32/64-bit architecture, selects the graphics backend (`DXVK` / `vkd3d-proton` / `Zink` for OpenGL), and detects controller API imports.
+4. **Multi-`.exe` PC games** (expansions, patches, or launchers alongside the main binary): highlight the game -> press **`R1` -> Game info -> Executable**, and pick the exact `.exe` with the DualSense.
+5. **Custom cover art:** if the game has no `.ico` with an embedded PNG, drop a **`Cover.png`** file into the game's root folder to give it tile artwork.
+
+### Method 4 — Custom Folders on USB or PS5 Storage
+You do not have to keep games inside `xboxseries/` — you can add any existing folder on USB or internal storage:
 1. Press **Square (□)** in the library -> **Game folders**.
 2. Press **Square (□)** (*Add folder*) to browse `/mnt`, `/data`, `/mnt/usb0`, `/mnt/ext1`, etc.
 3. **Cross (X)** enters a subfolder, **Circle (O)** goes up, **Triangle (Δ)** adds the current folder. Removing a folder from the list **never deletes game files**.
+
+### Transferring Files to PS5 (USB vs FTP)
+- **USB drive (exFAT):** fastest for large games with zero network setup — plug into PS5 (`/mnt/usb0` or `/mnt/usb1`) to play directly from USB or unpack GOG installers from USB onto `/mnt/ext1`.
+- **FTP (FileZilla / WinSCP or the bundled script):** for uploading large directory trees cleanly to PS5 `ftpsrv.elf` (port `2121`), you can use the repo helper:
+  ```sh
+  python tools/ftp_put_tree.py <PS5-IP> 2121 "C:\Games\MyGame" /mnt/ext1/xboxseries/MyGame
+  ```
+
+> **Important:** When using FTP, always wait until the upload reaches **100%** before launching the game!
 
 ---
 

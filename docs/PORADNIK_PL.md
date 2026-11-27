@@ -41,39 +41,56 @@ Prosta instrukcja krok po kroku: jak zainstalować **TrinityXSX (`PPSA83601`)**,
 
 ---
 
-## 3. Gdzie i jak wgrać swoje gry
+## 3. Jak i gdzie wgrać gry (wszystkie sposoby)
 
-### A. Gry Xbox Series X|S oraz już rozpakowane gry PC
-Każdą grę wrzuć do **osobnego podfolderu** w jednej z domyślnych lokalizacji:
+TrinityXSX obsługuje **4 sposoby dodawania gier** — przez **pendrive / dysk USB (bez FTP)**, przez **FTP**, przez **wbudowany instalator GOG bezpośrednio na PS5** oraz przez **własne foldery** dodawane z pada.
+
+### Sposób 1 — Rozpakowana gra Xbox Series X|S (`[XSX]`)
+1. Skopiuj rozpakowany folder gry (musi zawierać `MicrosoftGame.config` z `TargetDeviceFamily="Scarlett"` oraz wskazany `.exe`) do **osobnego podfolderu** w jednej z domyślnych lokalizacji:
 
 | Ścieżka na PS5 | Kiedy wybrać |
 | --- | --- |
 | `/mnt/ext1/xboxseries/<NazwaGry>/` | Dysk zewnętrzny / rozszerzony M.2 (**zalecane**, najwięcej miejsca) |
-| `/mnt/usb0/xboxseries/<NazwaGry>/` | Pendrive / dysk USB (`usb0` lub `usb1`) |
+| `/mnt/usb0/xboxseries/<NazwaGry>/` | Pendrive / dysk USB exFAT (`usb0` lub `usb1`) — **bez FTP**, po prostu skopiuj na PC i wepnij do PS5 |
 | `/data/xboxseries/<NazwaGry>/` | Wewnętrzny dysk SSD PS5 |
 | `/data/homebrew/PPSA83601/games/<NazwaGry>/` | Katalog wewnętrzny aplikacji |
 
-- **Xbox Series X|S (`[XSX]`):** folder zawiera `MicrosoftGame.config` (Scarlett) i pliki gry.
-- **Rozpakowane gry PC (`[PC64]` / `[PC32]`):** TrinityXSX automatycznie wykrywa rozpakowane foldery gier PC (nawet bez `MicrosoftGame.config`!), rozpoznaje architekturę 32/64-bit, API graficzne (`DXVK` / `vkd3d-proton` / `Zink` dla OpenGL) oraz to, czy gra obsługuje kontroler.
-- **Gry z wieloma plikami `.exe`** (np. dodatki lub patche): w bibliotece wciśnij **`R1` -> Informacje o grze -> Plik uruchomieniowy** i wybierz właściwy `.exe` padem.
+2. W bibliotece wciśnij **Trójkąt (Δ)**, aby odświeżyć listę (jeśli aplikacja była już otwarta).
 
-> **Uwaga:** Poczekaj, aż kopiowanie przez FTP zakończy się w **100%** przed pierwszym uruchomieniem!
-
-### B. Instalacja gier z GOG bezpośrednio na PS5 (bez PC!)
-1. Pobierz ze swojego konta GOG pliki **Offline Backup Game Installers** (`setup_<gra>.exe` oraz wszystkie `setup_<gra>-1.bin`, `-2.bin`, ...).
-2. Skopiuj je przez FTP na PS5 do katalogu:
-   ```text
-   /mnt/ext1/xboxseries/installers/
-   ```
-3. W TrinityXSX naciśnij **`OPTIONS` -> Zainstaluj gry z GOG**, wybierz grę i wciśnij **`X`**.
+### Sposób 2 — Instalator offline GOG bezpośrednio na PS5 (bez instalacji na PC)
+Działa ze wszystkimi instalatorami offline z GOG opartymi o **Inno Setup** (`setup_<gra>.exe` + ewentualne pliki `setup_<gra>-1.bin`, `-2.bin`, ...):
+1. Pobierz ze swojego konta GOG pliki **Offline Backup Game Installers**.
+2. Skopiuj je **na pendrive USB (exFAT)** albo **przez FTP** do dowolnej z automatycznie skanowanych lokalizacji:
+   - `/mnt/usb0/` lub `/mnt/usb0/installers/` *(pendrive USB — gra wypakuje się na pierwszy dostępny dysk z listy folderów, np. `/mnt/ext1/xboxseries/`)*,
+   - `/mnt/ext1/xboxseries/installers/` lub `/mnt/ext1/installers/` *(również podfoldery 1 poziomu, np. `installers/wiedzmin2/`)*,
+   - albo bezpośrednio do dowolnego folderu z grami z `game_paths.txt`.
+3. W TrinityXSX naciśnij **`OPTIONS` -> Zainstaluj gry z GOG**, wybierz tytuł i wciśnij **`X`**.
 4. Wbudowany, otwarty `innoextract` rozpakuje grę bezpośrednio na PS5 (z paskiem postępu i ETA), wyciągnie okładkę (`Cover.png`) i doda gotowy wpis do biblioteki. Po instalacji możesz usunąć pliki instalatora przyciskiem **`R1`** (albo włączyć automatyczne usuwanie przyciskiem **`□`** przed instalacją).
 5. **Wbudowany Wine Mono `11.3.0`** zapewnia obsługę gier i bibliotek `.NET` / `C++/CLI` / `XNA` od razu po instalacji.
 
-### C. Dodawanie własnych folderów z pada
+### Sposób 3 — Gra PC zainstalowana na komputerze i skopiowana na PS5 (`[PC64]` / `[PC32]`)
+Najlepszy wybór dla starszych gier z płyt CD/DVD, instalatorów innych niż Inno Setup (np. NSIS / InstallShield), gier z modami/patchami (np. *UserPatch* do *Age of Empires II*) lub dowolnych gier DRM-free:
+1. Zainstaluj grę (oraz ewentualne patche/mody) normalnie na PC.
+2. Skopiuj cały zainstalowany folder gry na **pendrive USB** do `xboxseries/<NazwaGry>/` (w PS5: `/mnt/usb0/xboxseries/<NazwaGry>/`) **albo** prześlij przez FTP do `/mnt/ext1/xboxseries/<NazwaGry>/`.
+3. **Nie musisz tworzyć `MicrosoftGame.config`** — TrinityXSX automatycznie wykryje folder z plikami `.exe`, rozpozna architekturę 32/64-bit, backend graficzny (`DXVK` / `vkd3d-proton` / `Zink` dla OpenGL) oraz to, czy gra obsługuje pada.
+4. **Gry z wieloma plikami `.exe`** (np. dodatek, patch lub launcher obok właściwej gry): zaznacz grę w bibliotece -> wciśnij **`R1` -> Informacje o grze -> Plik uruchomieniowy** i wybierz właściwy `.exe` z pada.
+5. **Własna okładka:** jeśli gra nie ma ikony `.ico` z zaszytym PNG, wrzuć do głównego folderu gry plik **`Cover.png`**, aby wyświetlić okładkę na kafelku.
+
+### Sposób 4 — Własny folder na USB lub dysku PS5 (dodawany z pada)
+Nie musisz trzymać gier w `xboxseries/` — możesz wskazać dowolny istniejący folder na pendrive lub dysku:
 1. W bibliotece naciśnij **Kwadrat (□)** -> ekran **Foldery gier**.
 2. Naciśnij **Kwadrat (□)** (*Dodaj folder*) -> przeglądarka katalogów (startuje w `/mnt`).
-3. **Krzyżyk (X)** wchodzi do folderu, **Kółko (O)** cofa poziom wyżej (do `/`), **Trójkąt (Δ)** dodaje bieżący folder.
+3. **Krzyżyk (X)** wchodzi do folderu, **Kółko (O)** cofa poziom wyżej (do `/`), **Trójkąt (Δ)** dodaje bieżący folder do listy skanowania.
 4. Usunięcie folderu z listy (**Trójkąt** w *Foldery gier*) **nigdy nie kasuje plików gier z dysku**.
+
+### Jak kopiować pliki na PS5 (USB vs FTP)
+- **Pendrive / dysk USB (exFAT):** najszybsze przy dużych grach i bez konfiguracji sieci — podłącz do PS5 (pojawi się jako `/mnt/usb0` lub `/mnt/usb1`) i odpalaj gry prosto z USB albo instaluj z niego instalatory GOG na `/mnt/ext1`.
+- **FTP (FileZilla / WinSCP lub wbudowany skrypt):** przy kopiowaniu dużych katalogów z tysiącami plików przez `ftpsrv.elf` (port `2121`) wygodnie i stabilnie działa skrypt z repozytorium:
+  ```sh
+  python tools/ftp_put_tree.py <IP-PS5> 2121 "C:\Gry\MojaGra" /mnt/ext1/xboxseries/MojaGra
+  ```
+
+> **Uwaga:** Przy przesyłaniu przez FTP zawsze poczekaj, aż transfer zakończy się w **100%** przed pierwszym uruchomieniem gry!
 
 ---
 
