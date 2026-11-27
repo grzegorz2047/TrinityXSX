@@ -59,6 +59,35 @@ impl Lang {
     }
 }
 
+/// Polish pluralization helper (1 -> `one`, 2..4 except 12..14 -> `few`, else `many`).
+pub fn plural_pl(n: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    let mod10 = n % 10;
+    let mod100 = n % 100;
+    if n == 1 {
+        one
+    } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
+        few
+    } else {
+        many
+    }
+}
+
+/// Format a count + noun cleanly for the active UI language.
+pub fn count_noun(
+    lang: Lang,
+    n: usize,
+    en_one: &str,
+    en_many: &str,
+    pl_one: &'static str,
+    pl_few: &'static str,
+    pl_many: &'static str,
+) -> String {
+    match lang {
+        Lang::Pl => format!("{n} {}", plural_pl(n, pl_one, pl_few, pl_many)),
+        _ => format!("{n} {}", if n == 1 { en_one } else { en_many }),
+    }
+}
+
 /// Look up a UI string by its English key. Missing keys fall back to English cleanly.
 pub fn tr(lang: Lang, key: &'static str) -> &'static str {
     if lang == Lang::En {
@@ -229,8 +258,124 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "Active offline profile") => "Aktywny profil offline",
         (Lang::Pl, "Frame Generation (MihawkGen)") => "Generowanie klatek (MihawkGen)",
         (Lang::Pl, "FPS HUD Overlay") => "Licznik FPS na ekranie (HUD)",
-        (Lang::Pl, "On") => "Włączony",
+        (Lang::Pl, "On") => "Włączone",
         (Lang::Pl, "Off") => "Wyłączone",
+        (Lang::Pl, "All installed") => "Wszystkie zainstalowane",
+        (Lang::Pl, "Installed") => "Zainstalowano",
+        (Lang::Pl, "Delete installer") => "Usuń instalator",
+        (Lang::Pl, "Installation in progress — buttons locked until finished") => {
+            "Trwa instalacja — przyciski zablokowane do zakończenia"
+        }
+        (Lang::Pl, "Press Circle to return and play") => "Naciśnij Kółko, aby wrócić i zagrać",
+        (Lang::Pl, "Install failed") => "Instalacja nieudana",
+        (Lang::Pl, "Removed installer files") => "Usunięto pliki instalatora",
+        (Lang::Pl, "Delete installer after install") => "Usuwaj instalator po instalacji",
+        (Lang::Pl, "estimating time...") => "szacowanie czasu...",
+        (Lang::Pl, "left") => "pozostało",
+        (Lang::Pl, "Available") => "Dostępny",
+        (Lang::Pl, "Not found") => "Nie znaleziono",
+        (Lang::Pl, "Saves") => "Zapisy",
+        (Lang::Pl, "Folder") => "Folder",
+        (Lang::Pl, "Web & Logs") => "Panel WWW i logi",
+        (Lang::Pl, "Removing a folder never deletes games on disk.") => {
+            "Usunięcie folderu nigdy nie kasuje gier z dysku."
+        }
+        (Lang::Pl, "Xbox Series game") => "Gra Xbox Series",
+        (Lang::Pl, "Restart now") => "Uruchom ponownie",
+        (Lang::Pl, "restart") => "wymaga restartu",
+        (Lang::Pl, "Config: PC/GOG native mode (auto)") => "Konfiguracja: Tryb PC/GOG (automatyczny)",
+        (Lang::Pl, "Press R1 for game info & shader cache") => "Naciśnij R1: informacje o grze i cache",
+        (Lang::Pl, "Launch mode") => "Tryb uruchomienia",
+        (Lang::Pl, "Compatibility status") => "Status kompatybilności",
+        (Lang::Pl, "Automatic PC/GOG profile") => "Automatyczny profil PC/GOG",
+        (Lang::Pl, "PC/GOG games run directly under Wine/DXVK without Xbox xcl.toml settings.") => {
+            "Gry PC/GOG działają bezpośrednio przez Wine/DXVK (nie używają ustawień Xbox xcl.toml)."
+        }
+        (Lang::Pl, "Compatibility preset") => "Preset kompatybilności",
+        (Lang::Pl, "Console model") => "Model konsoli",
+        (Lang::Pl, "Title memory budget") => "Limit pamięci gry",
+        (Lang::Pl, "Coherent UMA window") => "Okno pamięci UMA",
+        (Lang::Pl, "Direct DXIL translator") => "Bezpośredni translator DXIL",
+        (Lang::Pl, "Raytracing (DXR)") => "Śledzenie promieni (DXR)",
+        (Lang::Pl, "Network access") => "Dostęp do sieci",
+        (Lang::Pl, "Xbox Live placeholder tokens") => "Zastępcze tokeny Xbox Live",
+        (Lang::Pl, "Log verbosity") => "Szczegółowość logów",
+        (Lang::Pl, "Diagnostic tracing") => "Śledzenie diagnostyczne",
+        (Lang::Pl, "Stub nvngx_dlss.dll") => "Zaślepka nvngx_dlss.dll",
+        (Lang::Pl, "D3D12 Feature Level (vkd3d)") => "Poziom funkcji D3D12 (vkd3d)",
+        (Lang::Pl, "Offline (false)") => "Offline (wył.)",
+        (Lang::Pl, "Online (true)") => "Online (wł.)",
+        (Lang::Pl, "Disabled (false)") => "Wyłączone",
+        (Lang::Pl, "Enabled (true)") => "Włączone",
+        (Lang::Pl, "Auto (console default)") => "Auto (domyślny)",
+        (Lang::Pl, "Auto (GPU default)") => "Auto (domyślny GPU)",
+        (Lang::Pl, "all (fastest on PS5)") => "wszystkie (najszybsze na PS5)",
+        (Lang::Pl, "1 (partial)") => "1 (częściowy)",
+        (Lang::Pl, "off (use DXC)") => "wyłączony (użyj DXC)",
+        (Lang::Pl, "On (activity + net + live flush)") => "Włączone (pełne logi na żywo)",
+        (Lang::Pl, "Off (normal play)") => "Wyłączone (normalna gra)",
+        (Lang::Pl, "Clear") => "Wyczyść",
+        (Lang::Pl, "Cleared shader cache") => "Wyczyszczono cache shaderów",
+        (Lang::Pl, "Install DRM-free GOG offline installers stored in /mnt/ext1/xboxseries/installers/.") => {
+            "Instaluj gry GOG z instalatorów offline w /mnt/ext1/xboxseries/installers/."
+        }
+        (Lang::Pl, "Change the display language of the TrinityXSX menu immediately.") => {
+            "Zmienia język interfejsu TrinityXSX natychmiast, bez restartu."
+        }
+        (Lang::Pl, "Switch offline player profile (separate saves per profile). Add profiles via Web Companion (L1).") => {
+            "Przełącza lokalny profil gracza (osobne zapisy). Nowe profile dodasz w panelu WWW (L1)."
+        }
+        (Lang::Pl, "Show or hide the live FPS counter in the top-left corner (requires restart).") => {
+            "Pokazuje lub ukrywa licznik FPS w lewym górnym rogu ekranu (wymaga restartu)."
+        }
+        (Lang::Pl, "Control games with a PC keyboard and mouse over LAN (Browser with PIN or txin-sender).") => {
+            "Steruj grami klawiaturą i myszą z PC po sieci LAN (Przeglądarka z PIN-em lub txin-sender)."
+        }
+        (Lang::Pl, "Restart TrinityXSX cleanly to apply display changes such as Frame Generation or FPS counter.") => {
+            "Restartuje TrinityXSX, aby zastosować zmiany wyświetlania (generowanie klatek, licznik FPS)."
+        }
+        (Lang::Pl, "Deletes the compiled shaders of ALL games (XCL, vkd3d-proton, RADV); they rebuild on next launch. Saves and xcl.toml stay. Press X.") => {
+            "Usuwa skompilowane shadery WSZYSTKICH gier (odbudują się przy następnym uruchomieniu). Zapisy zostają nietknięte."
+        }
+        (Lang::Pl, "Rescanned folders") => "Odświeżono foldery",
+        (Lang::Pl, "Saved settings") => "Zapisano ustawienia",
+        (Lang::Pl, "Applied preset") => "Zastosowano preset",
+        (Lang::Pl, "Game info") => "Informacje o grze",
+        (Lang::Pl, "Info") => "Opcje",
+        (Lang::Pl, "Series S uses less RAM and safer LOD on PS5. Switch to Series X only if a game refuses Series S.") => {
+            "Series S zużywa mniej RAM na PS5. Zmień na Series X tylko, gdy gra odrzuca Series S."
+        }
+        (Lang::Pl, "6144 MiB is recommended on PS5. Lower to 4096 MiB if a game crashes with out-of-memory errors.") => {
+            "Zalecane 6144 MiB na PS5. Obniż do 4096 MiB, jeśli gra wywala się przez brak pamięci."
+        }
+        (Lang::Pl, "CPU/GPU mapped texture window. Raise to 1536 or 2048 MiB if xcl.log reports coherent window exhaustion.") => {
+            "Okno współdzielonej pamięci CPU/GPU. Zwiększ do 1536 lub 2048 MiB przy błędach pamięci tekstur."
+        }
+        (Lang::Pl, "\"all\" skips heavy multi-threaded DXC shader compilation on PS5. Switch to \"off\" if shaders look broken.") => {
+            "\"wszystkie\" pomija ciężką kompilację DXC na PS5. Wyłącz tylko, gdy shadery wyglądają źle."
+        }
+        (Lang::Pl, "Keep \"off\" while testing a new game; enable tier1_0/tier1_1 only after it runs stably.") => {
+            "Zostaw wyłączone podczas testów; włącz tier1_0/tier1_1 dopiero gdy gra działa stabilnie."
+        }
+        (Lang::Pl, "Offline blocks external sockets so games boot cleanly without hanging on Xbox Live.") => {
+            "Tryb offline blokuje sieć, dzięki czemu gry uruchamiają się bez zawieszania na Xbox Live."
+        }
+        (Lang::Pl, "Keep Disabled for offline play — placeholder tokens can cause infinite sign-in loops.") => {
+            "Zostaw wyłączone w trybie offline — zastępcze tokeny mogą powodować pętlę logowania."
+        }
+        (Lang::Pl, "Use \"info\" for normal play. Switch to \"debug\" when capturing logs for a GitHub bug report.") => {
+            "Używaj \"info\" do gry. Przełącz na \"debug\" przy zbieraniu logów do zgłoszenia błędu."
+        }
+        (Lang::Pl, "Flushes xcl.log immediately and records memory/activity every 2s. Helpful when diagnosing hangs.") => {
+            "Zapisuje xcl.log na bieżąco i loguje pamięć co 2 s. Pomocne przy diagnozowaniu zawieszeń."
+        }
+        (Lang::Pl, "Replaces NVIDIA DLSS DLL imports with a harmless stub on PS5's AMD RDNA2 GPU.") => {
+            "Zastępuje biblioteki NVIDIA DLSS bezpieczną zaślepką na układzie AMD RDNA2 w PS5."
+        }
+        (Lang::Pl, "Sets VKD3D_FEATURE_LEVEL for vkd3d-proton. Try 12_0 if a game fails D3D12CreateDevice on PS5 RADV.") => {
+            "Wymusza poziom funkcji D3D12 (vkd3d-proton). Spróbuj 12_0 przy błędzie inicjalizacji grafiki."
+        }
+        (Lang::Pl, "Restored recommended PS5 preset") => "Przywrócono zalecany preset PS5",
         (Lang::Pl, "MihawkGen neural interpolation (Vulkan / DXVK / D3D12). Restart TrinityXSX to apply.") => {
             "Interpolacja klatek MihawkGen (Vulkan / DXVK / D3D12). Zrestartuj TrinityXSX po zmianie."
         }
@@ -298,5 +443,22 @@ mod tests {
         assert_eq!(Lang::Es.next(), Lang::En);
         assert_eq!(tr(Lang::Pl, "Game folders"), "Foldery gier");
         assert_eq!(tr(Lang::Pt, "Untranslated key"), "Untranslated key");
+    }
+
+    #[test]
+    fn polish_pluralization_handles_teens_and_twenties() {
+        assert_eq!(plural_pl(0, "gra", "gry", "gier"), "gier");
+        assert_eq!(plural_pl(1, "gra", "gry", "gier"), "gra");
+        assert_eq!(plural_pl(2, "gra", "gry", "gier"), "gry");
+        assert_eq!(plural_pl(4, "gra", "gry", "gier"), "gry");
+        assert_eq!(plural_pl(5, "gra", "gry", "gier"), "gier");
+        assert_eq!(plural_pl(12, "gra", "gry", "gier"), "gier");
+        assert_eq!(plural_pl(14, "gra", "gry", "gier"), "gier");
+        assert_eq!(plural_pl(22, "gra", "gry", "gier"), "gry");
+        assert_eq!(plural_pl(25, "gra", "gry", "gier"), "gier");
+        assert_eq!(count_noun(Lang::Pl, 1, "file", "files", "plik", "pliki", "plików"), "1 plik");
+        assert_eq!(count_noun(Lang::Pl, 3, "file", "files", "plik", "pliki", "plików"), "3 pliki");
+        assert_eq!(count_noun(Lang::En, 1, "file", "files", "plik", "pliki", "plików"), "1 file");
+        assert_eq!(count_noun(Lang::En, 3, "file", "files", "plik", "pliki", "plików"), "3 files");
     }
 }

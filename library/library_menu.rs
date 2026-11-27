@@ -16,7 +16,7 @@ use xcl::config::Config;
 use xcl::library::{self, BrowserEntry, Catalog, UiSettings};
 use xcl::library_art::{self, DibImage, QrCode};
 use xcl::library_gog::{self, GogInstaller, PeLaunchKind};
-use xcl::library_i18n::tr;
+use xcl::library_i18n::{count_noun, tr, Lang};
 use xcl::library_web::WebCompanion;
 
 const GAME_ROWS: usize = 6;
@@ -26,6 +26,7 @@ const SETTINGS_ROWS: usize = 8;
 /// Rows of the app settings screen; the last one restarts TrinityXSX.
 const APP_ROWS: usize = 7;
 const SETTINGS_COUNT: usize = 13;
+const PC_SETTINGS_COUNT: usize = 3;
 
 const UP: u16 = 0x0001;
 const DOWN: u16 = 0x0002;
@@ -77,22 +78,23 @@ struct InstallJob {
     result: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
-fn format_install_eta(done: u64, total: u64, elapsed_secs: f64) -> String {
+fn format_install_eta(done: u64, total: u64, elapsed_secs: f64, lang: Lang) -> String {
     if elapsed_secs < 2.0 || done < 4 * 1024 * 1024 || total <= done {
-        return "estimating time...".to_owned();
+        return tr(lang, "estimating time...").to_owned();
     }
     let bytes_per_sec = done as f64 / elapsed_secs;
     if bytes_per_sec <= 1.0 {
-        return "estimating time...".to_owned();
+        return tr(lang, "estimating time...").to_owned();
     }
     let mib_s = bytes_per_sec / (1024.0 * 1024.0);
     let rem_secs = ((total - done) as f64 / bytes_per_sec).ceil() as u64;
+    let left_lbl = tr(lang, "left");
     let eta = if rem_secs >= 3600 {
-        format!("~{}h {:02}m left", rem_secs / 3600, (rem_secs % 3600) / 60)
+        format!("~{}h {:02}m {left_lbl}", rem_secs / 3600, (rem_secs % 3600) / 60)
     } else if rem_secs >= 60 {
-        format!("~{}m {:02}s left", rem_secs / 60, rem_secs % 60)
+        format!("~{}m {:02}s {left_lbl}", rem_secs / 60, rem_secs % 60)
     } else {
-        format!("~{rem_secs}s left")
+        format!("~{rem_secs}s {left_lbl}")
     };
     format!("{mib_s:.1} MiB/s   ·   {eta}")
 }
@@ -248,6 +250,22 @@ impl Menu {
         self.preview_saves = library::saves_summary(game);
     }
 
+    fn is_pc_preview(&self) -> bool {
+        !matches!(self.preview_pe_kind, PeLaunchKind::XboxSeries)
+    }
+
+    fn active_settings_count(&self) -> usize {
+        if self.is_pc_preview() {
+            PC_SETTINGS_COUNT
+        } else {
+            SETTINGS_COUNT
+        }
+    }
+
+    fn pending_installers_count(&self) -> usize {
+        self.installers.iter().filter(|i| !i.is_installed()).count()
+    }
+
     fn open_game_settings(&mut self) {
         let Some(game) = self.catalog.games.get(self.selected) else { return };
         let (cfg, _) = library::load_game_config(game);
@@ -262,6 +280,20 @@ impl Menu {
     }
 
     fn cycle_setting(&mut self, forward: bool) {
+        if self.is_pc_preview() {
+            if self.settings_row == 2 {
+                let (files, bytes) = library::clear_shader_cache();
+                self.preview_shader_cache = Some(library::shader_cache_summary());
+                let lang = self.ui.language;
+                let files_lbl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
+                self.status = format!(
+                    "{}: {files_lbl} ({:.1} MiB)",
+                    tr(lang, "Cleared shader cache"),
+                    (bytes as f64) / (1024.0 * 1024.0)
+                );
+            }
+            return;
+        }
         let step = |idx: usize, len: usize| -> usize {
             if forward {
                 (idx + 1) % len
@@ -360,8 +392,11 @@ impl Menu {
                 // Action row: Clear shader cache (all titles share it; xcl.toml is not touched)
                 let (files, bytes) = library::clear_shader_cache();
                 self.preview_shader_cache = Some(library::shader_cache_summary());
+                let lang = self.ui.language;
+                let files_lbl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
                 self.status = format!(
-                    "Cleared {files} shader cache file(s) of all games ({:.1} MiB freed)",
+                    "{}: {files_lbl} ({:.1} MiB)",
+                    tr(lang, "Cleared shader cache"),
                     (bytes as f64) / (1024.0 * 1024.0)
                 );
                 return;
@@ -373,7 +408,7 @@ impl Menu {
             match library::save_game_config(game, &self.settings_cfg) {
                 Ok(()) => {
                     self.preview_has_custom_cfg = true;
-                    self.status = format!("Saved xcl.toml for {}", game.identity);
+                    self.status = format!("{}: {}", tr(self.ui.language, "Saved settings"), game.name);
                 }
                 Err(e) => self.status = format!("Cannot save xcl.toml: {e}"),
             }
@@ -381,6 +416,54 @@ impl Menu {
     }
 
     fn setting_row_info(&self, row: usize) -> (&'static str, String, &'static str) {
+        let lang = self.ui.language;
+        let t = |k: &'static str| tr(lang, k);
+        if self.is_pc_preview() {
+            return match row {
+                0 => {
+                    let mode = match self.preview_pe_kind {
+                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false } => "PC 64-bit (DXVK / vkd3d)",
+                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: false } => "PC 32-bit (DXVK)",
+                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: true } => "PC 64-bit OpenGL (Zink)",
+                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: true } => "PC 32-bit OpenGL (Zink)",
+                        PeLaunchKind::XboxSeries => "Xbox Series",
+                    };
+                    (
+                        t("Launch mode"),
+                        mode.into(),
+                        t("PC/GOG games run directly under Wine/DXVK without Xbox xcl.toml settings."),
+                    )
+                }
+                1 => {
+                    let compat = self
+                        .catalog
+                        .games
+                        .get(self.selected)
+                        .and_then(|g| library::lookup_tested_preset_label(&g.title_id, &g.identity))
+                        .map(|s| s.to_owned())
+                        .unwrap_or_else(|| t("Automatic PC/GOG profile").to_owned());
+                    (
+                        t("Compatibility status"),
+                        compat,
+                        t("PC/GOG games run directly under Wine/DXVK without Xbox xcl.toml settings."),
+                    )
+                }
+                _ => {
+                    let (files, bytes) = self.preview_shader_cache.unwrap_or((0, 0));
+                    let value = if files == 0 {
+                        t("Empty").into()
+                    } else {
+                        let fl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
+                        format!("{} ({fl} · {:.1} MiB)", t("Clear"), (bytes as f64) / (1024.0 * 1024.0))
+                    };
+                    (
+                        t("Clear Shader Cache"),
+                        value,
+                        t("Deletes the compiled shaders of ALL games (XCL, vkd3d-proton, RADV); they rebuild on next launch. Saves and xcl.toml stay. Press X."),
+                    )
+                }
+            };
+        }
         match row {
             0 => {
                 let preset = library::NAMED_PRESETS
@@ -400,98 +483,107 @@ impl Menu {
                 } else {
                     preset.label.into()
                 };
-                ("Compatibility preset", label, preset.summary)
+                (t("Compatibility preset"), label, preset.summary)
             }
             1 => (
-                "Console model",
+                t("Console model"),
                 if self.settings_cfg.device_type.eq_ignore_ascii_case("lockhart") {
                     "Xbox Series S (lockhart)".into()
                 } else {
                     "Xbox Series X (anaconda)".into()
                 },
-                "Series S uses less RAM and safer LOD on PS5. Switch to Series X only if a game refuses Series S.",
+                t("Series S uses less RAM and safer LOD on PS5. Switch to Series X only if a game refuses Series S."),
             ),
             2 => (
-                "Title memory budget",
+                t("Title memory budget"),
                 if self.settings_cfg.title_memory_mb == 0 {
-                    "Auto (console default)".into()
+                    t("Auto (console default)").into()
                 } else {
                     format!("{} MiB", self.settings_cfg.title_memory_mb)
                 },
-                "6144 MiB is recommended on PS5. Lower to 4096 MiB if a game crashes with out-of-memory errors.",
+                t("6144 MiB is recommended on PS5. Lower to 4096 MiB if a game crashes with out-of-memory errors."),
             ),
             3 => (
-                "Coherent UMA window",
+                t("Coherent UMA window"),
                 format!("{} MiB", self.settings_cfg.coherent_mb.max(512)),
-                "CPU/GPU mapped texture window. Raise to 1536 or 2048 MiB if xcl.log reports coherent window exhaustion.",
+                t("CPU/GPU mapped texture window. Raise to 1536 or 2048 MiB if xcl.log reports coherent window exhaustion."),
             ),
             4 => (
-                "Direct DXIL translator",
+                t("Direct DXIL translator"),
                 match self.settings_cfg.direct_dxil.trim() {
-                    "all" => "all (fastest on PS5)".into(),
-                    "1" => "1 (partial)".into(),
-                    _ => "off (use DXC)".into(),
+                    "all" => t("all (fastest on PS5)").into(),
+                    "1" => t("1 (partial)").into(),
+                    _ => t("off (use DXC)").into(),
                 },
-                "\"all\" skips heavy multi-threaded DXC shader compilation on PS5. Switch to \"off\" if shaders look broken.",
+                t("\"all\" skips heavy multi-threaded DXC shader compilation on PS5. Switch to \"off\" if shaders look broken."),
             ),
             5 => (
-                "Raytracing (DXR)",
-                if self.settings_cfg.raytracing.is_empty() { "off".into() } else { self.settings_cfg.raytracing.clone() },
-                "Keep \"off\" while testing a new game; enable tier1_0/tier1_1 only after it runs stably.",
+                t("Raytracing (DXR)"),
+                if self.settings_cfg.raytracing.is_empty() || self.settings_cfg.raytracing.eq_ignore_ascii_case("off") {
+                    t("Off").into()
+                } else {
+                    self.settings_cfg.raytracing.clone()
+                },
+                t("Keep \"off\" while testing a new game; enable tier1_0/tier1_1 only after it runs stably."),
             ),
             6 => (
-                "Network access",
-                if self.settings_cfg.network { "Online (true)".into() } else { "Offline (false)".into() },
-                "Offline blocks external sockets so games boot cleanly without hanging on Xbox Live.",
+                t("Network access"),
+                if self.settings_cfg.network { t("Online (true)").into() } else { t("Offline (false)").into() },
+                t("Offline blocks external sockets so games boot cleanly without hanging on Xbox Live."),
             ),
             7 => (
-                "Xbox Live placeholder tokens",
-                if self.settings_cfg.xbox_live_tokens { "Enabled (true)".into() } else { "Disabled (false)".into() },
-                "Keep Disabled for offline play — placeholder tokens can cause infinite sign-in loops.",
+                t("Xbox Live placeholder tokens"),
+                if self.settings_cfg.xbox_live_tokens {
+                    t("Enabled (true)").into()
+                } else {
+                    t("Disabled (false)").into()
+                },
+                t("Keep Disabled for offline play — placeholder tokens can cause infinite sign-in loops."),
             ),
             8 => (
-                "Log verbosity",
+                t("Log verbosity"),
                 self.settings_cfg.log_level.clone(),
-                "Use \"info\" for normal play. Switch to \"debug\" when capturing logs for a GitHub bug report.",
+                t("Use \"info\" for normal play. Switch to \"debug\" when capturing logs for a GitHub bug report."),
             ),
             9 => (
-                "Diagnostic tracing",
+                t("Diagnostic tracing"),
                 if self.settings_cfg.activity || self.settings_cfg.live_flush {
-                    "On (activity + net + live flush)".into()
+                    t("On (activity + net + live flush)").into()
                 } else {
-                    "Off (normal play)".into()
+                    t("Off (normal play)").into()
                 },
-                "Flushes xcl.log immediately and records memory/activity every 2s. Helpful when diagnosing hangs.",
+                t("Flushes xcl.log immediately and records memory/activity every 2s. Helpful when diagnosing hangs."),
             ),
             10 => (
-                "Stub nvngx_dlss.dll",
+                t("Stub nvngx_dlss.dll"),
                 if self.settings_cfg.aliases.get("nvngx_dlss.dll").is_some_and(|v| v == "@stub") {
-                    "On (@stub)".into()
+                    format!("{} (@stub)", t("On"))
                 } else {
-                    "Off".into()
+                    t("Off").into()
                 },
-                "Replaces NVIDIA DLSS DLL imports with a harmless stub on PS5's AMD RDNA2 GPU.",
+                t("Replaces NVIDIA DLSS DLL imports with a harmless stub on PS5's AMD RDNA2 GPU."),
             ),
             11 => (
-                "D3D12 Feature Level (vkd3d)",
+                t("D3D12 Feature Level (vkd3d)"),
                 match self.settings_cfg.vkd3d_feature_level.trim() {
-                    "12_0" => "12_0 (force FL 12_0)".into(),
-                    "12_1" => "12_1 (force FL 12_1)".into(),
-                    _ => "Auto (GPU default)".into(),
+                    "12_0" => "12_0".into(),
+                    "12_1" => "12_1".into(),
+                    _ => t("Auto (GPU default)").into(),
                 },
-                "Sets VKD3D_FEATURE_LEVEL for vkd3d-proton. Try 12_0 if a game fails D3D12CreateDevice on PS5 RADV.",
+                t("Sets VKD3D_FEATURE_LEVEL for vkd3d-proton. Try 12_0 if a game fails D3D12CreateDevice on PS5 RADV."),
             ),
             _ => {
                 let (files, bytes) = self.preview_shader_cache.unwrap_or((0, 0));
                 let value = if files == 0 {
-                    tr(self.ui.language, "Empty").into()
+                    t("Empty").into()
                 } else {
-                    format!("Clear ({files} files · {:.1} MiB)", (bytes as f64) / (1024.0 * 1024.0))
+                    let fl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
+                    format!("{} ({fl} · {:.1} MiB)", t("Clear"), (bytes as f64) / (1024.0 * 1024.0))
                 };
                 (
-                    tr(self.ui.language, "Clear Shader Cache"),
+                    t("Clear Shader Cache"),
                     value,
-                    "Deletes the compiled shaders of ALL games (XCL, vkd3d-proton, RADV); they rebuild on next launch. Saves and xcl.toml stay. Press X.",
+                    t("Deletes the compiled shaders of ALL games (XCL, vkd3d-proton, RADV); they rebuild on next launch. Saves and xcl.toml stay. Press X."),
                 )
             }
         }
@@ -544,31 +636,25 @@ impl Menu {
         let total_bg = Arc::clone(&total);
         let res_bg = Arc::clone(&result);
         let fallback_name = inst.display_name.clone();
+        let game_name = inst.display_name.clone();
+        let lang = self.ui.language;
+        let inst_lbl = tr(lang, "Installed");
         std::thread::spawn(move || {
             let outcome = library_gog::extract_gog_installer_in_process(&inst.setup_exe, &dest_dir, done_bg, total_bg)
                 .and_then(|()| library_gog::finalize_gog_game(&dest_dir, &fallback_name))
                 .map(|fin| {
                     if delete_after {
-                        let _ = std::fs::remove_file(&inst.setup_exe);
-                        for bin in &inst.slice_files {
-                            let _ = std::fs::remove_file(bin);
-                        }
+                        let _ = inst.remove_installer_files();
                     }
-                    format!(
-                        "Installed '{}' [{}] ({})",
-                        fin.name,
-                        fin.pe_kind.badge(),
-                        if fin.has_cover { "cover OK" } else { "no cover" }
-                    )
+                    format!("{inst_lbl}: {} [{}]", fin.name, fin.pe_kind.badge())
                 });
             if let Ok(mut guard) = res_bg.lock() {
                 *guard = Some(outcome);
             }
         });
 
-        self.status = format!("Installing {}...", inst.display_name);
-        self.install_job =
-            Some(InstallJob { game_name: inst.display_name, done, total, started: Instant::now(), result });
+        self.status = format!("{} {}...", tr(lang, "Installing"), game_name);
+        self.install_job = Some(InstallJob { game_name, done, total, started: Instant::now(), result });
     }
 
     fn poll_install_job(&mut self) -> bool {
@@ -579,13 +665,14 @@ impl Menu {
         };
         if let Some(outcome) = finished {
             self.install_job = None;
+            let lang = self.ui.language;
             match outcome {
                 Ok(msg) => {
                     self.scan();
-                    self.status = format!("{msg}  ·  Press Circle to play");
+                    self.status = format!("{msg}  ·  {}", tr(lang, "Press Circle to return and play"));
                 }
                 Err(err) => {
-                    self.status = format!("Install failed: {err}");
+                    self.status = format!("{}: {err}", tr(lang, "Install failed"));
                 }
             }
             return true;
@@ -597,19 +684,49 @@ impl Menu {
         if self.install_job.is_some() {
             return false; // ignore input while extraction thread is running
         }
+        let lang = self.ui.language;
         if buttons & CIRCLE != 0 {
             self.screen = Screen::Library;
             return false;
         }
         if buttons & TRIANGLE != 0 {
             self.installers = library_gog::scan_gog_installers(&self.paths);
-            self.status = format!("Found {} GOG installer(s)", self.installers.len());
+            if !self.installers.is_empty() && self.installer_row >= self.installers.len() {
+                self.installer_row = self.installers.len() - 1;
+            }
+            let total_lbl = count_noun(
+                lang,
+                self.installers.len(),
+                "installer",
+                "installers",
+                "instalator",
+                "instalatory",
+                "instalatorów",
+            );
+            self.status = format!("{} ({total_lbl})", tr(lang, "Rescan"));
             return false;
         }
         if buttons & SQUARE != 0 {
             self.delete_installer_after = !self.delete_installer_after;
-            self.status =
-                format!("Delete installer after install: {}", if self.delete_installer_after { "On" } else { "Off" });
+            self.status = format!(
+                "{}: {}",
+                tr(lang, "Delete installer after install"),
+                tr(lang, if self.delete_installer_after { "On" } else { "Off" })
+            );
+            return false;
+        }
+        if buttons & R1 != 0 {
+            if let Some(inst) = self.installers.get(self.installer_row).cloned() {
+                let removed = inst.remove_installer_files();
+                self.installers = library_gog::scan_gog_installers(&self.paths);
+                if !self.installers.is_empty() && self.installer_row >= self.installers.len() {
+                    self.installer_row = self.installers.len() - 1;
+                } else if self.installers.is_empty() {
+                    self.installer_row = 0;
+                }
+                let fl = count_noun(lang, removed, "file", "files", "plik", "pliki", "plików");
+                self.status = format!("{}: {} ({fl})", tr(lang, "Removed installer files"), inst.display_name);
+            }
             return false;
         }
         if buttons & UP != 0 {
@@ -851,11 +968,12 @@ impl Menu {
             self.refresh_preview();
             return false;
         }
+        let count = self.active_settings_count();
         if buttons & UP != 0 {
-            self.settings_row = wrap_up(self.settings_row, SETTINGS_COUNT);
+            self.settings_row = wrap_up(self.settings_row, count);
         }
         if buttons & DOWN != 0 {
-            self.settings_row = wrap_down(self.settings_row, SETTINGS_COUNT);
+            self.settings_row = wrap_down(self.settings_row, count);
         }
         if buttons & (CROSS | RIGHT) != 0 {
             self.cycle_setting(true);
@@ -863,13 +981,13 @@ impl Menu {
         if buttons & LEFT != 0 {
             self.cycle_setting(false);
         }
-        if buttons & TRIANGLE != 0 {
+        if buttons & TRIANGLE != 0 && !self.is_pc_preview() {
             if let Some(game) = self.catalog.games.get(self.selected) {
                 match library::reset_game_config(game) {
                     Ok(preset) => {
                         self.settings_cfg = preset;
                         self.preview_has_custom_cfg = true;
-                        self.status = "Restored recommended PS5 preset".into();
+                        self.status = tr(self.ui.language, "Restored recommended PS5 preset").into();
                     }
                     Err(e) => self.status = format!("Cannot reset xcl.toml: {e}"),
                 }
@@ -1089,7 +1207,7 @@ unsafe fn draw_btn_icon(dc: HDC, icon: BtnIcon, x: i32, y: i32, h: i32) -> i32 {
     match icon {
         BtnIcon::Cross | BtnIcon::Circle | BtnIcon::Square | BtnIcon::Triangle => {
             let fill_br = CreateSolidBrush(bg);
-            let rim_pen = CreatePen(PS_SOLID as i32, 1, rim);
+            let rim_pen = CreatePen(PS_SOLID, 1, rim);
             let old_br = SelectObject(dc, fill_br);
             let old_pen = SelectObject(dc, rim_pen);
             Ellipse(dc, x, y, x + h, y + h);
@@ -1105,9 +1223,9 @@ unsafe fn draw_btn_icon(dc: HDC, icon: BtnIcon, x: i32, y: i32, h: i32) -> i32 {
                 BtnIcon::Square => (rgb(232, 130, 218), 2u8),
                 _ => (rgb(82, 224, 164), 3u8),
             };
-            let sym_pen = CreatePen(PS_SOLID as i32, stroke, color);
+            let sym_pen = CreatePen(PS_SOLID, stroke, color);
             let old_pen = SelectObject(dc, sym_pen);
-            let old_br = SelectObject(dc, GetStockObject(NULL_BRUSH as i32));
+            let old_br = SelectObject(dc, GetStockObject(NULL_BRUSH));
             let l = x + pad;
             let t = y + pad;
             let r = x + h - pad;
@@ -1144,7 +1262,7 @@ unsafe fn draw_btn_icon(dc: HDC, icon: BtnIcon, x: i32, y: i32, h: i32) -> i32 {
             let pad_x = (h * 34) / 100;
             let w = (tw + pad_x * 2).max(h + (h / 3));
             let fill_br = CreateSolidBrush(bg);
-            let rim_pen = CreatePen(PS_SOLID as i32, 1, rim);
+            let rim_pen = CreatePen(PS_SOLID, 1, rim);
             let old_br = SelectObject(dc, fill_br);
             let old_pen = SelectObject(dc, rim_pen);
             let rad = (h * 45) / 100;
@@ -1352,35 +1470,26 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let active = menu.catalog.folders.iter().filter(|f| f.available).count();
             let sort_label = t(menu.ui.sort_mode.label_key());
             text(dc, "TrinityXSX", region(left, 56, right - scale(740), 80), scale(62), 700, snow);
-            let installer_note = if !menu.installers.is_empty() {
-                format!("  ·  {} {} (OPTIONS)", menu.installers.len(), t("installer(s) ready"))
+            let pending = menu.pending_installers_count();
+            let installer_note = if pending > 0 {
+                let cnt =
+                    count_noun(lang, pending, "installer", "installers", "instalator", "instalatory", "instalatorów");
+                format!("  ·  {cnt} (OPTIONS)")
             } else {
                 String::new()
             };
+            let games_lbl = count_noun(lang, menu.catalog.games.len(), "game", "games", "gra", "gry", "gier");
+            let folders_lbl = format!("{active}/{} {}", menu.catalog.folders.len(), t("folders"));
             let header_sub = if menu.catalog.games.len() > GAME_ROWS {
                 format!(
-                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}  ·  {} / {}{installer_note}",
-                    t("Game library"),
-                    menu.catalog.games.len(),
-                    t("games"),
-                    active,
-                    menu.catalog.folders.len(),
-                    t("folders"),
+                    "{games_lbl}  ·  {folders_lbl}  ·  {sort_label}  ·  {} / {}{installer_note}",
                     menu.selected + 1,
                     menu.catalog.games.len()
                 )
             } else {
-                format!(
-                    "{}  ·  {} {}  ·  {}/{} {}  ·  {sort_label}{installer_note}",
-                    t("Game library"),
-                    menu.catalog.games.len(),
-                    t("games"),
-                    active,
-                    menu.catalog.folders.len(),
-                    t("folders")
-                )
+                format!("{games_lbl}  ·  {folders_lbl}  ·  {sort_label}{installer_note}")
             };
-            text(dc, &header_sub, region(left, 142, right, 44), scale(27), 400, mint);
+            text(dc, &header_sub, region(left, 142, right, 44), scale(26), 400, mint);
 
             if menu.catalog.games.is_empty() {
                 text(dc, t("No Xbox Series games found"), region(left, 290, right, 60), scale(40), 600, snow);
@@ -1394,11 +1503,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
                 for (idx, folder) in menu.catalog.folders.iter().take(4).enumerate() {
                     let y = 426 + (idx as i32) * 44;
-                    let badge = if folder.available { "Available" } else { "Not found" };
+                    let badge = t(if folder.available { "Available" } else { "Not found" });
                     let color = if folder.available { mint } else { muted };
                     text(
                         dc,
-                        &format!("{}   [{}]", folder.path, badge),
+                        &format!("{}   [{badge}]", folder.path),
                         region(left + scale(18), y, right, 38),
                         scale(24),
                         400,
@@ -1519,38 +1628,41 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     };
                     text(dc, &id_line, region(info_left, card_top + 378, info_right, 32), scale(21), 400, muted);
 
-                    let cfg_label = if menu.preview_has_custom_cfg {
-                        t("Config: Custom xcl.toml")
-                    } else if library::has_tested_preset(&game.title_id, &game.identity) {
-                        t("Config: Tested PS5 preset")
-                    } else {
-                        t("Config: Auto PS5 defaults")
-                    };
-                    text(dc, cfg_label, region(info_left, card_top + 428, info_right, 32), scale(22), 600, mint);
+                    let is_pc = menu.is_pc_preview();
+                    let cfg_label: String =
+                        if let Some(compat) = library::lookup_tested_preset_label(&game.title_id, &game.identity) {
+                            compat.to_owned()
+                        } else if is_pc {
+                            t("Config: PC/GOG native mode (auto)").to_owned()
+                        } else if menu.preview_has_custom_cfg {
+                            t("Config: Custom xcl.toml").to_owned()
+                        } else {
+                            t("Config: Auto PS5 defaults").to_owned()
+                        };
+                    text(dc, &cfg_label, region(info_left, card_top + 428, info_right, 32), scale(22), 600, mint);
 
                     let (sfiles, sbytes) = menu.preview_saves;
                     let saves_line = if sfiles == 0 {
                         t("Saves: None yet").into()
                     } else {
-                        format!("Saves: {sfiles} files ({:.1} MiB)", (sbytes as f64) / (1024.0 * 1024.0))
+                        let fl = count_noun(lang, sfiles, "file", "files", "plik", "pliki", "plików");
+                        format!("{}: {fl} ({:.1} MiB)", t("Saves"), (sbytes as f64) / (1024.0 * 1024.0))
                     };
                     text(dc, &saves_line, region(info_left, card_top + 468, info_right, 32), scale(21), 400, muted);
                     text(
                         dc,
-                        &format!("Folder: {}", game.folder),
+                        &format!("{}: {}", t("Folder"), game.folder),
                         region(info_left, card_top + 506, info_right, 32),
                         scale(20),
                         400,
                         muted,
                     );
-                    text(
-                        dc,
-                        t("Press R1 to edit xcl.toml settings"),
-                        region(info_left, card_top + 558, info_right, 32),
-                        scale(21),
-                        600,
-                        snow,
-                    );
+                    let r1_hint = if is_pc {
+                        t("Press R1 for game info & shader cache")
+                    } else {
+                        t("Press R1 to edit xcl.toml settings")
+                    };
+                    text(dc, r1_hint, region(info_left, card_top + 558, info_right, 32), scale(21), 600, snow);
                 }
             }
 
@@ -1558,7 +1670,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 let web_right = if menu.storage_line.is_empty() { right } else { left + ((right - left) * 56) / 100 };
                 text(
                     dc,
-                    &format!("Web & Logs:  {}   ·   PIN {}   (L1 -> QR)", web.url, web.pin),
+                    &format!("{}:  {}   ·   PIN {}   (L1 -> QR)", t("Web & Logs"), web.url, web.pin),
                     region(left, 852, web_right, 34),
                     scale(21),
                     400,
@@ -1597,7 +1709,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
         }
 
         Screen::AppSettings => {
-            text(dc, t("Settings"), region(left, 56, right - scale(660), 76), scale(52), 700, snow);
+            text(dc, t("Settings"), region(left, 56, right - scale(520), 76), scale(52), 700, snow);
             text(
                 dc,
                 t("Install games, adjust display options, player profile and language."),
@@ -1608,6 +1720,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             );
 
             let profile = menu.ui.current_profile();
+            let profile_val = if menu.ui.profiles.len() > 1 {
+                format!("{} ({}/{})", profile.name, menu.ui.active_profile + 1, menu.ui.profiles.len())
+            } else {
+                profile.name.clone()
+            };
             let fg_base = match menu.framegen {
                 2 => "2x (30 -> 60 FPS)".to_owned(),
                 3 => "3x (20 -> 60 FPS)".to_owned(),
@@ -1617,14 +1734,18 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let fg_pending = menu.framegen != menu.active_framegen;
             let fps_pending = menu.show_fps != menu.active_show_fps;
             let any_pending = fg_pending || fps_pending;
-            let fg_val = if fg_pending { format!("{fg_base}  [restart]") } else { fg_base };
+            let restart_tag = t("restart");
+            let fg_val = if fg_pending { format!("{fg_base}  [{restart_tag}]") } else { fg_base };
             let fps_base = t(if menu.show_fps { "On" } else { "Off" }).to_owned();
-            let fps_val = if fps_pending { format!("{fps_base}  [restart]") } else { fps_base };
-            let restart_val = if any_pending { t("Apply changes").to_owned() } else { t("Press X").to_owned() };
+            let fps_val = if fps_pending { format!("{fps_base}  [{restart_tag}]") } else { fps_base };
+            let restart_val = if any_pending { t("Apply changes").to_owned() } else { t("Restart now").to_owned() };
+            let pending_gog = menu.pending_installers_count();
             let gog_val = if menu.installers.is_empty() {
                 t("None found").to_owned()
+            } else if pending_gog == 0 {
+                t("All installed").to_owned()
             } else {
-                format!("{} {}  [X]", menu.installers.len(), t("ready"))
+                count_noun(lang, pending_gog, "ready", "ready", "gotowy", "gotowe", "gotowych")
             };
             // The row shows the mode; what the PC needs (address, PIN) gets its own line below the rows.
             let remote_val = t(menu.remote.label_key()).to_owned();
@@ -1641,7 +1762,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let rows = [
                 (t("Install GOG Games"), gog_val),
                 (t("Interface language"), menu.ui.language.display_name().to_owned()),
-                (t("Active offline profile"), format!("{}  (XUID {})", profile.name, profile.user_id)),
+                (t("Active offline profile"), profile_val),
                 (t("Frame Generation"), fg_val),
                 (t("FPS Counter"), fps_val),
                 (t("PC keyboard & mouse"), remote_val),
@@ -1649,20 +1770,20 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             ];
             let restart_row = rows.len() - 1;
             for (idx, (label, val)) in rows.iter().enumerate() {
-                let top = 200 + (idx as i32) * 70;
+                let top = 198 + (idx as i32) * 70;
                 let selected = idx == menu.app_row;
-                fill(dc, region(left, top, right, 68), if selected { card_sel } else { card_bg });
+                fill(dc, region(left, top, right, 62), if selected { card_sel } else { card_bg });
                 if selected {
                     fill(
                         dc,
-                        region(left, top, left + scale(6), 68),
+                        region(left, top, left + scale(6), 62),
                         if idx == restart_row && any_pending { amber } else { mint },
                     );
                 }
-                text(dc, label, region(left + scale(26), top + 16, right - scale(500), 36), scale(26), 600, snow);
+                text(dc, label, region(left + scale(26), top + 14, right - scale(560), 34), scale(26), 600, snow);
                 let val_color = if idx == restart_row && any_pending {
                     amber
-                } else if (idx == 0 && !menu.installers.is_empty()) || selected {
+                } else if (idx == 0 && pending_gog > 0) || selected {
                     mint
                 } else {
                     muted
@@ -1670,7 +1791,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 text_aligned(
                     dc,
                     val,
-                    region(right - scale(520), top + 16, right - scale(26), 36),
+                    region(right - scale(580), top + 14, right - scale(26), 34),
                     scale(26),
                     600,
                     val_color,
@@ -1678,24 +1799,20 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 );
             }
 
-            text(
-                dc,
-                t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
-                region(left, 704, right, 42),
-                scale(23),
-                400,
-                snow,
-            );
-            text(
-                dc,
-                t("Custom gamertags can also be added from the Phone/PC Web Companion (L1)."),
-                region(left, 750, right, 42),
-                scale(23),
-                400,
-                muted,
-            );
+            let row_hint = match menu.app_row {
+                0 => t("Install DRM-free GOG offline installers stored in /mnt/ext1/xboxseries/installers/."),
+                1 => t("Change the display language of the TrinityXSX menu immediately."),
+                2 => t(
+                    "Switch offline player profile (separate saves per profile). Add profiles via Web Companion (L1).",
+                ),
+                3 => t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
+                4 => t("Show or hide the live FPS counter in the top-left corner (requires restart)."),
+                5 => t("Control games with a PC keyboard and mouse over LAN (Browser with PIN or txin-sender)."),
+                _ => t("Restart TrinityXSX cleanly to apply display changes such as Frame Generation or FPS counter."),
+            };
+            text(dc, row_hint, region(left, 710, right, 44), scale(23), 400, snow);
             if let Some(line) = &remote_line {
-                text(dc, line, region(left, 810, right, 50), scale(30), 700, mint);
+                text(dc, line, region(left, 786, right, 50), scale(30), 700, mint);
             }
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
             draw_button_hints(
@@ -1746,7 +1863,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 if fill_w > 0 {
                     fill(dc, region(bar_l, 370, bar_l + fill_w, 38), mint);
                 }
-                let eta_line = format_install_eta(done, total, job.started.elapsed().as_secs_f64());
+                let eta_line = format_install_eta(done, total, job.started.elapsed().as_secs_f64(), lang);
                 text(
                     dc,
                     &format!(
@@ -1790,25 +1907,28 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 for (row, i) in (first..(first + PATH_ROWS).min(menu.installers.len())).enumerate() {
                     let top = 212 + (row as i32) * 96;
                     let inst = &menu.installers[i];
+                    let installed = inst.is_installed();
                     let selected = i == menu.installer_row;
                     fill(dc, region(left, top, right, 82), if selected { card_sel } else { card_bg });
                     if selected {
                         fill(dc, region(left, top, left + scale(6), 82), mint);
                     }
+                    let title = if installed {
+                        format!("{}   [{}]", inst.display_name, t("Installed"))
+                    } else {
+                        inst.display_name.clone()
+                    };
                     text(
                         dc,
-                        &inst.display_name,
+                        &title,
                         region(left + scale(24), top + 10, right - scale(280), 38),
                         scale(30),
                         600,
-                        snow,
+                        if installed && !selected { muted } else { snow },
                     );
-                    let detail = format!(
-                        "{}  ·  {} file(s)  ->  {}",
-                        library::display_path(&inst.setup_exe),
-                        1 + inst.slice_files.len(),
-                        inst.slug
-                    );
+                    let files_lbl =
+                        count_noun(lang, 1 + inst.slice_files.len(), "file", "files", "plik", "pliki", "plików");
+                    let detail = format!("{}  ·  {files_lbl}", library::display_path(&inst.setup_exe));
                     text(
                         dc,
                         &detail,
@@ -1824,7 +1944,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                         region(right - scale(260), top + 22, right - scale(24), 38),
                         scale(26),
                         700,
-                        mint,
+                        if installed { muted } else { mint },
                         DT_SINGLELINE | DT_RIGHT,
                     );
                 }
@@ -1832,44 +1952,57 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let del_lbl = t(if menu.delete_installer_after { "On" } else { "Off" });
             let del_text = format!("{} {del_lbl}", t("Delete files after:"));
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            draw_button_hints(
-                dc,
-                left,
-                right,
-                scale(954),
-                scale(22),
-                &[
-                    (BtnIcon::Cross, t("Install")),
-                    (BtnIcon::Triangle, t("Rescan")),
-                    (BtnIcon::Square, &del_text),
-                    (BtnIcon::Circle, t("Back")),
-                ],
-            );
+            if menu.install_job.is_some() {
+                text(
+                    dc,
+                    t("Installation in progress — buttons locked until finished"),
+                    region(left, 954, right, 36),
+                    scale(22),
+                    600,
+                    amber,
+                );
+            } else {
+                draw_button_hints(
+                    dc,
+                    left,
+                    right,
+                    scale(954),
+                    scale(21),
+                    &[
+                        (BtnIcon::Cross, t("Install")),
+                        (BtnIcon::Triangle, t("Rescan")),
+                        (BtnIcon::Square, &del_text),
+                        (BtnIcon::Pill("R1"), t("Delete installer")),
+                        (BtnIcon::Circle, t("Back")),
+                    ],
+                );
+            }
         }
 
         Screen::GameSettings => {
+            let is_pc = menu.is_pc_preview();
+            let row_count = menu.active_settings_count();
             let game_name = menu.catalog.games.get(menu.selected).map(|g| g.name.as_str()).unwrap_or("Game");
             let game_id = menu.catalog.games.get(menu.selected).map(|g| g.identity.as_str()).unwrap_or("");
+            let title_prefix = if is_pc { t("Game info") } else { t("Game settings") };
             text(
                 dc,
-                &format!("{}  ·  {game_name}", t("Game settings")),
-                region(left, 56, right - scale(660), 76),
-                scale(48),
+                &format!("{title_prefix}  ·  {game_name}"),
+                region(left, 56, right - scale(520), 76),
+                scale(46),
                 700,
                 snow,
             );
-            let cfg_display = library::display_path(&library::config_path_for_title(game_id));
-            text(
-                dc,
-                &format!("{}   ({} / {})", cfg_display, menu.settings_row + 1, SETTINGS_COUNT),
-                region(left, 138, right, 40),
-                scale(23),
-                400,
-                muted,
-            );
+            let sub_line = if is_pc {
+                t("PC/GOG games run directly under Wine/DXVK without Xbox xcl.toml settings.").to_owned()
+            } else {
+                let cfg_display = library::display_path(&library::config_path_for_title(game_id));
+                format!("{cfg_display}   ({} / {row_count})", menu.settings_row + 1)
+            };
+            text(dc, &sub_line, region(left, 138, right, 40), scale(23), 400, muted);
 
-            let first = scroll_window(menu.settings_row, SETTINGS_COUNT, SETTINGS_ROWS);
-            for idx in first..(first + SETTINGS_ROWS).min(SETTINGS_COUNT) {
+            let first = scroll_window(menu.settings_row, row_count, SETTINGS_ROWS);
+            for idx in first..(first + SETTINGS_ROWS).min(row_count) {
                 let top = 198 + ((idx - first) as i32) * 76;
                 let selected = idx == menu.settings_row;
                 let (label, value, _) = menu.setting_row_info(idx);
@@ -1877,11 +2010,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 if selected {
                     fill(dc, region(left, top, left + scale(6), 66), mint);
                 }
-                text(dc, label, region(left + scale(24), top + 16, right - scale(440), 36), scale(26), 600, snow);
+                text(dc, label, region(left + scale(24), top + 16, right - scale(640), 36), scale(26), 600, snow);
                 text_aligned(
                     dc,
                     &value,
-                    region(right - scale(460), top + 16, right - scale(24), 36),
+                    region(right - scale(660), top + 16, right - scale(24), 36),
                     scale(26),
                     600,
                     if selected { mint } else { muted },
@@ -1892,19 +2025,34 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             let (_, _, about) = menu.setting_row_info(menu.settings_row);
             text(dc, about, region(left, 826, right, 44), scale(22), 400, snow);
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
-            draw_button_hints(
-                dc,
-                left,
-                right,
-                scale(954),
-                scale(23),
-                &[
-                    (BtnIcon::Pill("D-PAD"), t("Navigate")),
-                    (BtnIcon::Cross, t("Change & Save")),
-                    (BtnIcon::Triangle, t("Reset preset")),
-                    (BtnIcon::Circle, t("Back")),
-                ],
-            );
+            if is_pc {
+                draw_button_hints(
+                    dc,
+                    left,
+                    right,
+                    scale(954),
+                    scale(23),
+                    &[
+                        (BtnIcon::Pill("D-PAD"), t("Navigate")),
+                        (BtnIcon::Cross, t("Select")),
+                        (BtnIcon::Circle, t("Back")),
+                    ],
+                );
+            } else {
+                draw_button_hints(
+                    dc,
+                    left,
+                    right,
+                    scale(954),
+                    scale(23),
+                    &[
+                        (BtnIcon::Pill("D-PAD"), t("Navigate")),
+                        (BtnIcon::Cross, t("Change & Save")),
+                        (BtnIcon::Triangle, t("Reset preset")),
+                        (BtnIcon::Circle, t("Back")),
+                    ],
+                );
+            }
         }
 
         Screen::Paths => {
@@ -1943,12 +2091,8 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     let inset = left + scale(26);
                     text(dc, &folder.path, region(inset, top + 8, right - scale(20), 42), scale(30), 600, snow);
                     let (state_text, state_color) = if folder.available {
-                        let label = if folder.game_count == 1 {
-                            "1 game".into()
-                        } else {
-                            format!("{} {}", folder.game_count, t("games"))
-                        };
-                        (format!("Available  ·  {label}"), mint)
+                        let label = count_noun(lang, folder.game_count, "game", "games", "gra", "gry", "gier");
+                        (format!("{}  ·  {label}", t("Available")), mint)
                     } else {
                         (t("Disconnected or unavailable").into(), muted)
                     };
@@ -1957,7 +2101,8 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             }
 
             let info = format!(
-                "Removing a folder never deletes games on disk.   Config: {}",
+                "{}   {}",
+                t("Removing a folder never deletes games on disk."),
                 library::display_path(&menu.paths_file)
             );
             text(dc, &info, region(left, 846, right, 36), scale(21), 400, muted);
@@ -2005,8 +2150,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                         fill(dc, region(left, top, left + scale(6), 76), mint);
                     }
                     let inset = left + scale(26);
-                    let label =
-                        if entry.is_game { format!("{}   [Xbox Series game]", entry.name) } else { entry.name.clone() };
+                    let label = if entry.is_game {
+                        format!("{}   [{}]", entry.name, t("Xbox Series game"))
+                    } else {
+                        entry.name.clone()
+                    };
                     text(
                         dc,
                         &label,

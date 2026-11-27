@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{config::Config, launcher, library_i18n::Lang};
 
-pub const TRINITYXSX_VERSION: &str = "v0.2.7";
+pub const TRINITYXSX_VERSION: &str = "v0.2.10";
 
 const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
 const MAX_STORED_PATH_LEN: usize = 1024;
@@ -464,9 +464,17 @@ fn scan_directory_into(
             let nested = scan_directory_into(&path, source_label, depth - 1, seen_execs, games, skipped);
             if nested > 0 {
                 added_here += nested;
-            } else if depth == 1 {
-                *skipped += 1;
-                eprintln!("TrinityXSX: skipped {} (missing MicrosoftGame.config)", name);
+            } else if depth == 1 && !name.eq_ignore_ascii_case("installers") {
+                if let Some(pc_game) = crate::library_gog::discover_unpacked_pc_game(&path, &name, source_label) {
+                    let key = pc_game.executable.to_string_lossy().to_lowercase();
+                    if seen_execs.insert(key) {
+                        games.push(pc_game);
+                        added_here += 1;
+                    }
+                } else {
+                    *skipped += 1;
+                    eprintln!("TrinityXSX: skipped {} (missing MicrosoftGame.config)", name);
+                }
             }
         } else {
             *skipped += 1;

@@ -51,6 +51,32 @@ pub struct GogInstaller {
     pub install_parent: PathBuf,
 }
 
+impl GogInstaller {
+    /// Returns true if this installer's target game directory already contains a finalized
+    /// `MicrosoftGame.config` (either at root or under `app/`).
+    pub fn is_installed(&self) -> bool {
+        let dest = self.install_parent.join(&self.slug);
+        dest.join("MicrosoftGame.config").is_file()
+            || dest.join("app").join("MicrosoftGame.config").is_file()
+            || (dest.is_dir() && !find_pc_executables(&dest).is_empty())
+    }
+
+    /// Delete the installer executable and all `.bin` slices from disk, returning the number
+    /// of removed files.
+    pub fn remove_installer_files(&self) -> usize {
+        let mut removed = 0;
+        if fs::remove_file(&self.setup_exe).is_ok() {
+            removed += 1;
+        }
+        for bin in &self.slice_files {
+            if fs::remove_file(bin).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FinalizedGog {
     pub name: String,
@@ -353,6 +379,45 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
+fn is_exe_file_task(task: &serde_json::Value) -> bool {
+    let is_file = task.get("type").and_then(|x| x.as_str()).is_none_or(|t| t.eq_ignore_ascii_case("FileTask"));
+    let has_exe =
+        task.get("path").and_then(|x| x.as_str()).is_some_and(|p| p.trim().to_ascii_lowercase().ends_with(".exe"));
+    is_file && has_exe
+}
+
+/// Resolve a GOG relative executable path (`Bin//witcher2.exe`) case-insensitively against disk
+/// so `MicrosoftGame.config` records the exact on-disk casing (`bin\witcher2.exe`).
+fn resolve_relative_ci(base: &Path, rel: &str) -> Option<String> {
+    let parts: Vec<&str> = rel.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut cur = base.to_path_buf();
+    let mut resolved = Vec::with_capacity(parts.len());
+    for part in parts {
+        if part == ".." {
+            return None;
+        }
+        if let Ok(rd) = fs::read_dir(&cur) {
+            if let Some(found) = rd.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part)) {
+                let actual = found.file_name().to_string_lossy().into_owned();
+                cur = found.path();
+                resolved.push(actual);
+                continue;
+            }
+        }
+        let direct = cur.join(part);
+        if direct.exists() {
+            cur = direct;
+            resolved.push(part.to_owned());
+            continue;
+        }
+        return None;
+    }
+    cur.is_file().then(|| resolved.join("\\"))
+}
+
 fn find_gog_info(dir: &Path) -> Option<(String, String, String)> {
     let rd = fs::read_dir(dir).ok()?;
     for entry in rd.flatten() {
@@ -366,11 +431,32 @@ fn find_gog_info(dir: &Path) -> Option<(String, String, String)> {
             let tasks = v.get("playTasks").and_then(|x| x.as_array());
             let mut exe_rel = String::new();
             if let Some(arr) = tasks {
-                let primary = arr
+                // Prefer a direct `category == "game"` executable over a `.NET` / external `launcher`
+                // task (e.g. The Witcher 2 lists Launcher.exe as primary and Bin//witcher2.exe as game).
+                let chosen = arr
                     .iter()
-                    .find(|t| t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true))
+                    .find(|t| {
+                        is_exe_file_task(t)
+                            && t.get("category")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.eq_ignore_ascii_case("game"))
+                            && t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true)
+                    })
+                    .or_else(|| {
+                        arr.iter().find(|t| {
+                            is_exe_file_task(t)
+                                && t.get("category")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|c| c.eq_ignore_ascii_case("game"))
+                        })
+                    })
+                    .or_else(|| {
+                        arr.iter()
+                            .find(|t| is_exe_file_task(t) && t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true))
+                    })
+                    .or_else(|| arr.iter().find(|t| is_exe_file_task(t)))
                     .or_else(|| arr.first());
-                if let Some(task) = primary {
+                if let Some(task) = chosen {
                     if let Some(p) = task.get("path").and_then(|x| x.as_str()) {
                         exe_rel = p.trim().to_owned();
                     }
@@ -384,81 +470,208 @@ fn find_gog_info(dir: &Path) -> Option<(String, String, String)> {
     None
 }
 
-fn find_fallback_exe(dir: &Path) -> Option<String> {
-    let mut best: Option<(u64, String)> = None;
-    let rd = fs::read_dir(dir).ok()?;
-    for entry in rd.flatten() {
-        let p = entry.path();
-        if !p.is_file() || !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
-            continue;
+fn is_utility_exe_name(low: &str) -> bool {
+    const SKIP: &[&str] = &[
+        "unins",
+        "crashhandler",
+        "setup",
+        "redist",
+        "vcredist",
+        "dxsetup",
+        "dplay",
+        "config",
+        "options",
+        "register",
+        "netcheck",
+        "spectate",
+        "greetz",
+        "clokspl",
+        "performance",
+        "usercontent",
+        "updater",
+        "launcher",
+    ];
+    SKIP.iter().any(|k| low.contains(k))
+}
+
+fn is_mz_file(path: &Path) -> bool {
+    let Ok(mut f) = File::open(path) else { return false };
+    let mut magic = [0u8; 2];
+    f.read_exact(&mut magic).is_ok() && &magic == b"MZ"
+}
+
+/// Find candidate Windows PC game executables (`.exe` with valid `MZ` header) in `dir`
+/// and 1-level subdirectories, ordered largest first and excluding common utility/uninstaller EXEs.
+pub fn find_pc_executables(dir: &Path) -> Vec<String> {
+    let mut primary: Vec<(u64, String)> = Vec::new();
+    let mut secondary: Vec<(u64, String)> = Vec::new();
+
+    let mut scan_dir = |scan: &Path, prefix: &str| {
+        let Ok(rd) = fs::read_dir(scan) else { return };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if !p.is_file() || !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let low = name.to_ascii_lowercase();
+            if low.contains("unins") || low.contains("setup") || low.contains("redist") || low.contains("crashhandler")
+            {
+                continue;
+            }
+            if !is_mz_file(&p) {
+                continue;
+            }
+            let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let rel = if prefix.is_empty() { name } else { format!("{prefix}\\{name}") };
+            if is_utility_exe_name(&low) {
+                secondary.push((sz, rel));
+            } else {
+                primary.push((sz, rel));
+            }
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let low = name.to_ascii_lowercase();
-        if low.contains("unins") || low.contains("crashhandler") || low.contains("setup") || low.contains("redist") {
-            continue;
-        }
-        let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        if best.as_ref().is_none_or(|(bs, _)| sz > *bs) {
-            best = Some((sz, name));
+    };
+
+    scan_dir(dir, "");
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let sub = entry.file_name().to_string_lossy().to_string();
+            let low = sub.to_ascii_lowercase();
+            if low.starts_with('.')
+                || low.starts_with("__")
+                || low == "tmp"
+                || low == "userappdata"
+                || low == "commonappdata"
+            {
+                continue;
+            }
+            scan_dir(&p, &sub);
         }
     }
-    best.map(|(_, n)| n)
+
+    primary.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    secondary.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    primary.into_iter().chain(secondary).map(|(_, rel)| rel).collect()
+}
+
+fn find_fallback_exe(dir: &Path) -> Option<String> {
+    find_pc_executables(dir).into_iter().next()
+}
+
+/// Discover an already-unpacked PC/GOG game folder that has no `MicrosoftGame.config`:
+/// checks `goggame-*.info` (at root or `app/`) first, then falls back to `find_pc_executables`.
+/// Also extracts an embedded `.ico` PNG cover into `Cover.png` when possible.
+pub fn discover_unpacked_pc_game(dir: &Path, folder_name: &str, source_label: &str) -> Option<library::Game> {
+    let (name, identity, exe_rel) = if let Some((gname, gid, rel)) = find_gog_info(dir) {
+        let clean = resolve_relative_ci(dir, &rel)?;
+        let n = if gname.is_empty() { folder_name.to_owned() } else { gname };
+        let digits: String = gid.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+        (n, format!("GOG.{}", if digits.is_empty() { "Title" } else { &digits }), clean)
+    } else if let Some((gname, gid, rel)) = find_gog_info(&dir.join("app")) {
+        let clean = resolve_relative_ci(&dir.join("app"), &rel)?;
+        let n = if gname.is_empty() { folder_name.to_owned() } else { gname };
+        let digits: String = gid.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+        (n, format!("GOG.{}", if digits.is_empty() { "Title" } else { &digits }), format!("app\\{clean}"))
+    } else {
+        let rel = find_pc_executables(dir).into_iter().next()?;
+        let slug: String =
+            folder_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.').take(36).collect();
+        let id = format!("PC.{}", if slug.is_empty() { "Game" } else { &slug });
+        let pretty = folder_name.replace(['-', '_'], " ");
+        let pretty = pretty.split_whitespace().collect::<Vec<_>>().join(" ");
+        let n = if pretty.is_empty() { folder_name.to_owned() } else { pretty };
+        (n, id, rel)
+    };
+
+    let exe_path = dir.join(&exe_rel);
+    if !exe_path.is_file() {
+        return None;
+    }
+
+    let mut hash: u32 = 0x811C_9DC5;
+    for b in identity.bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let title_id = format!("{hash:08X}");
+
+    let cover_path = dir.join("Cover.png");
+    let logo = if cover_path.is_file() { Some(cover_path) } else { extract_any_ico_cover(dir).then_some(cover_path) };
+
+    Some(library::Game {
+        name,
+        identity,
+        version: "1.0.0.0".into(),
+        title_id,
+        executable: exe_path,
+        folder: source_label.to_owned(),
+        logo,
+    })
+}
+
+fn extract_any_ico_cover(dir: &Path) -> bool {
+    let mut ico_candidates = Vec::new();
+    for scan in [dir.to_path_buf(), dir.join("app")] {
+        if let Ok(rd) = fs::read_dir(scan) {
+            for ent in rd.flatten() {
+                let s = ent.file_name().to_string_lossy().to_ascii_lowercase();
+                if s.ends_with(".ico") {
+                    let priority = if s.starts_with("goggame-") {
+                        0u8
+                    } else if s.contains("high") || s.contains("game") {
+                        1u8
+                    } else {
+                        2u8
+                    };
+                    ico_candidates.push((priority, ent.path()));
+                }
+            }
+        }
+    }
+    ico_candidates.sort_by_key(|(p, _)| *p);
+    for (_, ico) in ico_candidates {
+        if let Ok(bytes) = fs::read(&ico) {
+            if let Some(png) = extract_png_from_ico(&bytes) {
+                if fs::write(dir.join("Cover.png"), png).is_ok() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Convert an unpacked GOG game directory into a first-class TrinityXSX library title:
 /// reads `goggame-*.info`, extracts `Cover.png` from `goggame-*.ico`, writes
 /// `MicrosoftGame.config`, removes Inno temp directories, and detects PE architecture/API.
 pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<FinalizedGog, String> {
-    // Some GOG installers unpack files into an `app/` subdirectory; flatten if needed.
-    let effective_dir = if !unpacked_dir.join("MicrosoftGame.config").exists()
-        && find_gog_info(unpacked_dir).is_none()
-        && find_gog_info(&unpacked_dir.join("app")).is_some()
-    {
-        unpacked_dir.join("app")
+    // Always place MicrosoftGame.config and Cover.png in `unpacked_dir` so the library scanner
+    // finds the title at depth 1 even for classic GOG installers that unpack into `app/`.
+    let (parsed_name, game_id, exe_rel_clean) = if let Some((n, id, rel)) = find_gog_info(unpacked_dir) {
+        let clean = resolve_relative_ci(unpacked_dir, &rel)
+            .unwrap_or_else(|| rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\\"));
+        (n, id, clean)
+    } else if let Some((n, id, rel)) = find_gog_info(&unpacked_dir.join("app")) {
+        let clean = resolve_relative_ci(&unpacked_dir.join("app"), &rel)
+            .unwrap_or_else(|| rel.split(['/', '\\']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\\"));
+        (n, id, format!("app\\{clean}"))
     } else {
-        unpacked_dir.to_path_buf()
-    };
-
-    let (parsed_name, game_id, exe_rel) = match find_gog_info(&effective_dir) {
-        Some(triple) => triple,
-        None => {
-            let exe = find_fallback_exe(&effective_dir)
-                .ok_or_else(|| "No game executable found in extracted GOG folder".to_owned())?;
-            (fallback_name.to_owned(), "00000001".to_owned(), exe)
-        }
+        let exe = find_fallback_exe(unpacked_dir)
+            .ok_or_else(|| "No game executable found in extracted GOG folder".to_owned())?;
+        (fallback_name.to_owned(), "00000001".to_owned(), exe)
     };
     let name = if parsed_name.is_empty() { fallback_name.to_owned() } else { parsed_name };
-    let exe_rel_clean = exe_rel.replace('/', "\\");
-    let exe_path = effective_dir.join(&exe_rel_clean);
+    let exe_path = unpacked_dir.join(&exe_rel_clean);
     if !exe_path.is_file() {
         return Err(format!("Primary executable missing: {}", exe_path.display()));
     }
 
-    // Extract Cover.png from goggame-*.ico (either in root or app/)
-    let mut has_cover = effective_dir.join("Cover.png").is_file();
-    if !has_cover {
-        let mut ico_candidates = Vec::new();
-        for scan in [effective_dir.clone(), effective_dir.join("app"), unpacked_dir.join("app")] {
-            if let Ok(rd) = fs::read_dir(scan) {
-                for ent in rd.flatten() {
-                    let s = ent.file_name().to_string_lossy().to_ascii_lowercase();
-                    if s.starts_with("goggame-") && s.ends_with(".ico") {
-                        ico_candidates.push(ent.path());
-                    }
-                }
-            }
-        }
-        for ico in ico_candidates {
-            if let Ok(bytes) = fs::read(&ico) {
-                if let Some(png) = extract_png_from_ico(&bytes) {
-                    if fs::write(effective_dir.join("Cover.png"), png).is_ok() {
-                        has_cover = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // Extract Cover.png from goggame-*.ico or any embedded-PNG .ico (in root or app/)
+    let has_cover = unpacked_dir.join("Cover.png").is_file() || extract_any_ico_cover(unpacked_dir);
 
     // Build clean TrinityXSX/GDK-compatible identity + TitleId (hex)
     let digits: String = game_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
@@ -487,7 +700,7 @@ pub fn finalize_gog_game(unpacked_dir: &Path, fallback_name: &str) -> Result<Fin
         name = xml_escape(&name),
         cover = cover_attr,
     );
-    fs::write(effective_dir.join("MicrosoftGame.config"), manifest)
+    fs::write(unpacked_dir.join("MicrosoftGame.config"), manifest)
         .map_err(|e| format!("Cannot write MicrosoftGame.config: {e}"))?;
 
     // Remove Inno Setup scratch directories (`__redist`, `tmp`) to keep folder clean
@@ -811,5 +1024,67 @@ mod tests {
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
         assert!(profile.contains("show_fps = true\nmenu = true"));
         assert!(profile.contains("[input]\nmode = xinput"));
+    }
+
+    #[test]
+    fn installer_detects_installed_state_and_removes_files() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-inst-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let installers = tmp.join("installers");
+        fs::create_dir_all(&installers).unwrap();
+        let setup = installers.join("setup_demo.exe");
+        let slice = installers.join("setup_demo-1.bin");
+        fs::write(&setup, b"MZ").unwrap();
+        fs::write(&slice, b"BIN").unwrap();
+        let inst = GogInstaller {
+            display_name: "Demo".into(),
+            slug: "demo".into(),
+            setup_exe: setup.clone(),
+            slice_files: vec![slice.clone()],
+            total_bytes: 5,
+            install_parent: tmp.clone(),
+        };
+        assert!(!inst.is_installed());
+        fs::create_dir_all(tmp.join("demo")).unwrap();
+        fs::write(tmp.join("demo").join("MicrosoftGame.config"), "<Game/>").unwrap();
+        assert!(inst.is_installed());
+        assert_eq!(inst.remove_installer_files(), 2);
+        assert!(!setup.exists() && !slice.exists());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn finalize_gog_prefers_game_task_over_launcher_case_insensitively() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-w2-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("bin")).unwrap();
+        fs::write(tmp.join("Launcher.exe"), b"MZ\x90\x00").unwrap();
+        fs::write(tmp.join("bin").join("witcher2.exe"), b"MZ\x90\x00").unwrap();
+        fs::write(
+            tmp.join("goggame-1207658930.info"),
+            r#"{"gameId":"1207658930","name":"The Witcher 2","playTasks":[{"category":"launcher","isPrimary":true,"path":"Launcher.exe","type":"FileTask"},{"category":"game","isHidden":true,"path":"Bin//witcher2.exe","type":"FileTask"}]}"#,
+        )
+        .unwrap();
+        let res = finalize_gog_game(&tmp, "Fallback").unwrap();
+        assert_eq!(res.executable_rel, "bin\\witcher2.exe");
+        let xml = fs::read_to_string(tmp.join("MicrosoftGame.config")).unwrap();
+        assert!(xml.contains("bin\\witcher2.exe"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discovers_unpacked_pc_game_and_classic_app_layout() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-pc-disc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("app")).unwrap();
+        fs::write(tmp.join("app").join("options.exe"), b"MZ\x90\x00small").unwrap();
+        fs::write(tmp.join("app").join("GameMain.exe"), vec![b'M', b'Z', 0x90, 0x00, 1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let found = discover_unpacked_pc_game(&tmp, "classic-game", "/mnt/ext1/xboxseries").unwrap();
+        assert_eq!(found.name, "classic game");
+        assert!(found.executable.ends_with("GameMain.exe"));
+        let fin = finalize_gog_game(&tmp, "Classic Game").unwrap();
+        assert_eq!(fin.executable_rel, "app\\GameMain.exe");
+        assert!(tmp.join("MicrosoftGame.config").is_file());
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
