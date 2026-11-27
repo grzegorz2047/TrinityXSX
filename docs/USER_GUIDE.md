@@ -1,129 +1,131 @@
 # TrinityXSX User Guide (PS5)
 
-Simple step-by-step instructions to install **TrinityXSX (`PPSA83601`)**, copy your own Xbox Series X|S games, configure them, and report issues.
+Step-by-step instructions to install **TrinityXSX (`PPSA83601`)**, add your own **Xbox Series X|S** and **DRM-free PC / GOG** games, use DualSense controls (including the live Gamepad ⇄ Mouse & Keyboard switcher), understand configuration files, and report results.
 
-> **Legal notice:** TrinityXSX includes **no games, no keys, no BIOS, and no console SDK files**. You must supply your own unpacked Xbox Series X|S (GDK / Scarlett) game files.
+> **Legal notice:** TrinityXSX includes **no games, no keys, no BIOS, and no console SDK files**. Supply your own unpacked Xbox Series X|S (GDK / Scarlett) game folders or your own DRM-free PC / GOG offline installers.
 
 ---
 
 ## 1. Requirements
 
 - A jailbroken PS5 with **ShadowMountPlus** and **elfldr** (e.g. etaHEN + kstuff).
-- An FTP client on your PC (FileZilla, WinSCP, or `tools/ftp_put_tree.py`).
-- An external/extended drive mounted at `/mnt/ext1` (or internal storage `/data` / USB `/mnt/usb0`).
-- Your own **unpacked** Xbox Series X|S game folder containing `MicrosoftGame.config` and the Scarlett `.exe` it references.
+- An FTP client on your PC (FileZilla, WinSCP, or `tools/ftp_put_tree.py`) — or **ProsperoStore** directly on the PS5.
+- Extended/external storage at `/mnt/ext1` (or internal `/data` / USB `/mnt/usb0`).
+- Your own games:
+  - **Xbox Series X|S:** unpacked game folder containing `MicrosoftGame.config` (Scarlett) and its `.exe`, **or**
+  - **DRM-free PC / GOG:** GOG offline installer files (`setup_*.exe` + `.bin` slices) **or** an unpacked 32-bit/64-bit Windows PC game folder.
 
 ---
 
 ## 2. Install TrinityXSX on PS5
 
-1. Download **`PPSA83601-v0.1.0.ffpkg.zip`** (or the latest release) from the [GitHub Releases](https://github.com/grzegorz2047/TrinityXSX/releases) page.
-2. Extract `PPSA83601.ffpkg` from the ZIP archive.
-3. Copy `PPSA83601.ffpkg` via FTP to your PS5 at:
+### Option A — ProsperoStore (easiest)
+1. Open **[ProsperoStore](https://prosperostore.net/app/PPSA83601/)** on your PS5, install **TrinityXSX (`PPSA83601`)**, and launch it from the home screen.
+
+### Option B — Standalone `.ffpkg` (ShadowMountPlus)
+1. Download the latest **`PPSA83601-vX.Y.Z.ffpkg.zip`** from [GitHub Releases](https://github.com/grzegorz2047/TrinityXSX/releases).
+2. Extract `PPSA83601.ffpkg` and copy it via FTP to your PS5 at:
    ```text
    /mnt/ext1/PPSA83601.ffpkg
    ```
-4. Let **ShadowMountPlus** mount and register the package. The **TrinityXSX** tile will appear on your PS5 home screen.
-5. Open **TrinityXSX** once. On first launch it automatically prepares `/data/homebrew/PPSA83601/` and creates `game_paths.txt`.
+3. Let **ShadowMountPlus** mount the package; the **TrinityXSX** tile appears on the PS5 home screen.
+4. Launch **TrinityXSX** once — it automatically prepares `/data/homebrew/PPSA83601/` and `game_paths.txt`.
 
-### Updating later (fast update)
-When a new release only updates the library / XCL runtime, you do **not** need to replace the whole 1.3 GB `.ffpkg`:
-- Download `xcl-library-vX.Y.Z.exe` from Releases and copy it over FTP to:
+### Updating later
+- **Full update** (new `pw_runner.bin`, `win32u.prx`, Wine Mono, etc.): close TrinityXSX to PS5 Home and replace `/mnt/ext1/PPSA83601.ffpkg` (or update via ProsperoStore). Games, saves, settings, and `xcl.toml` are preserved.
+- **Fast library-only update:** download `xcl-library-vX.Y.Z.exe` from Releases and copy it over FTP to:
   ```text
   /data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe
   ```
 
 ---
 
-## 3. Where to put your games
+## 3. Adding Your Games
 
-Copy each game into its **own subfolder** inside any of the default locations:
+### A. Xbox Series X|S & Unpacked PC Games
+Copy each game into its **own subfolder** inside any default scan folder:
 
 | Location on PS5 | Best for |
 | --- | --- |
-| `/mnt/ext1/xboxseries/<GameName>/` | Extended / external storage (**recommended**, plenty of space) |
+| `/mnt/ext1/xboxseries/<GameName>/` | Extended / external storage (**recommended**, most space) |
 | `/mnt/usb0/xboxseries/<GameName>/` | USB drive (`usb0` or `usb1`) |
 | `/data/xboxseries/<GameName>/` | Internal PS5 SSD |
 | `/data/homebrew/PPSA83601/games/<GameName>/` | Internal app storage |
 
-### Required folder layout
-Each game folder must contain its unpacked files — specifically `MicrosoftGame.config` and the Scarlett executable it points to:
+- **Xbox Series X|S (`[XSX]`):** folder contains `MicrosoftGame.config` (Scarlett) and game assets.
+- **Unpacked PC games (`[PC64]` / `[PC32]`):** automatically discovered even without `MicrosoftGame.config`. TrinityXSX detects 32/64-bit architecture, graphics backend (`DXVK` / `vkd3d-proton` / `Zink` for OpenGL), and whether the binary imports controller APIs.
+- **Multi-`.exe` PC games** (e.g. expansions or patches): highlight the game, press **`R1` -> Game info -> Executable**, and pick the exact `.exe` from the DualSense.
 
-```text
-/mnt/ext1/xboxseries/
-  MyGame/
-    MicrosoftGame.config
-    MyGame.exe
-    ...all game DLLs and data folders...
-```
+> **Important:** Wait until FTP upload reaches **100%** before launching!
 
-> **Important:** Wait until your FTP upload finishes **100%** before launching the game! Launching while files are still copying often causes a black screen or crash because `data/` assets are missing.
+### B. Installing DRM-Free GOG Offline Installers on PS5 (No PC Needed)
+1. Download the **Offline Backup Game Installers** (`setup_<game>.exe` + all `.bin` files) from your GOG library.
+2. Copy them over FTP into:
+   ```text
+   /mnt/ext1/xboxseries/installers/
+   ```
+3. In TrinityXSX press **`OPTIONS` -> Install GOG Games**, select the game, and press **`X`**.
+4. Open-source `innoextract` unpacks the game directly on PS5 with a progress bar and ETA, extracts `Cover.png`, and registers it in your library. Press **`R1`** on an installed entry to delete its installer files (or toggle **`□`** before installing to auto-delete).
+5. **Bundled Wine Mono `11.3.0`** provides built-in `.NET` / `C++/CLI` / `XNA` runtime support automatically.
 
-### Adding custom folders (like in TrinityX360)
-You can add any folder on your PS5 right from the controller:
-1. In TrinityXSX, press **Square (□)** to open **Game folders**.
-2. Press **Square (□)** again (*Add folder*) to open the folder browser (starts in `/mnt`).
-3. Navigate with **D-pad / Left Stick**:
-   - **Cross (X)** — enter subfolder (folders with `MicrosoftGame.config` are tagged `[Xbox Series game]`)
-   - **Circle (O)** — go up one level (pressing Circle in `/mnt` goes to `/` so you can browse `/data`, `/mnt/usb0`, `/mnt/ext1`, etc.)
-   - **Triangle (Δ)** — add the currently opened folder to your library
-   - **Square (□)** — cancel
-4. Removing a folder (**Triangle** in *Game folders*) only removes it from the scan list — it **never deletes your game files**. Disconnected USB drives stay saved in the list and reappear automatically when reconnected.
+### C. Custom Game Folders
+1. Press **Square (□)** in the library -> **Game folders**.
+2. Press **Square (□)** (*Add folder*) to browse `/mnt`, `/data`, `/mnt/usb0`, `/mnt/ext1`, etc.
+3. **Cross (X)** enters a subfolder, **Circle (O)** goes up, **Triangle (Δ)** adds the current folder. Removing a folder from the list **never deletes game files**.
 
 ---
 
 ## 4. DualSense Controls
 
-| Button | Game library | Game folders | Folder browser |
-| --- | --- | --- | --- |
-| **D-pad / Left Stick** | Select game | Select folder | Select subfolder |
-| **Cross (X)** | Play selected game | Browse selected folder | Open subfolder |
-| **Square (□)** | Manage game folders | Add new folder | Cancel |
-| **R1** | Edit game `xcl.toml` settings | — | — |
-| **OPTIONS** | Switch offline profile & UI language (EN/PL/PT/ES) | — | — |
-| **L1** | Open Phone/PC Web Companion & QR (logs, save backup/restore `.zip`, presets, `xcl.toml`) | — | — |
-| **Touchpad click** (or **L3+R3**) | Open/close **TrinityXSX Quick Menu** (live FPS/VRAM bar, Save Diagnostic Dump, Resume, Return to Library, On-Screen Keyboard, Exit to PS5 Home) | Open/close Quick Menu | Open/close Quick Menu |
-| **Triangle (Δ)** | Rescan all folders | Remove folder from list | Use current folder |
-| **Circle (O)** | Exit to PS5 Home | Back to library | Go up one level |
+### Library Screen
+| Button | Action |
+| --- | --- |
+| **D-pad / Left Stick** | Select game |
+| **Cross (X)** | Launch selected game |
+| **R1** | Game settings (`xcl.toml` for XSX; **Executable**, **PC Controls**, and shader cache for PC/GOG) |
+| **Square (□)** | Manage game folders |
+| **L1** | Phone/PC Web Companion & QR (logs, `.zip` save backup/restore, presets, `xcl.toml`) |
+| **OPTIONS** | App Settings (GOG installer, language EN/PL/PT/ES, offline profile, Frame Generation 2x/3x/4x, FPS counter, PC keyboard & mouse) |
+| **L2** | Toggle favorite |
+| **R2 / Left / Right** | Cycle sort mode (A–Z / Recent / Favorites) |
+| **Triangle (Δ)** | Rescan folders |
+| **Circle (O)** | Exit to PS5 Home |
+
+### In-Game Controls (Xbox Series & PC / GOG)
+| DualSense Input | In-Game Action |
+| --- | --- |
+| **`OPTIONS`** | **Xbox `START`** — in-game pause menu |
+| **Left half of Touchpad** (click left side) | **Xbox `BACK` / `Select` / `View`** — map, inventory, journal, main panel |
+| **Right half of Touchpad** (click right side) or **`L3 + R3`** | Open / close **TRINITYXSX MENU** (FPS/VRAM, live **`GAMEPAD` ⇄ `MOUSE+KB`** toggle, Restart Game, Diagnostic Dump, Return to Library, On-Screen Keyboard, Exit to PS5 Home) |
+| **Two-finger Touchpad click** | PS5 On-Screen Keyboard (OSK) |
+
+### DualSense `Mouse & Keyboard` Mode for PC/GOG Games
+Set it per-game in **`R1 -> Game info -> PC Controls`** (`Auto` automatically picks Mouse & Keyboard for classic PC titles without controller API imports) **or toggle live mid-game** via the **right-half Touchpad menu** (`INPUT MODE: GAMEPAD ⇄ MOUSE+KB` — handy when a PC game needs mouse clicks in Options to enable its Gamepad mode):
+- **Left Stick:** mouse cursor
+- **`X` / `R2`:** left mouse click · **`□` / `L2`:** right mouse click
+- **`○` / `OPTIONS`:** `Esc` · **`△`:** `Enter`
+- **D-pad:** `W / A / S / D` · **`L1`:** Space · **`R1`:** `Tab`
+
+### Remote PC Keyboard & Mouse over LAN
+In **`OPTIONS -> PC keyboard & mouse`** choose:
+- **Web browser:** open `http://<PS5-IP>:8361` on any PC/phone on your LAN and enter the PIN shown in Settings or the Touchpad menu (full screen + `Ctrl+Alt+F12` captures input, `F9` opens the Touchpad menu).
+- **`txin-sender` program:** run `txin-sender-vX.Y.Z.exe` on Windows (captures `Esc` and `Alt+Tab` too; holding `Esc` for 1.5 s always releases capture).
 
 ---
 
-## 5. Configuration files — which ones do you actually need?
+## 5. Configuration Files & Saves
 
-For almost all games, **you do not need to create any config file manually**. TrinityXSX only uses two simple user-facing files on the PS5:
-
-### A. `game_paths.txt` (your list of game folders)
-- Path: `/data/homebrew/PPSA83601/game_paths.txt`
-- Created automatically on first run and editable directly in the UI (**Square**).
-- Contains one PS5 path per line (e.g. `/mnt/ext1/xboxseries`).
-
-### B. `xcl.toml` (per-game tuning — created automatically on first launch!)
-- Path:
+For almost all games **no manual config editing is required**:
+- **Scan folders:** `/data/homebrew/PPSA83601/game_paths.txt` (editable via **□**).
+- **UI & per-game PC overrides** (language, profiles, favorites, selected `.exe`, PC input mode): `/data/homebrew/PPSA83601/ui_settings.toml`.
+- **Per-game Xbox Series `xcl.toml`:** auto-generated on first launch at:
   ```text
   /data/homebrew/PPSA83601/prefix/drive_c/users/prospero/AppData/Local/XCL/<IdentityName>/xcl.toml
   ```
-  (Where `<IdentityName>` comes from `<Identity Name="..."/>` in the game's `MicrosoftGame.config`.)
-- On first launch, TrinityXSX generates a safe PS5 offline default (`device_type = "lockhart"`, `title_memory_mb = 6144`, `coherent_mb = 1024`, `raytracing = "off"`, `direct_dxil = "all"`, `network = false`).
-- **Existing `xcl.toml` files are never overwritten**, so your tweaks are preserved across updates.
-- See [configs/game.example.xcl.toml](../configs/game.example.xcl.toml) for a fully documented template.
-
-#### Key `xcl.toml` options when troubleshooting a new game
-
-| Option | Default | When to change it |
-| --- | --- | --- |
-| `device_type` / `console_type_raw` | `"lockhart"` / `5` (Series S) | Try `"anaconda"` / `6` (Series X) only if a game refuses Series S. |
-| `title_memory_mb` | `6144` | Lower to `4096` if the game crashes with PS5 out-of-memory (`dmem`) errors. |
-| `coherent_mb` | `1024` | Raise to `1536` if `xcl.log` mentions coherent window exhaustion. |
-| `direct_dxil` | `"all"` | Change to `"off"` if shaders render corrupted or fail to translate (falls back to DXC). |
-| `xbox_live_tokens` / `network` | `false` / `false` | Keep `false` for offline play; prevents infinite Xbox Live login loops. |
-| `raytracing` | `"off"` | Keep `"off"` until the game runs stably. |
-| `[aliases]` | *(empty)* | Stub unsupported PC/NVIDIA DLLs if needed, e.g. `"nvngx_dlss.dll" = "@stub"`. |
-
-### C. Where are game saves stored?
-```text
-/data/homebrew/PPSA83601/prefix/drive_c/users/prospero/AppData/Local/XCL/<IdentityName>/pls/
-```
-Back up this folder over FTP whenever you want a backup of your saves.
+  Existing `xcl.toml` files are never overwritten. See [configs/game.example.xcl.toml](../configs/game.example.xcl.toml).
+- **Saves:**
+  - Xbox Series (`XCL`): `/data/homebrew/PPSA83601/prefix/drive_c/users/prospero/AppData/Local/XCL/<IdentityName>/pls/` (1-click `.zip` backup/restore in **Web Companion `L1`**).
+  - PC / GOG: standard Wine prefix folders under `/data/homebrew/PPSA83601/prefix/drive_c/users/prospero/` (`Documents`, `AppData`, `Saved Games`).
 
 ---
 
@@ -131,19 +133,20 @@ Back up this folder over FTP whenever you want a backup of your saves.
 
 | Symptom | What to check |
 | --- | --- |
-| **Game does not appear in library** | Verify the folder contains `MicrosoftGame.config` with a `TargetDeviceFamily="Scarlett"` `<Executable>` and that the `.exe` exists inside the same folder. Press **Triangle** to rescan. |
-| **Black screen after launching** | Make sure the entire game finished copying (all `data/` files). Wait 30–60s on first boot for shader cache creation. Check `xcl.log` for errors. |
-| **Crash / returns to PS5 Home** | Check `/data/homebrew/PPSA83601/startup.log` and `xcl.log`. Try lowering `title_memory_mb = 4096` or setting `direct_dxil = "off"`. |
-| **Infinite sign-in screen** | Confirm `xbox_live_tokens = false` and `network = false` in that game's `xcl.toml`. |
-| **No controller input** | Ensure `keyboard_mouse = false` in `xcl.toml`. |
+| **PC game ignores controller sticks** | Click the **right half of the Touchpad** -> toggle **`INPUT MODE`** to **`MOUSE+KB`** and enable Gamepad in the game's Options (or set **`R1 -> PC Controls`** in the library). |
+| **Need Xbox `Back / Select` (map / inventory)** | Click the **left half of the Touchpad** (right half opens TrinityXSX Menu; `OPTIONS` is `Start`). |
+| **PC game folder has multiple `.exe` files** | Highlight the game -> press **`R1`** -> change **`Executable`** to the `.exe` you want. |
+| **Game missing from library** | For XSX games verify `MicrosoftGame.config` (`TargetDeviceFamily="Scarlett"`). For PC games ensure the folder contains `.exe` files and press **Triangle (Δ)** to rescan. |
+| **Black screen on first launch** | Wait until FTP upload finished 100%, then wait 30–60 s for initial shader cache compilation. |
+| **XSX game crashes / OOM** | Press **`R1`** and try the **Low-RAM (4 GB)** preset or set **Direct DXIL** to `off (use DXC)`. |
 
 ---
 
-## 7. How to report a game bug so we can fix it together
+## 7. Reporting Games & Bugs
 
-1. Run our log collector on your PC (while PS5 FTP is active):
+1. With FTP active on your PS5, run on your PC:
    ```sh
    python tools/collect_ps5_logs.py <PS5-IP>
    ```
-   This packs only logs (`startup.log`, `session-*.log`, `vkd3d-trinityxsx-library.log`, `xcl.log`, `report.json`) and `xcl.toml` into a single `trinityxsx-logs-*.zip` (no game files or saves).
+   Packs only logs (`startup.log`, `session-*.log`, `xcl.log`, `report.json`) and `xcl.toml` into `trinityxsx-logs-*.zip` (no game files or saves). You can also download a diagnostic dump from **Web Companion (`L1`)**.
 2. Open a **[Game compatibility report](https://github.com/grzegorz2047/TrinityXSX/issues/new?template=game_compatibility.yml)** on GitHub and attach the ZIP.
