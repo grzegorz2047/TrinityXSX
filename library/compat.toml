@@ -61,3 +61,23 @@ status = "playable"
 release = "v0.2.11"
 notes = "Locked 60 FPS 1080p gameplay, DualSense XInput and audio via GOG PC handoff + Wine Mono 11.3.0; switch Controls to Gamepad in Options (or use Touchpad Mouse+KB mode)."
 reports = []
+
+[[title]]
+title_id = ""
+identity = "PC.worms-forts-under-siege-2-0-0-9"
+name = "Worms Forts: Under Siege"
+versions = ["2.0.0.9"]
+status = "playable"
+release = "v0.2.12"
+notes = "32-bit fixed-base PE via Mesa Zink (OpenGL) with DualSense Mouse & Keyboard mode and audio verified on PS5."
+reports = []
+
+[[title]]
+title_id = ""
+identity = "PC.AOE2-CON"
+name = "Age of Empires II: The Conquerors"
+versions = ["1.5"]
+status = "playable"
+release = "v0.2.12"
+notes = "32-bit fixed-base PE playable with audio and DualSense Mouse & Keyboard mode; pick the expansion executable in R1 Game info."
+reports = []
