@@ -10,6 +10,7 @@ The library shows these statuses and applies the listed preset to a game with no
 | Title | Identity, version & TitleId | Status | TrinityXSX | Notes |
 | --- | --- | --- | --- | --- |
 | **Age of Empires II: The Conquerors** | `PC.AOE2-CON` `1.5` | **Playable** | v0.2.12 | 32-bit fixed-base PE playable with audio and DualSense Mouse & Keyboard mode; pick the expansion executable in R1 Game info. |
+| **Heroes of Might and Magic 3 Complete** | `GOG.1207658787` `4.0` (`6D6FC0AD`) | **Playable** | v0.2.13 | Full 1440x1080 (4:3) gameplay and battles with audio and DualSense/USB Mouse & Keyboard mode; automatic DDrawCompat xdd.dll forwarder, Win98 SDB compatibility, and D:/E:/F: storage drive mapping. |
 | **Heroes of Might and Magic 4 Complete** | `GOG.1207658915` `3.0` (`CFFC2F9C`) | **Playable** | v0.2.12 | Smooth 1080p (4:3 fit) gameplay via bundled ddraw.dll and DXVK D3D9 with audio, DualSense Mouse & Keyboard mode, and automatic save folder creation. |
 | **Hollow Knight: Silksong** | `GOG.1558393671` `1.0.30000` (`34320054`) | **Playable** | v0.2.9 | Smooth 1080p gameplay, DualSense XInput and audio via GOG PC handoff; press Options to skip opening video cutscene. |
 | **Minecraft Preview** | `Microsoft.MinecraftBeta` `1.18.3064.0` (`639AA8DD`) | **Playable** | v0.2.7 | ~60 FPS offline: DualSense (OreUI and gameplay), 3D worlds, persistent saves and WASAPI audio verified. Preset: `title_memory = "standard"`, `pls_mb = 2048`, `uma_mb = 2048`. |

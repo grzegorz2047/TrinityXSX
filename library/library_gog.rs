@@ -592,6 +592,29 @@ pub fn has_local_d3d9_ddraw_wrapper(exe_path: &Path) -> bool {
     false
 }
 
+/// Pure 32-bit legacy DirectDraw 2D titles (importing `ddraw.dll` or a DirectDraw wrapper like
+/// `xdd.dll`, with no D3D8+/DXGI/Vulkan/OpenGL imports and no local D3D9 `ddraw.dll` wrapper)
+/// render at classic 4:3 modes (640x480 / 800x600 / 1024x768). Giving them a 4:3 `1440x1080`
+/// desktop avoids aspect-ratio mismatch between `ps5drv`'s top-left `view` and Wine's centered
+/// `map_monitor_rect()` cursor mapping (which otherwise clamps the cursor at ~83% horizontally).
+fn is_legacy_ddraw_only_imports(is_64bit: bool, imports: &[String], use_local_ddraw: bool) -> bool {
+    if is_64bit || use_local_ddraw {
+        return false;
+    }
+    let has_ddraw = imports.iter().any(|d| d == "ddraw.dll" || d == "xdd.dll");
+    let has_modern_3d = imports.iter().any(|d| {
+        d.starts_with("d3d") || d == "dxgi.dll" || d == "vulkan-1.dll" || d == "opengl32.dll" || d == "unityplayer.dll"
+    });
+    has_ddraw && !has_modern_3d
+}
+
+fn is_legacy_ddraw_only_pe32(exe_path: &Path, use_local_ddraw: bool) -> bool {
+    if use_local_ddraw {
+        return false;
+    }
+    read_pe_imports(exe_path).is_some_and(|(is_64bit, imports)| is_legacy_ddraw_only_imports(is_64bit, &imports, false))
+}
+
 /// Inspect a PE executable's architecture (PE32 vs PE32+) and import table to determine
 /// whether it is a native Xbox Series X|S binary or a standard Windows PC/GOG game.
 pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
@@ -1790,6 +1813,35 @@ pub fn is_config_utility_exe(exe_path: &Path) -> bool {
     CONFIG_HINTS.iter().any(|k| low.contains(k))
 }
 
+/// Ensure `prefix/dosdevices/.pw-symlinks` maps PS5 storage mounts (`d:` -> `/mnt/ext1`,
+/// `e:` -> `/mnt/usb0`, `f:` -> `/data`) so Wine's `find_dos_device()` assigns games on
+/// external/USB storage to their actual volume instead of falling back to `z:` (`/`), whose
+/// read-only PS5 rootfs reports `0` bytes free to `GetDiskFreeSpaceA(NULL)`.
+fn ensure_dosdevices_storage_drives(prefix_dir: &Path) {
+    let dosdevices = prefix_dir.join("dosdevices");
+    if !dosdevices.is_dir() {
+        return;
+    }
+    let table_path = dosdevices.join(".pw-symlinks");
+    let existing = fs::read_to_string(&table_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
+    let mut changed = false;
+    for &(drive, target) in
+        &[("c:", "../drive_c"), ("d:", "/mnt/ext1"), ("e:", "/mnt/usb0"), ("f:", "/data"), ("z:", "/")]
+    {
+        let prefix = format!("{drive}\t");
+        if !lines.iter().any(|l| l.to_ascii_lowercase().starts_with(&prefix)) {
+            lines.push(format!("{drive}\t{target}"));
+            changed = true;
+        }
+    }
+    if changed {
+        let mut content = lines.join("\n");
+        content.push('\n');
+        let _ = fs::write(&table_path, content);
+    }
+}
+
 /// Ensure `prefix/drive_c/.pw-symlinks` exposes PS5 storage roots (`ext1`, `usb0`, `data`)
 /// and rewrite `Z:\mnt\ext1\...` / `Z:\mnt\usb0\...` / `Z:\data\...` paths onto `C:\...`.
 /// Wine's `GetDiskFreeSpaceA(NULL)` queries the root of the current drive; under `Z:\` that
@@ -1843,6 +1895,7 @@ pub fn write_pc_handoff(
         return Err("PS5 profiles directory not available".into());
     }
     let prefix_dir = root.join("prefix");
+    ensure_dosdevices_storage_drives(&prefix_dir);
     let clean_exe_raw = strip_verbatim_prefix(&exe_path.to_string_lossy());
     let work_dir_raw =
         exe_path.parent().map(|p| strip_verbatim_prefix(&p.to_string_lossy())).unwrap_or_else(|| "C:\\XCL".into());
@@ -1908,6 +1961,11 @@ pub fn write_pc_handoff(
     }
 
     let is_config_tool = is_config_utility_exe(exe_path);
+    let desktop_res = if !is_config_tool && !prefer_opengl && is_legacy_ddraw_only_pe32(exe_path, use_local_ddraw) {
+        "1440x1080"
+    } else {
+        "1920x1080"
+    };
     let has_local_dxvk_conf = exe_path.parent().is_some_and(|d| d.join("dxvk.conf").is_file());
     let use_pe32_dxvk_conf = !is_64bit && !prefer_opengl && !is_config_tool && !has_local_dxvk_conf;
     if use_pe32_dxvk_conf {
@@ -1932,6 +1990,7 @@ pub fn write_pc_handoff(
         is_config_tool,
         use_local_ddraw,
         use_pe32_dxvk_conf,
+        desktop_res,
     );
 
     let profile_file = format!("{PC_PROFILE_ID}.profile");
@@ -2052,6 +2111,7 @@ fn format_pc_handoff_profile(
     is_config_tool: bool,
     use_local_ddraw: bool,
     use_pe32_dxvk_conf: bool,
+    desktop_res: &str,
 ) -> String {
     let input_block = pc_input_section(resolved_mode, is_config_tool);
     let view_mode = if is_config_tool { "desktop" } else { "window" };
@@ -2078,7 +2138,7 @@ fn format_pc_handoff_profile(
          thread_scheduling = true\n\
          \n\
          [display]\n\
-         desktop = 1920x1080\n\
+         desktop = {desktop_res}\n\
          view = {view_mode}\n\
          framegen = {fg_val}\n\
          show_fps = {fps_val}\n\
@@ -2201,11 +2261,13 @@ mod tests {
             false,
             false,
             false,
+            "1920x1080",
         );
         assert!(profile.contains(
             "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input,krnl386.exe16=d"
         ));
         assert!(!profile.contains("DXVK_CONFIG_FILE"));
+        assert!(profile.contains("desktop = 1920x1080\n"));
         assert!(profile.contains("view = window\n"));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
         assert!(profile.contains("show_fps = true\nmenu = true"));
@@ -2226,6 +2288,7 @@ mod tests {
             false,
             true,
             true,
+            "1920x1080",
         );
         assert!(profile.contains("dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8,ddraw=n,b;"));
         assert!(profile.contains("env = DXVK_CONFIG_FILE=C:/XCL/dxvk-pe32.conf\n"));
@@ -2250,6 +2313,7 @@ mod tests {
             false,
             false,
             true,
+            "1920x1080",
         );
         assert!(arrows.contains("view = window\n"));
         assert!(arrows.contains("mouse = right_stick\n"));
@@ -2269,6 +2333,7 @@ mod tests {
             false,
             false,
             true,
+            "1920x1080",
         );
         assert!(fps.contains("mouse = right_stick\n"));
         assert!(fps.contains("up = w\ndown = s\nleft = a\nright = d\n"));
@@ -2293,10 +2358,42 @@ mod tests {
             true,
             false,
             false,
+            "1920x1080",
         );
         assert!(profile.contains("view = desktop\n"));
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
         assert!(profile.contains("up = up\ndown = down\nleft = left\nright = right\n"));
+    }
+
+    #[test]
+    fn legacy_ddraw_only_classifier_uses_4x3_desktop_without_affecting_3d_or_d3d9_wrappers() {
+        let ddraw_only = vec!["kernel32.dll".into(), "user32.dll".into(), "ddraw.dll".into()];
+        let xdd_only = vec!["kernel32.dll".into(), "xdd.dll".into(), "winmm.dll".into()];
+        let d3d9_game = vec!["kernel32.dll".into(), "ddraw.dll".into(), "d3d9.dll".into()];
+        let gl_game = vec!["kernel32.dll".into(), "ddraw.dll".into(), "opengl32.dll".into()];
+
+        assert!(is_legacy_ddraw_only_imports(false, &ddraw_only, false));
+        assert!(is_legacy_ddraw_only_imports(false, &xdd_only, false));
+        assert!(!is_legacy_ddraw_only_imports(false, &ddraw_only, true));
+        assert!(!is_legacy_ddraw_only_imports(true, &ddraw_only, false));
+        assert!(!is_legacy_ddraw_only_imports(false, &d3d9_game, false));
+        assert!(!is_legacy_ddraw_only_imports(false, &gl_game, false));
+
+        let profile = format_pc_handoff_profile(
+            "Classic 2D Strategy",
+            "C:\\ext1\\classic\\game.exe",
+            "C:\\ext1\\classic",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            PcInputMode::MouseKeyboard,
+            false,
+            false,
+            true,
+            "1440x1080",
+        );
+        assert!(profile.contains("desktop = 1440x1080\n"));
     }
 
     #[test]
@@ -2544,6 +2641,18 @@ mod tests {
 
         // Paths already on C:\ are left untouched
         assert_eq!(ensure_drive_c_mount_links_and_map_path(&tmp, "C:\\XCL\\Game.exe"), "C:\\XCL\\Game.exe");
+
+        // dosdevices/.pw-symlinks gets d:/e:/f: storage drive mappings idempotently
+        fs::create_dir_all(tmp.join("dosdevices")).unwrap();
+        fs::write(tmp.join("dosdevices").join(".pw-symlinks"), "c:\t../drive_c\nz:\t/\n").unwrap();
+        ensure_dosdevices_storage_drives(&tmp);
+        let dos = fs::read_to_string(tmp.join("dosdevices").join(".pw-symlinks")).unwrap();
+        assert!(dos.contains("d:\t/mnt/ext1\n"));
+        assert!(dos.contains("e:\t/mnt/usb0\n"));
+        assert!(dos.contains("f:\t/data\n"));
+        ensure_dosdevices_storage_drives(&tmp);
+        assert_eq!(fs::read_to_string(tmp.join("dosdevices").join(".pw-symlinks")).unwrap(), dos);
+
         let _ = fs::remove_dir_all(&tmp);
     }
 

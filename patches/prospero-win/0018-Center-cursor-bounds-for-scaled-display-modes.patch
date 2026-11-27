@@ -1,0 +1,94 @@
+From 2143e40cc63b9c703c49d051c82559ce45199253 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 16:52:15 +0100
+Subject: [PATCH] Add Wine-PS5 patch 0989 to center cursor bounds for scaled
+ display modes
+
+Adds wine/patches/0989-win32u-ps5-center-cursor-for-scaled-display-modes.patch
+so ps5drv's move_cursor() and draw_cursor() align with win32u's centered
+map_monitor_rect() coordinates when a game sets a 4:3 or other non-16:9
+display mode on a 1920x1080 PS5 desktop.
+---
+ ...nter-cursor-for-scaled-display-modes.patch | 70 +++++++++++++++++++
+ 1 file changed, 70 insertions(+)
+ create mode 100644 wine/patches/0989-win32u-ps5-center-cursor-for-scaled-display-modes.patch
+
+diff --git a/wine/patches/0989-win32u-ps5-center-cursor-for-scaled-display-modes.patch b/wine/patches/0989-win32u-ps5-center-cursor-for-scaled-display-modes.patch
+new file mode 100644
+index 0000000..bf0a23a
+--- /dev/null
++++ b/wine/patches/0989-win32u-ps5-center-cursor-for-scaled-display-modes.patch
+@@ -0,0 +1,70 @@
++From dc8799a6ea586cbc18401290afb24bf8ff849d46 Mon Sep 17 00:00:00 2001
++From: TrinityXSX <trinityxsx@users.noreply.github.com>
++Date: Fri, 27 Nov 2026 16:52:14 +0100
++Subject: [PATCH] win32u: Center PS5 cursor bounds for aspect-scaled display
++ modes.
++
++When an application sets a smaller display mode with a different aspect
++ratio than the PS5 desktop (for example 800x600 on 1920x1080), win32u's
++map_monitor_rect() maps the virtual mode centered inside the raw monitor
++(x=240..1680), while ps5drv's view stays top-left aligned at 0..1440.
++Clamping desktop_shm->cursor against top-left view stopped the cursor at
++x=1439 (~666/800) and left the right ~17% of the screen unreachable.
++
++Offset the cursor bounds and software cursor blitting by
++((screen_width - content_width)/2, (screen_height - content_height)/2)
++whenever view covers the active scaled display mode.
++---
++ dlls/win32u/ps5drv.c | 24 ++++++++++++++++++++++--
++ 1 file changed, 22 insertions(+), 2 deletions(-)
++
++diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
++index 9e44e09..ffaf83b 100644
++--- a/dlls/win32u/ps5drv.c
+++++ b/dlls/win32u/ps5drv.c
++@@ -135,9 +135,27 @@ static void clear_screen_rect( const RECT *rect )
++  * all but its tip outside the frame, and a centred hotspot would do so at
++  * every edge; the drawn cursor is moved just enough to stay whole, as a
++  * console's pointer does, while the pointer itself stays where it is. */
+++/* screen_lock held: offset from the top-left of screen (where win32u flushes a
+++ * fullscreen scaled surface) to the centred raw-monitor rect that win32u's
+++ * map_monitor_rect() maps the active display mode onto. */
+++static POINT content_cursor_offset(void)
+++{
+++    POINT off = {0, 0};
+++
+++    if (view.left == 0 && view.top == 0 &&
+++        view.right == (LONG)content_width && view.bottom == (LONG)content_height)
+++    {
+++        off.x = (INT)(screen_width - content_width) / 2;
+++        off.y = (INT)(screen_height - content_height) / 2;
+++    }
+++    return off;
+++}
+++
++ static void draw_cursor( UINT32 *out, POINT origin, INT width, INT height )
++ {
++-    INT left = cursor.x - cursor_hotspot.x - origin.x, top = cursor.y - cursor_hotspot.y - origin.y, x, y;
+++    POINT off = content_cursor_offset();
+++    INT left = cursor.x - off.x - cursor_hotspot.x - origin.x;
+++    INT top = cursor.y - off.y - cursor_hotspot.y - origin.y, x, y;
++ 
++     left = max( min( left, width - cursor_box.right ), -cursor_box.left );
++     top = max( min( top, height - cursor_box.bottom ), -cursor_box.top );
++@@ -513,10 +531,12 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
++ {
++     static BOOL placed;
++     RECT shown;
++-    POINT pos;
+++    POINT pos, off;
++ 
++     pthread_mutex_lock( &screen_lock );
++     shown = view;
+++    off = content_cursor_offset();
+++    OffsetRect( &shown, off.x, off.y );
++     pthread_mutex_unlock( &screen_lock );
++     /* win32u coalesces a driver's motion until a button or NOCOALESCE sends
++      * it; each move goes to the server now, so the position read back is it */
++-- 
++2.48.1.windows.1
++
+-- 
+2.48.1.windows.1
+

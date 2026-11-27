@@ -101,3 +101,13 @@ status = "playable"
 release = "v0.2.12"
 notes = "Smooth 1080p (4:3 fit) gameplay via bundled ddraw.dll and DXVK D3D9 with audio, DualSense Mouse & Keyboard mode, and automatic save folder creation."
 reports = []
+
+[[title]]
+title_id = "6D6FC0AD"
+identity = "GOG.1207658787"
+name = "Heroes of Might and Magic 3 Complete"
+versions = ["4.0"]
+status = "playable"
+release = "v0.2.13"
+notes = "Full 1440x1080 (4:3) gameplay and battles with audio and DualSense/USB Mouse & Keyboard mode; automatic DDrawCompat xdd.dll forwarder, Win98 SDB compatibility, and D:/E:/F: storage drive mapping."
+reports = []

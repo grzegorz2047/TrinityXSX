@@ -117,7 +117,11 @@ def build_prefix_seed(
     if dosdevices.exists():
         shutil.rmtree(dosdevices)
     dosdevices.mkdir()
-    (dosdevices / ".pw-symlinks").write_text("c:\t../drive_c\nz:\t/\n", encoding="utf-8", newline="\n")
+    (dosdevices / ".pw-symlinks").write_text(
+        "c:\t../drive_c\nd:\t/mnt/ext1\ne:\t/mnt/usb0\nf:\t/data\nz:\t/\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
     sanitize_symlinks(destination)
 
