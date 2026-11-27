@@ -51,3 +51,13 @@ status = "playable"
 release = "v0.2.9"
 notes = "Smooth 1080p gameplay, DualSense XInput and audio via GOG PC handoff; press Options to skip opening video cutscene."
 reports = []
+
+[[title]]
+title_id = "60F703B1"
+identity = "GOG.1207658930"
+name = "The Witcher 2: Assassins of Kings Enhanced Edition"
+versions = ["3.5.0.26"]
+status = "playable"
+release = "v0.2.11"
+notes = "Locked 60 FPS 1080p gameplay, DualSense XInput and audio via GOG PC handoff + Wine Mono 11.3.0; switch Controls to Gamepad in Options (or use Touchpad Mouse+KB mode)."
+reports = []

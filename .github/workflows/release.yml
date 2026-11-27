@@ -401,15 +401,16 @@ jobs:
           cat > release-notes.md <<EOF
           ## What's new in TrinityXSX ${RELEASE_TAG}
 
-          - **Hollow Knight: Silksong & Unity 6 PC/GOG Games Playable (`windows.gaming.input=d` + `SCHED_RR`):** Dynamic PC/GOG profiles now disable Wine's unimplemented `Windows.Gaming.Input` semi-stub so Unity 6 / New Input System titles immediately fall back to DualSense `XInput`, and enable `thread_scheduling = true` + `menu = true`. Added *Hollow Knight: Silksong* (GOG `1.0.30000`) to `library/compat.toml` as Playable.
-          - **Universal Touchpad Quick Menu Overlay (`win32u.prx` patch `0987`):** `win32u_vkQueuePresentKHR` now pauses Vulkan presentation while the TrinityXSX Touchpad Quick Menu is open, eliminating flicker and making the 1080p overlay work reliably across all PC/GOG DXVK, vkd3d-proton, Zink, and Xbox (XCL) games.
-          - **Remote PC Keyboard & Mouse over LAN (`browser` TCP 8361 + `txin-sender.exe` UDP 9396):** Play PS5 games with a PC's keyboard and mouse straight from a web browser (PIN-protected, private LAN only) or via `txin-sender.exe`, toggleable live in **Settings → PC keyboard & mouse** with `F9` mapped to the Touchpad Quick Menu.
-          - **Automatic Runtime Sync after UID 0 Elevation:** Fixed bundled XCL runtime sync in `pw_runner` to resolve the sandbox seed path cleanly after elevation.
+          - **Bundled Wine Mono \`${WINE_MONO_VERSION}\` (.NET / C++/CLI / XNA support):** \`PPSA83601.ffpkg\` now bundles open-source Wine Mono \`${WINE_MONO_VERSION}\` (32-bit & 64-bit) under read-only \`/app0/win/wine/share/wine/mono\`, unlocking .NET, XNA, and mixed-mode C++/CLI PC/GOG games out of the box with zero \`/data\` prefix bloat. Added *The Witcher 2: Assassins of Kings Enhanced Edition* (GOG \`3.5.0.26\`, locked 60 FPS 1080p) to \`library/compat.toml\` as Playable.
+          - **Live DualSense Input Mode Toggle & Xbox Back/Select Fix (Touchpad patch \`0015\`):**
+            - Click the **right half of the Touchpad** (or \`L3 + R3\`) to open the **TRINITYXSX MENU** and switch live between **\`GAMEPAD (XINPUT)\`** and **\`MOUSE+KB\`** (left stick = cursor, \`X/R2\` = LMB, \`□/L2\` = RMB, \`○/Options\` = Esc, \`△\` = Enter, D-pad = WASD) without restarting the game.
+            - Click the **left half of the Touchpad** to send **Xbox \`Back / Select / View\`** (\`0x0020\`) directly to the game, while **\`OPTIONS\`** stays **Xbox \`Start\`** (\`0x0010\`).
+          - **Generic PC/GOG Controls Selector & Auto-Discovery:** Added a per-game **PC Controls** option (\`Auto\` / \`Gamepad (XInput)\` / \`Mouse & Keyboard\`) driven by PE import inspection (automatically selecting Stick-as-Mouse for classic keyboard/mouse titles and XInput for gamepad-capable titles), forced Wine's builtin \`xinput*.dll\` over game-bundled copies, added 32-bit PC/GOG launch support, generic unpacked PC folder discovery, and full Library UX & Polish localization polish.
 
           ### Included CI-built assets
-          - \`PPSA83601.zip\` — standalone PS5 app folder (`PPSA83601/`) for ProsperoStore and `/data/homebrew/PPSA83601`.
-          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — standalone UFS2 image (`fsck_ufs` verified) for `/mnt/ext1/PPSA83601.ffpkg`.
-          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary for `/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe`.
+          - \`PPSA83601.zip\` — standalone PS5 app folder (\`PPSA83601/\`) for ProsperoStore and \`/data/homebrew/PPSA83601\`.
+          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — standalone UFS2 image (\`fsck_ufs\` verified) for \`/mnt/ext1/PPSA83601.ffpkg\`.
+          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary for \`/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe\`.
           - \`txin-sender-${RELEASE_TAG}.exe\` — run it on a Windows PC to play with its keyboard and mouse: it opens a page in the browser (full screen, Ctrl+Alt+F12 starts capturing, holding Esc for 1.5 s always stops it).
           - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle.
           - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for all release assets.
@@ -417,7 +418,7 @@ jobs:
           ### Pinned upstream revisions
           - **XCL:** \`${XCL_REV}\` (+ patches \`0001\`..\`${XCL_LAST}\`)
           - **vkd3d-proton:** \`${VKD3D_REV}\` (dxil-spirv \`${DXIL_SPIRV_REV}\`)
-          - **DXVK:** \`v${DXVK_VERSION}\` · **DXC:** \`${DXC_TAG}\`
+          - **DXVK:** \`v${DXVK_VERSION}\` · **DXC:** \`${DXC_TAG}\` · **Wine Mono:** \`${WINE_MONO_VERSION}\`
           - **prospero-win:** \`${PROSPERO_WIN_TAG}\` (\`${PROSPERO_WIN_REV}\` + patches \`0001\`..\`${PW_LAST}\`)
           - **PS5-Lapy-JB-Daemon:** \`${LAPY_REV}\`
 

@@ -15,7 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use xcl::config::Config;
 use xcl::library::{self, BrowserEntry, Catalog, UiSettings};
 use xcl::library_art::{self, DibImage, QrCode};
-use xcl::library_gog::{self, GogInstaller, PeLaunchKind};
+use xcl::library_gog::{self, GogInstaller, PcInputMode, PeLaunchKind};
 use xcl::library_i18n::{count_noun, tr, Lang};
 use xcl::library_web::WebCompanion;
 
@@ -26,7 +26,7 @@ const SETTINGS_ROWS: usize = 8;
 /// Rows of the app settings screen; the last one restarts TrinityXSX.
 const APP_ROWS: usize = 7;
 const SETTINGS_COUNT: usize = 13;
-const PC_SETTINGS_COUNT: usize = 3;
+const PC_SETTINGS_COUNT: usize = 4;
 
 const UP: u16 = 0x0001;
 const DOWN: u16 = 0x0002;
@@ -149,7 +149,7 @@ struct Menu {
     previous: Option<u16>,
     hold_dir: u16,
     hold_ticks: u8,
-    chosen: Option<(String, PathBuf)>,
+    chosen: Option<(String, PcInputMode, PathBuf)>,
     status: String,
     read_pad: Option<ReadPad>,
 }
@@ -281,16 +281,30 @@ impl Menu {
 
     fn cycle_setting(&mut self, forward: bool) {
         if self.is_pc_preview() {
-            if self.settings_row == 2 {
-                let (files, bytes) = library::clear_shader_cache();
-                self.preview_shader_cache = Some(library::shader_cache_summary());
-                let lang = self.ui.language;
-                let files_lbl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
-                self.status = format!(
-                    "{}: {files_lbl} ({:.1} MiB)",
-                    tr(lang, "Cleared shader cache"),
-                    (bytes as f64) / (1024.0 * 1024.0)
-                );
+            let lang = self.ui.language;
+            match self.settings_row {
+                2 => {
+                    if let Some(game) = self.catalog.games.get(self.selected) {
+                        let id = game.identity.clone();
+                        let cur = self.ui.pc_input_mode(&id);
+                        let next = if forward { cur.next() } else { cur.prev() };
+                        self.ui.set_pc_input_mode(&id, next);
+                        let _ = library::save_ui_settings(&self.ui_file, &self.ui);
+                        let (_, label, _) = self.setting_row_info(2);
+                        self.status = format!("{}: {label}", tr(lang, "PC Controls"));
+                    }
+                }
+                3 => {
+                    let (files, bytes) = library::clear_shader_cache();
+                    self.preview_shader_cache = Some(library::shader_cache_summary());
+                    let files_lbl = count_noun(lang, files, "file", "files", "plik", "pliki", "plików");
+                    self.status = format!(
+                        "{}: {files_lbl} ({:.1} MiB)",
+                        tr(lang, "Cleared shader cache"),
+                        (bytes as f64) / (1024.0 * 1024.0)
+                    );
+                }
+                _ => {}
             }
             return;
         }
@@ -422,10 +436,14 @@ impl Menu {
             return match row {
                 0 => {
                     let mode = match self.preview_pe_kind {
-                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false } => "PC 64-bit (DXVK / vkd3d)",
-                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: false } => "PC 32-bit (DXVK)",
-                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: true } => "PC 64-bit OpenGL (Zink)",
-                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: true } => "PC 32-bit OpenGL (Zink)",
+                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, .. } => {
+                            "PC 64-bit (DXVK / vkd3d)"
+                        }
+                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: false, .. } => "PC 32-bit (DXVK)",
+                        PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: true, .. } => "PC 64-bit OpenGL (Zink)",
+                        PeLaunchKind::PcNative { is_64bit: false, prefer_opengl: true, .. } => {
+                            "PC 32-bit OpenGL (Zink)"
+                        }
                         PeLaunchKind::XboxSeries => "Xbox Series",
                     };
                     (
@@ -446,6 +464,31 @@ impl Menu {
                         t("Compatibility status"),
                         compat,
                         t("PC/GOG games run directly under Wine/DXVK without Xbox xcl.toml settings."),
+                    )
+                }
+                2 => {
+                    let has_gamepad_api = match self.preview_pe_kind {
+                        PeLaunchKind::PcNative { has_gamepad_api, .. } => has_gamepad_api,
+                        PeLaunchKind::XboxSeries => true,
+                    };
+                    let mode = self
+                        .catalog
+                        .games
+                        .get(self.selected)
+                        .map(|g| self.ui.pc_input_mode(&g.identity))
+                        .unwrap_or(PcInputMode::Auto);
+                    let value = match mode {
+                        PcInputMode::Auto => {
+                            let resolved = if has_gamepad_api { t("Gamepad") } else { t("Mouse & KB") };
+                            format!("{} ({resolved})", t("Auto"))
+                        }
+                        PcInputMode::Gamepad => t("Gamepad (XInput)").to_owned(),
+                        PcInputMode::MouseKeyboard => t("Mouse & Keyboard (Pad)").to_owned(),
+                    };
+                    (
+                        t("PC Controls"),
+                        value,
+                        t("Auto uses Gamepad if the game supports controllers, or Stick-as-Mouse otherwise. You can also switch live via the Touchpad menu."),
                     )
                 }
                 _ => {
@@ -947,9 +990,10 @@ impl Menu {
                 let id = game.identity.clone();
                 match library::prepare_with_profile(game, self.ui.current_profile()) {
                     Ok(()) => {
+                        let input_mode = self.ui.pc_input_mode(&id);
                         self.ui.record_recent(&id);
                         let _ = library::save_ui_settings(&self.ui_file, &self.ui);
-                        self.chosen = Some((name, exe));
+                        self.chosen = Some((name, input_mode, exe));
                         return true;
                     }
                     Err(error) => self.status = format!("Cannot start game: {error}"),
@@ -2034,6 +2078,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     scale(23),
                     &[
                         (BtnIcon::Pill("D-PAD"), t("Navigate")),
+                        (BtnIcon::Pill("<-/->"), t("Change")),
                         (BtnIcon::Cross, t("Select")),
                         (BtnIcon::Circle, t("Back")),
                     ],
@@ -2370,7 +2415,7 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lp
     0
 }
 
-fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PathBuf)>, String> {
+fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, PathBuf)>, String> {
     let read_pad = unsafe {
         super::system_proc("xinput1_4.dll", "XInputGetState")
             .or_else(|| super::system_proc("xinput1_3.dll", "XInputGetState"))
@@ -2575,15 +2620,19 @@ pub fn run(root: Option<PathBuf>, list: bool) -> i32 {
         return xcl::launcher::run_with(&executable, &[], true);
     }
     match std::thread::spawn(move || choose(root)).join() {
-        Ok(Ok(Some((name, executable)))) => {
+        Ok(Ok(Some((name, input_mode, executable)))) => {
             let pe_kind = library_gog::detect_pe_kind(&executable);
             println!("TrinityXSX: starting {} [{}]", executable.display(), pe_kind.badge());
             let _ = library::save_last_launched_game(&executable);
-            if let PeLaunchKind::PcNative { is_64bit, prefer_opengl } = pe_kind {
+            if let PeLaunchKind::PcNative { is_64bit, prefer_opengl, has_gamepad_api } = pe_kind {
                 if library_gog::ps5_pc_handoff_available() {
-                    match library_gog::write_pc_handoff(&name, &executable, is_64bit, prefer_opengl) {
+                    let use_mouse_kb = input_mode.resolve_use_mouse_kb(has_gamepad_api);
+                    match library_gog::write_pc_handoff(&name, &executable, is_64bit, prefer_opengl, use_mouse_kb) {
                         Ok(()) => {
-                            println!("TrinityXSX: handing off PC/GOG game '{name}' to prospero-win");
+                            println!(
+                                "TrinityXSX: handing off PC/GOG game '{name}' to prospero-win (input={})",
+                                if use_mouse_kb { "mouse+kb" } else { "xinput" }
+                            );
                             return 0;
                         }
                         Err(err) => {

@@ -316,6 +316,43 @@ class StandaloneTests(unittest.TestCase):
         png = (repo_root / "sce_sys/icon0.png").read_bytes()
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_extract_wine_mono_resolves_links_skips_support_and_rejects_traversal(self):
+        import io
+        import tarfile
+        from standalone.native.build_runner import extract_wine_mono
+
+        archive = self.root / "wine-mono-test.tar.xz"
+        with tarfile.open(archive, "w:xz") as tf:
+            for name, payload in [
+                ("wine-mono-11.3.0/bin/libmono-2.0-x86.dll", b"MZ32"),
+                ("wine-mono-11.3.0/bin/libmono-2.0-x86_64.dll", b"MZ64"),
+                ("wine-mono-11.3.0/lib/mono/gac/Demo.dll", b"DEMO"),
+                ("wine-mono-11.3.0/support/ignored.msi", b"MSI"),
+            ]:
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+            link = tarfile.TarInfo("wine-mono-11.3.0/lib/mono/4.5/Demo.dll")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../gac/Demo.dll"
+            tf.addfile(link)
+
+        dest = self.root / "mono-out"
+        count, digest = extract_wine_mono(archive, dest)
+        self.assertEqual(count, 4)
+        self.assertEqual(len(digest), 64)
+        self.assertEqual((dest / "bin/libmono-2.0-x86.dll").read_bytes(), b"MZ32")
+        self.assertEqual((dest / "lib/mono/4.5/Demo.dll").read_bytes(), b"DEMO")
+        self.assertFalse((dest / "support").exists())
+
+        bad = self.root / "wine-mono-bad.tar.xz"
+        with tarfile.open(bad, "w:xz") as tf:
+            info = tarfile.TarInfo("wine-mono-11.3.0/../../escape.txt")
+            info.size = 3
+            tf.addfile(info, io.BytesIO(b"BAD"))
+        with self.assertRaises(ValueError):
+            extract_wine_mono(bad, self.root / "mono-bad-out")
+
 
 if __name__ == "__main__":
     unittest.main()

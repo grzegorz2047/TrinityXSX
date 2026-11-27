@@ -1,13 +1,13 @@
 //! Game folder discovery, multi-folder configuration, per-title settings, and saves summary for TrinityXSX.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{config::Config, launcher, library_i18n::Lang};
+use crate::{config::Config, launcher, library_gog::PcInputMode, library_i18n::Lang};
 
-pub const TRINITYXSX_VERSION: &str = "v0.2.10";
+pub const TRINITYXSX_VERSION: &str = "v0.2.11";
 
 const PS5_STORAGE_ROOT: &str = "Z:\\data\\homebrew\\PPSA83601";
 const MAX_STORED_PATH_LEN: usize = 1024;
@@ -1224,6 +1224,7 @@ pub struct UiSettings {
     pub sort_mode: SortMode,
     pub favorites: Vec<String>,
     pub recent: Vec<String>,
+    pub pc_input_modes: BTreeMap<String, String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1237,6 +1238,8 @@ struct UiSettingsFile {
     favorites: Vec<String>,
     #[serde(default)]
     recent: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pc_input_modes: BTreeMap<String, String>,
 }
 
 impl Default for UiSettings {
@@ -1253,6 +1256,7 @@ impl Default for UiSettings {
             sort_mode: SortMode::Alphabetical,
             favorites: Vec::new(),
             recent: Vec::new(),
+            pc_input_modes: BTreeMap::new(),
         }
     }
 }
@@ -1280,6 +1284,25 @@ impl UiSettings {
         self.recent.retain(|id| !id.eq_ignore_ascii_case(identity));
         self.recent.insert(0, identity.to_owned());
         self.recent.truncate(32);
+    }
+
+    pub fn pc_input_mode(&self, identity: &str) -> PcInputMode {
+        self.pc_input_modes
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(identity))
+            .map(|(_, v)| PcInputMode::parse(v))
+            .unwrap_or(PcInputMode::Auto)
+    }
+
+    pub fn set_pc_input_mode(&mut self, identity: &str, mode: PcInputMode) {
+        let existing: Vec<String> =
+            self.pc_input_modes.keys().filter(|k| k.eq_ignore_ascii_case(identity)).cloned().collect();
+        for key in existing {
+            self.pc_input_modes.remove(&key);
+        }
+        if mode != PcInputMode::Auto {
+            self.pc_input_modes.insert(identity.to_owned(), mode.code().to_owned());
+        }
     }
 
     pub fn sort_games(&self, games: &mut [Game]) {
@@ -1871,6 +1894,7 @@ pub fn load_ui_settings(file: &Path) -> UiSettings {
         sort_mode: SortMode::parse(&parsed.sort_mode),
         favorites: parsed.favorites,
         recent: parsed.recent,
+        pc_input_modes: parsed.pc_input_modes,
     }
 }
 
@@ -1887,6 +1911,7 @@ pub fn save_ui_settings(file: &Path, settings: &UiSettings) -> io::Result<()> {
         sort_mode: settings.sort_mode.code().into(),
         favorites: settings.favorites.clone(),
         recent: settings.recent.clone(),
+        pc_input_modes: settings.pc_input_modes.clone(),
     })
     .map_err(io::Error::other)?;
     let tmp = PathBuf::from(format!("{}.tmp", file.display()));
@@ -2674,6 +2699,28 @@ mod tests {
         };
         let profile = Profile { name: "PS5Player".into(), user_id: 1 };
         assert!(prepare_with_profile(&game, &profile).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_settings_persists_pc_input_modes_and_clears_auto() {
+        let dir = temp_dir("pc-input-modes");
+        let file = dir.join("ui_settings.toml");
+        let mut settings = UiSettings::default();
+        assert_eq!(settings.pc_input_mode("GOG.1207658930"), PcInputMode::Auto);
+
+        settings.set_pc_input_mode("GOG.1207658930", PcInputMode::MouseKeyboard);
+        settings.set_pc_input_mode("PC.Strategy", PcInputMode::Gamepad);
+        save_ui_settings(&file, &settings).unwrap();
+
+        let reloaded = load_ui_settings(&file);
+        assert_eq!(reloaded.pc_input_mode("gog.1207658930"), PcInputMode::MouseKeyboard);
+        assert_eq!(reloaded.pc_input_mode("PC.Strategy"), PcInputMode::Gamepad);
+
+        let mut cleared = reloaded;
+        cleared.set_pc_input_mode("gog.1207658930", PcInputMode::Auto);
+        assert_eq!(cleared.pc_input_mode("GOG.1207658930"), PcInputMode::Auto);
+        assert!(!cleared.pc_input_modes.contains_key("GOG.1207658930"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

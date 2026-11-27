@@ -396,8 +396,22 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "X / Lewo / Prawo  Zmień i zapisz     Kółko  Wróć"
         }
         (Lang::Pl, "Library updated automatically") => "Biblioteka odświeżona automatycznie",
+        (Lang::Pl, "PC Controls") => "Sterowanie (PC)",
+        (Lang::Pl, "Auto") => "Auto",
+        (Lang::Pl, "Gamepad") => "Pad",
+        (Lang::Pl, "Mouse & KB") => "Mysz + KB",
+        (Lang::Pl, "Gamepad (XInput)") => "Pad (XInput)",
+        (Lang::Pl, "Mouse & Keyboard (Pad)") => "Mysz i klawiatura (Pad)",
+        (Lang::Pl, "Auto uses Gamepad if the game supports controllers, or Stick-as-Mouse otherwise. You can also switch live via the Touchpad menu.") => {
+            "Auto wybiera Pad, jeśli gra obsługuje kontroler, lub Mysz na gałce. W grze przełączysz tryb w menu Touchpada."
+        }
 
         // Portuguese
+        (Lang::Pt, "PC Controls") => "Controles (PC)",
+        (Lang::Pt, "Gamepad") => "Controle",
+        (Lang::Pt, "Mouse & KB") => "Mouse + Teclado",
+        (Lang::Pt, "Gamepad (XInput)") => "Controle (XInput)",
+        (Lang::Pt, "Mouse & Keyboard (Pad)") => "Mouse e teclado (Controle)",
         (Lang::Pt, "Game library") => "Biblioteca de jogos",
         (Lang::Pt, "games") => "jogos",
         (Lang::Pt, "folders") => "pastas",
@@ -413,6 +427,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pt, "Library updated automatically") => "Lista de jogos atualizada automaticamente",
 
         // Spanish
+        (Lang::Es, "PC Controls") => "Controles (PC)",
+        (Lang::Es, "Gamepad") => "Mando",
+        (Lang::Es, "Mouse & KB") => "Ratón + Teclado",
+        (Lang::Es, "Gamepad (XInput)") => "Mando (XInput)",
+        (Lang::Es, "Mouse & Keyboard (Pad)") => "Ratón y teclado (Mando)",
         (Lang::Es, "Game library") => "Biblioteca de juegos",
         (Lang::Es, "games") => "juegos",
         (Lang::Es, "folders") => "carpetas",

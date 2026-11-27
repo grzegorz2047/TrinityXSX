@@ -1,0 +1,470 @@
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 6ef1934..8d03461 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1474,6 +1474,31 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
+     return status;
+ }
+ 
++static void init_default_mouse_kb_input(PwGameInput *out)
++{
++    static const PwGameBinding defaults[] = {
++        { 0x4000u, PW_GAME_BIND_MOUSE, 0 },    /* cross -> mouse_left */
++        { 0x0200u, PW_GAME_BIND_MOUSE, 0 },    /* r2 -> mouse_left */
++        { 0x8000u, PW_GAME_BIND_MOUSE, 1 },    /* square -> mouse_right */
++        { 0x0100u, PW_GAME_BIND_MOUSE, 1 },    /* l2 -> mouse_right */
++        { 0x2000u, PW_GAME_BIND_KEY,   0x1b }, /* circle -> Escape */
++        { 0x0008u, PW_GAME_BIND_KEY,   0x1b }, /* options -> Escape */
++        { 0x1000u, PW_GAME_BIND_KEY,   0x0d }, /* triangle -> Enter */
++        { 0x0010u, PW_GAME_BIND_KEY,   'W' },  /* dpad up -> W */
++        { 0x0040u, PW_GAME_BIND_KEY,   'S' },  /* dpad down -> S */
++        { 0x0080u, PW_GAME_BIND_KEY,   'A' },  /* dpad left -> A */
++        { 0x0020u, PW_GAME_BIND_KEY,   'D' },  /* dpad right -> D */
++        { 0x0400u, PW_GAME_BIND_KEY,   0x20 }, /* l1 -> Space */
++        { 0x0800u, PW_GAME_BIND_KEY,   0x09 }, /* r1 -> Tab */
++    };
++    pw_game_input_init(out);
++    out->mode = PW_GAME_INPUT_KEYBOARD;
++    out->mouse = PW_GAME_STICK_LEFT;
++    out->mouse_speed = 900;
++    for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]) && i < PW_GAME_BUTTON_COUNT; i++)
++        out->bindings[i] = defaults[i];
++}
++
+ int main(int argc, char **argv)
+ {
+     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
+@@ -1526,6 +1551,8 @@ int main(int argc, char **argv)
+     static PwPadPs5 pad;
+     static PwHidPs5 hid;
+     static PwGameInput game_input;
++    static PwGameInput mouse_kb_input;
++    int live_mouse_kb = 0;
+     /* [input] player2: a second signed-in user's DualSense as more keys. */
+     static PwPadPs5 pad2;
+     static PwGameInput game_input2;
+@@ -1637,10 +1664,12 @@ int main(int argc, char **argv)
+                        copied, game->app.architecture == PW_APP_ARCH_PE32 ? "pe32" : "pe64");
+             if (provider_status != PW_OK) return 1;
+         }
+-        /* xinput mode: SDL2 games (Half-Life) look for controllers through
+-         * raw input first, which Wine on the PS5 has none of, and then skip
+-         * XInput; this hint makes them read controller 0 through XInput. */
+-        if (game_input.mode == PW_GAME_INPUT_XINPUT)
++        /* SDL2 games look for controllers through raw input first, which Wine
++         * on the PS5 has none of, and then skip XInput; keep this hint on even
++         * when starting in Mouse & Keyboard mode so live Touchpad switching to
++         * Gamepad works seamlessly. */
++        if (game_input.mode == PW_GAME_INPUT_XINPUT ||
++            (launch.app && strcmp(launch.app->id, "trinityxsx-library") != 0))
+             extra[config.extra_env_count++] = (PwWineStartEnv){ "SDL_JOYSTICK_RAWINPUT", "0" };
+         /* [runtime]: opt-in runtime settings for this game. */
+         {
+@@ -1783,14 +1812,25 @@ int main(int argc, char **argv)
+             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_present_sink");
+         post_input = (int (*)(const PwWineInput *))
+             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_post_input");
+-        /* xinput mode: the DualSense is also the game's XInput controller
+-         * 0, read by Wine's xinput (patch 0470); bindings still apply. */
+-        if (game_input.mode == PW_GAME_INPUT_XINPUT) {
++        /* Resolve XInput controller hooks even when starting in keyboard/mouse
++         * mode for games so the Touchpad menu can toggle live between Gamepad
++         * and Mouse & Keyboard without restarting. */
++        int allow_input_toggle = launch.app && strcmp(launch.app->id, "trinityxsx-library") != 0;
++        if (game_input.mode == PW_GAME_INPUT_XINPUT || allow_input_toggle) {
+             set_pad = (void (*)(const PwWinePad *))
+                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
+             rumble = (int (*)(uint32_t *, uint32_t *))
+                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_rumble");
+         }
++        if (game_input.mode == PW_GAME_INPUT_KEYBOARD) {
++            mouse_kb_input = game_input;
++            live_mouse_kb = 1;
++        } else {
++            init_default_mouse_kb_input(&mouse_kb_input);
++            live_mouse_kb = 0;
++        }
++        game_menu.input_toggle = allow_input_toggle && set_pad != NULL && post_input != NULL;
++        game_menu.input_mouse_kb = live_mouse_kb;
+         set_menu = (void (*)(const struct pw_title_menu *))
+             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_menu");
+         PS5LOG_LOG("PW_WINE64 menu=%s", set_menu ? "touchpad" : "local-only");
+@@ -2022,8 +2062,12 @@ int main(int argc, char **argv)
+                 PwGameMenuView view;
+                 int was_open = game_menu.open;
+ 
++                /* Left-half touchpad clicks belong to the game as Xbox Back/Select
++                 * (0x0020); two-finger clicks open the PS5 OSK. Right-half clicks
++                 * (or L3+R3, or either half while already open) toggle TrinityXSX menu. */
++                int touchpad_for_game = pad.touch_fingers >= 2 || (!game_menu.open && pad.touch_left);
+                 pw_game_menu_tick(&game_menu, held, pressed, released,
+-                                  pad.touch_fingers >= 2, &menu_snapshot, &view);
++                                  touchpad_for_game, &menu_snapshot, &view);
+                 if (set_menu) set_menu(&menu_snapshot);
+                 held = view.held;
+                 pressed = view.pressed;
+@@ -2057,7 +2101,12 @@ int main(int argc, char **argv)
+                     menu_notice[0] = '\0';
+                     shown_sequence = 0; /* force GDI library repaint on resume */
+                 }
+-                if (view.action == PW_GAME_MENU_ACTION_DUMP_DIAG) {
++                if (view.action == PW_GAME_MENU_ACTION_TOGGLE_INPUT) {
++                    live_mouse_kb = game_menu.input_mouse_kb;
++                    pointer = (PwWinePointer){ 0, 0 };
++                    PS5LOG_LOG("PW_WINE64 menu action=toggle-input mode=%s",
++                               live_mouse_kb ? "mouse_kb" : "xinput");
++                } else if (view.action == PW_GAME_MENU_ACTION_DUMP_DIAG) {
+                     char req_path[256];
+                     snprintf(req_path, sizeof(req_path), "%s/dump_diag.req", PW_WINE64_ROOT_DATA);
+                     int rfd = open(req_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+@@ -2120,10 +2169,16 @@ int main(int argc, char **argv)
+         }
+         /* XInput controller 0: the DualSense, and in a script build the
+          * macro's controller added to it, every frame, so a scripted press
+-         * stays down until its release. */
++         * stays down until its release. In live Mouse & Keyboard mode keep
++         * XInput connected but neutral so games do not pause on disconnect. */
+         if (set_pad) {
+             PwWinePad state;
+-            int connected = pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
++            int connected = pw_wine_game_pad((pad_read && !live_mouse_kb) ? seen : NULL, &state), scripted = 0;
++            if (live_mouse_kb && pad_read && (seen->core.connected || seen->intercepted)) {
++                memset(&state, 0, sizeof(state));
++                state.connected = 1;
++                connected = 1;
++            }
+ #if PW_WINE64_SCRIPT
+             scripted = script_input.pad_events != 0;
+             connected = pw_wine_script_pad(&state, connected, &script_pad, scripted);
+@@ -2131,14 +2186,19 @@ int main(int argc, char **argv)
+             if (pad_read || scripted) set_pad(connected ? &state : NULL);
+         }
+         if (pad_read) {
+-            size_t count = pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
+-                                               seen->core.released_edges, events,
+-                                               sizeof(events) / sizeof(events[0]) - 1);
+-            if (game_input.mouse != PW_GAME_STICK_NONE) {
+-                const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
++            const PwGameInput *active_input = live_mouse_kb
++                ? &mouse_kb_input
++                : (game_input.mode == PW_GAME_INPUT_XINPUT ? &game_input : NULL);
++            size_t count = active_input
++                ? pw_wine_game_inputs(active_input, seen->core.pressed_edges,
++                                      seen->core.released_edges, events,
++                                      sizeof(events) / sizeof(events[0]) - 1)
++                : 0;
++            if (active_input && active_input->mouse != PW_GAME_STICK_NONE) {
++                const PwPadPs5Stick *stick = active_input->mouse == PW_GAME_STICK_LEFT ?
+                                              &seen->left_stick : &seen->right_stick;
+                 count += (size_t)pw_wine_pointer_step(&pointer, stick->x, stick->y,
+-                                                      game_input.mouse_speed,
++                                                      active_input->mouse_speed,
+                                                       PW_WINE64_TICK_US, &events[count]);
+             }
+             for (size_t i = 0; i < count; i++) {
+diff --git a/src/pw_game_menu.c b/src/pw_game_menu.c
+index 4e1f8b6..bea9767 100644
+--- a/src/pw_game_menu.c
++++ b/src/pw_game_menu.c
+@@ -2,57 +2,59 @@
+ #include "pw_game_menu.h"
+ #include <string.h>
+ 
+-enum { ACTION_NONE, ACTION_CLOSE, ACTION_RESTART_GAME, ACTION_DUMP_DIAG, ACTION_LIBRARY, ACTION_KEYBOARD, ACTION_EXIT };
++enum {
++    ACTION_NONE,
++    ACTION_CLOSE,
++    ACTION_TOGGLE_INPUT,
++    ACTION_RESTART_GAME,
++    ACTION_DUMP_DIAG,
++    ACTION_LIBRARY,
++    ACTION_KEYBOARD,
++    ACTION_EXIT
++};
+ typedef struct MenuLine { const char *text; int action; } MenuLine;
+ 
+-static const MenuLine with_keyboard[] = {
+-    { "RESUME", ACTION_CLOSE },
+-    { "RESTART GAME", ACTION_RESTART_GAME },
+-    { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+-    { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+-    { "ON-SCREEN KEYBOARD", ACTION_KEYBOARD },
+-    { "EXIT TO PS5 HOME", ACTION_EXIT },
+-};
+-static const MenuLine without_keyboard[] = {
+-    { "RESUME", ACTION_CLOSE },
+-    { "RESTART GAME", ACTION_RESTART_GAME },
+-    { "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG },
+-    { "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY },
+-    { "EXIT TO PS5 HOME", ACTION_EXIT },
+-};
++enum { MAX_MENU_LINES = 8 };
+ 
+-static const MenuLine *lines_of(const PwGameMenu *menu, int *count)
++static int build_lines(const PwGameMenu *menu, MenuLine *out)
+ {
++    int n = 0;
++    out[n++] = (MenuLine){ "RESUME", ACTION_CLOSE };
++    if (menu->input_toggle) {
++        out[n++] = (MenuLine){
++            menu->input_mouse_kb ? "INPUT MODE: MOUSE+KB (X TO GAMEPAD)"
++                                 : "INPUT MODE: GAMEPAD (X TO MOUSE+KB)",
++            ACTION_TOGGLE_INPUT
++        };
++    }
++    out[n++] = (MenuLine){ "RESTART GAME", ACTION_RESTART_GAME };
++    out[n++] = (MenuLine){ "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG };
++    out[n++] = (MenuLine){ "RETURN TO TRINITYXSX LIBRARY", ACTION_LIBRARY };
+     if (menu->keyboard) {
+-        *count = (int)(sizeof(with_keyboard) / sizeof(with_keyboard[0]));
+-        return with_keyboard;
++        out[n++] = (MenuLine){ "ON-SCREEN KEYBOARD", ACTION_KEYBOARD };
+     }
+-    *count = (int)(sizeof(without_keyboard) / sizeof(without_keyboard[0]));
+-    return without_keyboard;
++    out[n++] = (MenuLine){ "EXIT TO PS5 HOME", ACTION_EXIT };
++    return n;
+ }
+ 
+-static int selectable(const PwGameMenu *menu, int line)
++static int selectable(const MenuLine *lines, int count, int line)
+ {
+-    int count = 0;
+-    const MenuLine *lines = lines_of(menu, &count);
+     return line >= 0 && line < count && lines[line].action != ACTION_NONE;
+ }
+ 
+-static int move(const PwGameMenu *menu, int cursor, int step)
++static int move(const MenuLine *lines, int count, int cursor, int step)
+ {
+-    int count = 0;
+-    (void)lines_of(menu, &count);
+     for (int i = 1; i <= count; i++) {
+         int line = ((cursor + step * i) % count + count) % count;
+-        if (selectable(menu, line)) return line;
++        if (selectable(lines, count, line)) return line;
+     }
+     return cursor;
+ }
+ 
+ static void snapshot_of(const PwGameMenu *menu, struct pw_title_menu *snapshot)
+ {
+-    int count = 0;
+-    const MenuLine *lines = lines_of(menu, &count);
++    MenuLine lines[MAX_MENU_LINES];
++    int count = build_lines(menu, lines);
+     memset(snapshot, 0, sizeof(*snapshot));
+     snapshot->version = PW_TITLE_MENU_VERSION;
+     if (!menu->open) return;
+@@ -69,24 +71,30 @@ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_
+     int combo = (held & PW_GAME_MENU_COMBO) == PW_GAME_MENU_COMBO && (pressed & PW_GAME_MENU_COMBO);
+     int touchpad = (pressed & PW_GAME_MENU_TOUCHPAD) != 0 && !two_finger_touch;
+     int toggle = touchpad || combo;
++    MenuLine lines[MAX_MENU_LINES];
++    int count;
+     uint32_t game;
+ 
+     if (!menu || !snapshot || !view) return 0;
++    count = build_lines(menu, lines);
+     view->action = PW_GAME_MENU_ACTION_NONE;
+     if (!menu->open) {
+         if (toggle) {
+             menu->open = 1;
+-            menu->cursor = move(menu, -1, 1);
++            menu->cursor = move(lines, count, -1, 1);
+         }
+     } else if (toggle || (pressed & PW_GAME_MENU_CIRCLE)) {
+         menu->open = 0;
+     } else {
+-        if (pressed & PW_GAME_MENU_UP) menu->cursor = move(menu, menu->cursor, -1);
+-        if (pressed & PW_GAME_MENU_DOWN) menu->cursor = move(menu, menu->cursor, 1);
+-        if ((pressed & PW_GAME_MENU_CROSS) && selectable(menu, menu->cursor)) {
+-            int count = 0;
+-            const MenuLine *lines = lines_of(menu, &count);
++        if (pressed & PW_GAME_MENU_UP) menu->cursor = move(lines, count, menu->cursor, -1);
++        if (pressed & PW_GAME_MENU_DOWN) menu->cursor = move(lines, count, menu->cursor, 1);
++        if ((pressed & PW_GAME_MENU_CROSS) && selectable(lines, count, menu->cursor)) {
+             switch (lines[menu->cursor].action) {
++            case ACTION_TOGGLE_INPUT:
++                menu->input_mouse_kb = !menu->input_mouse_kb;
++                view->action = PW_GAME_MENU_ACTION_TOGGLE_INPUT;
++                menu->open = 0;
++                break;
+             case ACTION_RESTART_GAME:
+                 view->action = PW_GAME_MENU_ACTION_RESTART_GAME;
+                 menu->open = 0;
+diff --git a/src/pw_game_menu.h b/src/pw_game_menu.h
+index 5f8df4a..e0fa2f8 100644
+--- a/src/pw_game_menu.h
++++ b/src/pw_game_menu.h
+@@ -4,14 +4,15 @@
+ #include <stdint.h>
+ #include "../wine/ps5/menu/pw_title_menu.h"
+ 
+-/* TrinityXSX quick menu triggered by a single-finger DualSense Touchpad click
+- * (or L3+R3). While open, the runner withholds controller input from the game,
+- * signals ntdll's PW_TITLE_MENU_PROCESS_INFO so XCL pauses Vulkan presentation,
+- * and renders the menu directly through VideoOut / libvulkan idle flip. */
++/* TrinityXSX quick menu triggered by clicking the right half of the DualSense
++ * Touchpad (or L3+R3). Left-half Touchpad clicks pass through to the game as
++ * Xbox Back/Select (0x0020); two-finger clicks open the PS5 on-screen keyboard. */
+ typedef struct PwGameMenu {
+     int open;
+     int cursor;
+     int keyboard;           /* 1: the console's on-screen keyboard can be opened */
++    int input_toggle;       /* 1: allow toggling Gamepad <-> Mouse & Keyboard live */
++    int input_mouse_kb;     /* 0: Gamepad (XInput), 1: Mouse & Keyboard on DualSense */
+     uint32_t withheld;      /* buttons the game must not see yet */
+     uint32_t game_held;     /* what the game saw held last tick */
+ } PwGameMenu;
+@@ -23,7 +24,8 @@ enum {
+     PW_GAME_MENU_ACTION_DUMP_DIAG,
+     PW_GAME_MENU_ACTION_RESTART_GAME,
+     PW_GAME_MENU_ACTION_LIBRARY,
+-    PW_GAME_MENU_ACTION_EXIT
++    PW_GAME_MENU_ACTION_EXIT,
++    PW_GAME_MENU_ACTION_TOGGLE_INPUT
+ };
+ 
+ /* The pad as the game should see it this tick. */
+diff --git a/tests/test_pw_game_menu.c b/tests/test_pw_game_menu.c
+index 76e1d2e..39a212a 100644
+--- a/tests/test_pw_game_menu.c
++++ b/tests/test_pw_game_menu.c
+@@ -4,7 +4,8 @@
+ #include <string.h>
+ 
+ enum { L3 = PW_GAME_MENU_L3, R3 = PW_GAME_MENU_R3, UP = PW_GAME_MENU_UP, DOWN = PW_GAME_MENU_DOWN,
+-       CROSS = PW_GAME_MENU_CROSS, CIRCLE = PW_GAME_MENU_CIRCLE, SQUARE = 0x8000u, R2 = 0x200u };
++       CROSS = PW_GAME_MENU_CROSS, CIRCLE = PW_GAME_MENU_CIRCLE, TOUCHPAD = PW_GAME_MENU_TOUCHPAD,
++       SQUARE = 0x8000u, R2 = 0x200u };
+ 
+ static PwGameMenu menu;
+ static struct pw_title_menu shown;
+@@ -17,7 +18,7 @@ static int tick(uint32_t now)
+ {
+     uint32_t pressed = now & ~held, released = held & ~now;
+     held = now;
+-    return pw_game_menu_tick(&menu, now, pressed, released, &shown, &view);
++    return pw_game_menu_tick(&menu, now, pressed, released, 0, &shown, &view);
+ }
+ 
+ static void assert_view(uint32_t h, uint32_t p, uint32_t r, int neutral)
+@@ -28,77 +29,68 @@ static void assert_view(uint32_t h, uint32_t p, uint32_t r, int neutral)
+ int main(void)
+ {
+     struct pw_title_menu snapshot;
+-    menu.keyboard = 1;                      /* the title has the console's keyboard */
++    menu.keyboard = 1;
++    menu.input_toggle = 1;
++    menu.input_mouse_kb = 0;
++
+     /* Closed: the game gets the pad as it is, edges included. */
+     assert(!tick(SQUARE));
+     assert_view(SQUARE, SQUARE, 0, 0);
+     assert(!shown.open && shown.version == PW_TITLE_MENU_VERSION && !shown.lines);
+     assert(!tick(SQUARE | L3));
+-    assert_view(SQUARE | L3, L3, 0, 0);     /* L3 alone is the game's */
++    assert_view(SQUARE | L3, L3, 0, 0);
+ 
+-    /* L3+R3 opens it: the game sees everything it held released. */
+-    assert(tick(SQUARE | L3 | R3));
++    /* Touchpad opens it: the game sees everything it held released. */
++    assert(tick(SQUARE | TOUCHPAD));
+     assert_view(0, 0, SQUARE | L3, 1);
+-    assert(shown.open && shown.lines == 2 && !strcmp(shown.title, "prospero-win"));
+-    assert(!strcmp(shown.line[0], "Keyboard input") && !strcmp(shown.line[1], "Close"));
+-    assert(shown.selected == 0);            /* the first line with an action */
++    assert(shown.open && shown.lines == 7 && !strcmp(shown.title, "TRINITYXSX MENU"));
++    assert(!strcmp(shown.line[0], "RESUME"));
++    assert(strstr(shown.line[1], "GAMEPAD") != NULL);
++    assert(shown.selected == 0);
+ 
+-    /* While open nothing reaches the game; the d-pad wraps around. */
++    /* Move down to INPUT MODE and press Cross -> toggles to Mouse+KB and closes. */
+     assert(tick(0));
+     assert_view(0, 0, 0, 1);
+-    assert(tick(UP) && shown.selected == 1);
+-    assert(tick(0) && tick(DOWN) && shown.selected == 0);
+-    assert(tick(0) && tick(DOWN) && shown.selected == 1);
++    assert(tick(DOWN) && shown.selected == 1);
++    assert(tick(0));
+     assert(!tick(CROSS | R2));
+-    assert(!menu.open && !shown.open);      /* Close picked */
+-    assert(view.action == PW_GAME_MENU_ACTION_NONE);
+-    assert_view(0, 0, 0, 0);                /* Cross, R2 down and Down let go: hidden */
++    assert(!menu.open && !shown.open);
++    assert(view.action == PW_GAME_MENU_ACTION_TOGGLE_INPUT);
++    assert(menu.input_mouse_kb == 1);
++    assert_view(0, 0, 0, 0);
++
++    /* New press reaches the game; withheld buttons stay hidden until released. */
+     assert(!tick(CROSS | R2 | SQUARE));
+-    assert_view(SQUARE, SQUARE, 0, 0);      /* a new press is the game's */
+-    assert(!tick(SQUARE | R2));
+-    assert_view(SQUARE, 0, 0, 0);           /* Cross let go: never the game's */
++    assert_view(SQUARE, SQUARE, 0, 0);
+     assert(!tick(SQUARE));
+     assert(!tick(SQUARE | R2));
+-    assert_view(SQUARE | R2, R2, 0, 0);     /* released once, R2 is the game's again */
++    assert_view(SQUARE | R2, R2, 0, 0);
+ 
+-    /* Circle closes, and so does the combo again; holding it does not reopen. */
++    /* Reopen: INPUT MODE now shows MOUSE+KB and toggles back to Gamepad. */
+     assert(!tick(0));
+-    assert(tick(L3 | R3) && tick(0) && !tick(CIRCLE));
+-    assert(!menu.open && !tick(0));
+-    assert(tick(L3 | R3) && tick(L3 | R3));  /* held, not pressed again: stays open */
+-    assert(tick(L3) && !tick(L3 | R3));      /* R3 pressed again closes it */
+-    assert(!tick(L3 | R3 | CROSS));
+-    assert_view(CROSS, CROSS, 0, 0);         /* the combo stays hidden */
+-    assert(!tick(0) && tick(R3 | L3) && menu.open);
++    assert(tick(TOUCHPAD) && shown.open && strstr(shown.line[1], "MOUSE+KB") != NULL);
++    assert(tick(0) && tick(DOWN) && shown.selected == 1);
++    assert(tick(0) && !tick(CROSS));
++    assert(view.action == PW_GAME_MENU_ACTION_TOGGLE_INPUT && menu.input_mouse_kb == 0);
+ 
+-    /* A batch that pressed and released a button within the tick still
+-     * reaches the game once the menu is closed. */
+-    assert(!tick(CIRCLE) && !menu.open && !tick(0));
+-    assert(!pw_game_menu_tick(&menu, 0, SQUARE, SQUARE, &shown, &view));
+-    assert_view(0, SQUARE, SQUARE, 0);
++    /* Circle closes without action. */
++    assert(!tick(0) && tick(L3 | R3) && tick(0) && !tick(CIRCLE));
++    assert(!menu.open && view.action == PW_GAME_MENU_ACTION_NONE);
+ 
+-    /* Keyboard input closes the menu and asks the title for the console's
+-     * on-screen keyboard, for that tick only. */
++    /* Without input_toggle and keyboard, only core 5 lines appear. */
++    memset(&menu, 0, sizeof(menu));
+     held = 0;
+-    assert(tick(L3 | R3) && shown.selected == 0);
+-    assert(tick(0) && view.action == PW_GAME_MENU_ACTION_NONE);
+-    assert(!tick(CROSS) && view.action == PW_GAME_MENU_ACTION_KEYBOARD);
+-    assert(!menu.open && !shown.open);
+-    assert(!tick(0) && view.action == PW_GAME_MENU_ACTION_NONE);
++    assert(tick(TOUCHPAD) && shown.lines == 5);
++    assert(!strcmp(shown.line[0], "RESUME") && !strcmp(shown.line[1], "RESTART GAME"));
+ 
+-    /* Without the console's keyboard its line is the placeholder, which the
+-     * cursor skips: only Close is offered, and nothing asks for a keyboard. */
++    /* Two-finger touchpad click is reserved for the on-screen keyboard. */
+     memset(&menu, 0, sizeof(menu));
+-    held = 0;
+-    assert(tick(L3 | R3));
+-    assert(!strcmp(shown.line[0], "No cheats for this game yet") && !strcmp(shown.line[1], "Close"));
+-    assert(shown.selected == 1);
+-    assert(tick(0) && tick(UP) && shown.selected == 1);
+-    assert(tick(0) && !tick(CROSS) && view.action == PW_GAME_MENU_ACTION_NONE && !menu.open);
++    assert(!pw_game_menu_tick(&menu, TOUCHPAD, TOUCHPAD, 0, 1, &shown, &view));
++    assert(!menu.open);
+ 
+     /* Bad arguments do nothing. */
+-    assert(!pw_game_menu_tick(NULL, 0, 0, 0, &snapshot, &view));
+-    assert(!pw_game_menu_tick(&menu, 0, 0, 0, NULL, &view));
+-    assert(!pw_game_menu_tick(&menu, 0, 0, 0, &snapshot, NULL));
++    assert(!pw_game_menu_tick(NULL, 0, 0, 0, 0, &snapshot, &view));
++    assert(!pw_game_menu_tick(&menu, 0, 0, 0, 0, NULL, &view));
++    assert(!pw_game_menu_tick(&menu, 0, 0, 0, 0, &snapshot, NULL));
+     return 0;
+ }

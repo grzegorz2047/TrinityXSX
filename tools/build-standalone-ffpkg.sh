@@ -241,14 +241,20 @@ PYTHONPATH="$root" python3 -m standalone.native.build_launcher \
   --output "$launcher_bin" \
   --with-seed
 
-# 10. Patched PS5 Wine runner (pw_runner.bin + win/wine modules)
+# 10. Patched PS5 Wine runner (pw_runner.bin + win/wine modules + Wine Mono)
+wine_mono_tar="$wine_cache/wine-mono-${WINE_MONO_VERSION}-x86.tar.xz"
+download_checked "https://github.com/wine-mono/wine-mono/releases/download/wine-mono-${WINE_MONO_VERSION}/wine-mono-${WINE_MONO_VERSION}-x86.tar.xz" \
+  "$wine_mono_tar" "$WINE_MONO_SHA256"
+
 runner_dir="$work/runner-standalone"
 rm -rf "$runner_dir"
-echo "==> Building patched TrinityXSX runner"
+echo "==> Building patched TrinityXSX runner (with Wine Mono ${WINE_MONO_VERSION})"
 PYTHONPATH="$root" python3 -m standalone.native.build_runner \
   "$pw_src" "$foundation" "$sdk" "$llvm_bin" "$native_tool" "$pw_zip" "$runner_dir" \
   --wine-build "$cached_wine" \
-  --lapy-elf "$lapy_elf"
+  --lapy-elf "$lapy_elf" \
+  --wine-mono "$wine_mono_tar" \
+  --wine-mono-version "$WINE_MONO_VERSION"
 
 # 11. Stage PPSA83601 data seed (prefix + profiles + XCL runtime + xcl-library.exe)
 data_seed="$work/PPSA83601-seed"

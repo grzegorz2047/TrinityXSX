@@ -11,6 +11,7 @@ The library shows these statuses and applies the listed preset to a game with no
 | --- | --- | --- | --- | --- |
 | **Hollow Knight: Silksong** | `GOG.1558393671` `1.0.30000` (`34320054`) | **Playable** | v0.2.9 | Smooth 1080p gameplay, DualSense XInput and audio via GOG PC handoff; press Options to skip opening video cutscene. |
 | **Minecraft Preview** | `Microsoft.MinecraftBeta` `1.18.3064.0` (`639AA8DD`) | **Playable** | v0.2.7 | ~60 FPS offline: DualSense (OreUI and gameplay), 3D worlds, persistent saves and WASAPI audio verified. Preset: `title_memory = "standard"`, `pls_mb = 2048`, `uma_mb = 2048`. |
+| **The Witcher 2: Assassins of Kings Enhanced Edition** | `GOG.1207658930` `3.5.0.26` (`60F703B1`) | **Playable** | v0.2.11 | Locked 60 FPS 1080p gameplay, DualSense XInput and audio via GOG PC handoff + Wine Mono 11.3.0; switch Controls to Gamepad in Options (or use Touchpad Mouse+KB mode). |
 | **XCL Test Title** | `XCL.TestTitle` | **Playable** | v0.2.7 | Passes 51/51: full D3D12.X + vkd3d-proton + RADV verification suite, 60 FPS fullscreen. |
 <!-- compat:end -->
 

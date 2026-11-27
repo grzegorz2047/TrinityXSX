@@ -28,7 +28,7 @@ pub enum PeLaunchKind {
     /// Imports console-only DLLs (`d3d12_xs.dll`, `xgameplatform.dll`, `xcrdapi.dll`, etc.)
     XboxSeries,
     /// Standard Windows PC executable (e.g. GOG DRM-free game) — best launched via prospero-win
-    PcNative { is_64bit: bool, prefer_opengl: bool },
+    PcNative { is_64bit: bool, prefer_opengl: bool, has_gamepad_api: bool },
 }
 
 impl PeLaunchKind {
@@ -39,6 +39,71 @@ impl PeLaunchKind {
             PeLaunchKind::PcNative { is_64bit: false, .. } => "PC32",
         }
     }
+}
+
+/// Preferred DualSense controller mapping when launching a PC/GOG game on PS5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PcInputMode {
+    /// Auto-select Gamepad (XInput) when the executable imports a controller API,
+    /// or Mouse & Keyboard emulation when it only expects mouse/keyboard input.
+    #[default]
+    Auto,
+    /// Always expose the DualSense as an XInput gamepad.
+    Gamepad,
+    /// Map DualSense left stick to the mouse cursor and buttons to clicks / keys.
+    MouseKeyboard,
+}
+
+impl PcInputMode {
+    pub fn code(self) -> &'static str {
+        match self {
+            PcInputMode::Auto => "auto",
+            PcInputMode::Gamepad => "gamepad",
+            PcInputMode::MouseKeyboard => "mouse_kb",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "gamepad" | "xinput" => PcInputMode::Gamepad,
+            "mouse_kb" | "mouse" | "keyboard" => PcInputMode::MouseKeyboard,
+            _ => PcInputMode::Auto,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            PcInputMode::Auto => PcInputMode::Gamepad,
+            PcInputMode::Gamepad => PcInputMode::MouseKeyboard,
+            PcInputMode::MouseKeyboard => PcInputMode::Auto,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            PcInputMode::Auto => PcInputMode::MouseKeyboard,
+            PcInputMode::Gamepad => PcInputMode::Auto,
+            PcInputMode::MouseKeyboard => PcInputMode::Gamepad,
+        }
+    }
+
+    /// Resolve whether the dynamic `prospero-win` handoff profile should start in
+    /// DualSense Mouse & Keyboard mode (`true`) or XInput Gamepad mode (`false`).
+    pub fn resolve_use_mouse_kb(self, has_gamepad_api: bool) -> bool {
+        match self {
+            PcInputMode::Auto => !has_gamepad_api,
+            PcInputMode::Gamepad => false,
+            PcInputMode::MouseKeyboard => true,
+        }
+    }
+}
+
+fn is_gamepad_import(dll_lower: &str) -> bool {
+    dll_lower.starts_with("xinput")
+        || matches!(
+            dll_lower,
+            "dinput8.dll" | "dinput.dll" | "sdl2.dll" | "sdl3.dll" | "unityplayer.dll" | "gameinput.dll"
+        )
 }
 
 #[derive(Debug, Clone)]
@@ -196,8 +261,9 @@ pub fn detect_pe_kind(exe_path: &Path) -> PeLaunchKind {
     let has_gl = imports.iter().any(|d| d == "opengl32.dll");
     let has_unity_sibling = exe_path.parent().is_some_and(|p| p.join("UnityPlayer.dll").is_file());
     let prefer_opengl = has_gl && !has_dx_or_vk && !has_unity_sibling;
+    let has_gamepad_api = has_unity_sibling || imports.iter().any(|d| is_gamepad_import(d));
 
-    PeLaunchKind::PcNative { is_64bit, prefer_opengl }
+    PeLaunchKind::PcNative { is_64bit, prefer_opengl, has_gamepad_api }
 }
 
 fn contains_inno_signature(path: &Path) -> bool {
@@ -808,7 +874,13 @@ pub fn ps5_pc_handoff_available() -> bool {
 /// Write a dynamic `prospero-win` `.profile` (`trinityxsx-pc-game.profile`) + `pc_launch.flag`
 /// so `pw_runner.bin` launches a standard 32-bit or 64-bit PC/GOG game directly under Wine +
 /// DXVK / vkd3d-proton / Zink with zero XCL UMA overhead and Touchpad Return-to-Library support.
-pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer_opengl: bool) -> Result<(), String> {
+pub fn write_pc_handoff(
+    game_name: &str,
+    exe_path: &Path,
+    is_64bit: bool,
+    prefer_opengl: bool,
+    use_mouse_kb: bool,
+) -> Result<(), String> {
     let root = Path::new(PS5_STORAGE_ROOT);
     let profiles_dir = root.join("profiles");
     if !profiles_dir.is_dir() {
@@ -857,7 +929,8 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
         }
     }
 
-    let profile_text = format_pc_handoff_profile(safe_name, &clean_exe, &work_dir, arch, gfx, fg_val, fps_val);
+    let profile_text =
+        format_pc_handoff_profile(safe_name, &clean_exe, &work_dir, arch, gfx, fg_val, fps_val, use_mouse_kb);
 
     let profile_file = format!("{PC_PROFILE_ID}.profile");
     fs::write(profiles_dir.join(&profile_file), profile_text)
@@ -868,11 +941,39 @@ pub fn write_pc_handoff(game_name: &str, exe_path: &Path, is_64bit: bool, prefer
     Ok(())
 }
 
+fn pc_input_section(use_mouse_kb: bool) -> &'static str {
+    if use_mouse_kb {
+        "[input]\n\
+         mode = keyboard\n\
+         mouse = left_stick\n\
+         mouse_speed = 900\n\
+         cross = mouse_left\n\
+         r2 = mouse_left\n\
+         square = mouse_right\n\
+         l2 = mouse_right\n\
+         circle = escape\n\
+         options = escape\n\
+         triangle = enter\n\
+         up = w\n\
+         down = s\n\
+         left = a\n\
+         right = d\n\
+         l1 = space\n\
+         r1 = tab\n"
+    } else {
+        "[input]\n\
+         mode = xinput\n"
+    }
+}
+
 /// Format the dynamic `prospero-win` `.profile` for PC/GOG titles:
 /// - `windows.gaming.input=d` disables Wine's unimplemented WGI semi-stub so Unity 6 and
 ///   modern Input System games immediately fall back to DualSense XInput.
+/// - `xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b` ensures Wine's DualSense-backed
+///   builtin XInput is always used even when a game bundles a native Windows `xinput*.dll`.
 /// - `thread_scheduling = true` enables `SCHED_RR` so Wine/DXVK worker threads do not starve.
 /// - `menu = true` enables `DXVK_HUD=fps,menu` so the Touchpad Quick Menu renders live over DXVK.
+#[allow(clippy::too_many_arguments)]
 fn format_pc_handoff_profile(
     safe_name: &str,
     clean_exe: &str,
@@ -881,7 +982,9 @@ fn format_pc_handoff_profile(
     gfx: &str,
     fg_val: &str,
     fps_val: &str,
+    use_mouse_kb: bool,
 ) -> String {
+    let input_block = pc_input_section(use_mouse_kb);
     format!(
         "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
          [application]\n\
@@ -889,7 +992,7 @@ fn format_pc_handoff_profile(
          name = {safe_name}\n\
          executable = {clean_exe}\n\
          working_directory = {work_dir}\n\
-         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;windows.gaming.input=d\n\
+         dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d\n\
          prefix = default\n\
          runtime = wine-wow64\n\
          architecture = {arch}\n\
@@ -904,8 +1007,7 @@ fn format_pc_handoff_profile(
          show_fps = {fps_val}\n\
          menu = true\n\
          \n\
-         [input]\n\
-         mode = xinput\n\
+         {input_block}\
          \n\
          [debug]\n\
          winedebug = err+all\n\
@@ -1017,13 +1119,58 @@ mod tests {
             "dxvk",
             "off",
             "true",
+            false,
         );
-        assert!(
-            profile.contains("dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;windows.gaming.input=d")
-        );
+        assert!(profile.contains(
+            "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input=d"
+        ));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
         assert!(profile.contains("show_fps = true\nmenu = true"));
-        assert!(profile.contains("[input]\nmode = xinput"));
+        assert!(profile.contains("[input]\nmode = xinput\n"));
+    }
+
+    #[test]
+    fn pc_handoff_profile_emits_mouse_keyboard_bindings_when_requested() {
+        let profile = format_pc_handoff_profile(
+            "Classic Strategy",
+            "Z:\\mnt\\ext1\\xboxseries\\rts\\game.exe",
+            "Z:\\mnt\\ext1\\xboxseries\\rts",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            true,
+        );
+        assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
+        assert!(profile.contains("cross = mouse_left\n"));
+        assert!(profile.contains("square = mouse_right\n"));
+        assert!(profile.contains("circle = escape\n"));
+    }
+
+    #[test]
+    fn pc_input_mode_resolves_auto_and_explicit_overrides() {
+        assert!(!PcInputMode::Auto.resolve_use_mouse_kb(true));
+        assert!(PcInputMode::Auto.resolve_use_mouse_kb(false));
+        assert!(!PcInputMode::Gamepad.resolve_use_mouse_kb(false));
+        assert!(PcInputMode::MouseKeyboard.resolve_use_mouse_kb(true));
+        assert_eq!(PcInputMode::parse("mouse_kb"), PcInputMode::MouseKeyboard);
+        assert_eq!(PcInputMode::parse("gamepad"), PcInputMode::Gamepad);
+        assert_eq!(PcInputMode::parse("unknown"), PcInputMode::Auto);
+        assert_eq!(PcInputMode::Auto.next(), PcInputMode::Gamepad);
+        assert_eq!(PcInputMode::Gamepad.next(), PcInputMode::MouseKeyboard);
+        assert_eq!(PcInputMode::MouseKeyboard.next(), PcInputMode::Auto);
+        assert_eq!(PcInputMode::Auto.prev(), PcInputMode::MouseKeyboard);
+    }
+
+    #[test]
+    fn gamepad_import_classifier_detects_standard_windows_apis() {
+        assert!(is_gamepad_import("xinput1_3.dll"));
+        assert!(is_gamepad_import("xinput9_1_0.dll"));
+        assert!(is_gamepad_import("dinput8.dll"));
+        assert!(is_gamepad_import("sdl2.dll"));
+        assert!(is_gamepad_import("unityplayer.dll"));
+        assert!(!is_gamepad_import("ddraw.dll"));
+        assert!(!is_gamepad_import("opengl32.dll"));
     }
 
     #[test]

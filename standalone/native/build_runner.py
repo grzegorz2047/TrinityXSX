@@ -5,8 +5,10 @@ import argparse
 from hashlib import file_digest
 import json
 from pathlib import Path, PurePosixPath
+import posixpath
 import shutil
 import subprocess
+import tarfile
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
@@ -103,9 +105,62 @@ def rebuilt_win32u(wine_build: Path) -> tuple[Path, str, bool] | None:
     return path, digest, WIN32U_MENU_PAUSE_PATCH in patches
 
 
+def extract_wine_mono(archive_path: Path, dest_dir: Path) -> tuple[int, str]:
+    """Extract a wine-mono-<ver>-x86.tar.xz archive into `dest_dir`, skipping MSI support
+    helpers and materializing symlinks/hardlinks as real files for UFS2/ZIP compatibility."""
+    with archive_path.open("rb") as stream:
+        digest = file_digest(stream, "sha256").hexdigest()
+    dest_root = dest_dir.resolve()
+    dest_root.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with tarfile.open(archive_path, "r:*") as tf:
+        members = tf.getmembers()
+        deferred_links = []
+        for member in members:
+            parts = PurePosixPath(member.name).parts
+            if len(parts) < 2:
+                continue
+            rel_parts = parts[1:]
+            if rel_parts[0] == "support":
+                continue
+            target = (dest_root.joinpath(*rel_parts)).resolve()
+            if not target.is_relative_to(dest_root):
+                raise ValueError(f"Unexpected wine-mono archive member: {member.name}")
+            if member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                with extracted, target.open("wb") as out:
+                    shutil.copyfileobj(extracted, out)
+                written += 1
+            elif member.issym() or member.islnk():
+                deferred_links.append((member, target))
+        for member, target in deferred_links:
+            if member.islnk():
+                linked = member.linkname
+            else:
+                linked = posixpath.normpath(posixpath.join(posixpath.dirname(member.name), member.linkname))
+            link_parts = PurePosixPath(linked).parts
+            if len(link_parts) < 2:
+                continue
+            src = (dest_root.joinpath(*link_parts[1:])).resolve()
+            if not src.is_relative_to(dest_root):
+                raise ValueError(f"Unexpected wine-mono link target: {member.name} -> {member.linkname}")
+            if src.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, target)
+                written += 1
+    for required in ("bin/libmono-2.0-x86.dll", "bin/libmono-2.0-x86_64.dll"):
+        if not (dest_root / required).is_file():
+            raise ValueError(f"Wine Mono archive missing required runtime: {required}")
+    return written, digest
+
+
 def build(
     source: Path, foundation: Path, sdk: Path, llvm: Path, tool: Path, release: Path, output: Path,
     *, wine_build: Path | None = None, lapy_elf: Path | None = None,
+    wine_mono: Path | None = None, wine_mono_version: str = "11.3.0",
 ) -> None:
     if output.exists() or output.is_symlink():
         raise FileExistsError(output)
@@ -203,6 +258,10 @@ def build(
             if not lapy_bytes.startswith(b"\x7fELF"):
                 raise ValueError(f"Expected an ELF file for --lapy-elf: {lapy_elf}")
             (runner / "lapy.elf").write_bytes(lapy_bytes)
+        mono_info = None
+        if wine_mono is not None:
+            mono_dest = runner / "win/wine/share/wine/mono" / f"wine-mono-{wine_mono_version}"
+            mono_info = extract_wine_mono(wine_mono, mono_dest)
         params = runner / "sce_sys/param.json"
         metadata = json.loads(params.read_text(encoding="utf-8"))
         metadata["titleId"] = TITLE_ID
@@ -235,6 +294,8 @@ def build(
                 if win32u_mod[2]:
                     sources.write("Patch: patches/prospero-win/0014-Pause-Vulkan-present-in-win32u-while-Touchpad-menu-open.patch\n")
                 sources.write(f"win32u.prx SHA-256: {win32u_mod[1]}\n")
+            if mono_info:
+                sources.write(f"Wine Mono {wine_mono_version}: {mono_info[0]} files, SHA-256: {mono_info[1]}\n")
         runner.rename(output)
 
 
@@ -245,10 +306,14 @@ def main() -> None:
         parser.add_argument(name, type=Path)
     parser.add_argument("--wine-build", type=Path, help="PS5 Wine build directory containing report.json and prx/")
     parser.add_argument("--lapy-elf", type=Path, help="MIT lapy.elf one-shot helper built for PPSA83601")
+    parser.add_argument("--wine-mono", type=Path, help="wine-mono-<ver>-x86.tar.xz archive to bundle in win/wine/share/wine/mono")
+    parser.add_argument("--wine-mono-version", default="11.3.0", help="Wine Mono version directory suffix")
     args = parser.parse_args()
     try:
         build(*(getattr(args, name).resolve() for name in names), wine_build=args.wine_build,
-              lapy_elf=args.lapy_elf.resolve() if args.lapy_elf else None)
+              lapy_elf=args.lapy_elf.resolve() if args.lapy_elf else None,
+              wine_mono=args.wine_mono.resolve() if args.wine_mono else None,
+              wine_mono_version=args.wine_mono_version)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"build_runner: {error}\n")
     print(f"Built runner: {args.output.resolve()}")
