@@ -8,8 +8,8 @@ Adds wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
 to keep streaming PC/GOG games within PS5's ~268-file per-process cap
 and emit a one-shot kernel+wineserver FD census if EMFILE still occurs.
 ---
- ...er-ps5-park-regular-file-descriptors.patch | 519 ++++++++++++++++++
- 1 file changed, 519 insertions(+)
+ ...er-ps5-park-regular-file-descriptors.patch | 520 ++++++++++++++++++
+ 1 file changed, 520 insertions(+)
  create mode 100644 wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
 
 diff --git a/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch b/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
@@ -17,7 +17,7 @@ new file mode 100644
 index 0000000..45c9188
 --- /dev/null
 +++ b/wine/patches/0990-server-ps5-park-regular-file-descriptors.patch
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,520 @@
 +From b9f8dddb76b18202f92766490a480fb72626af11 Mon Sep 17 00:00:00 2001
 +From: TrinityXSX <trinityxsx@users.noreply.github.com>
 +Date: Fri, 27 Nov 2026 18:16:05 +0100
@@ -34,8 +34,8 @@ index 0000000..45c9188
 +evict both pools on EMFILE, and log a one-shot kernel+wineserver FD
 +census if EMFILE still persists.
 +---
-+ server/fd.c | 356 +++++++++++++++++++++++++++++++++++++++++++++++++---
-+ 1 file changed, 342 insertions(+), 14 deletions(-)
++ server/fd.c | 357 +++++++++++++++++++++++++++++++++++++++++++++++++---
++ 1 file changed, 343 insertions(+), 14 deletions(-)
 +
 +diff --git a/server/fd.c b/server/fd.c
 +index 4c046f4..d8e7128 100644
@@ -131,7 +131,7 @@ index 0000000..45c9188
 + 
 + static int ps5_park_threshold(void)
 + {
-+@@ -1923,6 +1955,224 @@ static int ps5_park_threshold(void)
++@@ -1923,6 +1955,225 @@ static int ps5_park_threshold(void)
 +     return threshold;
 + }
 + 
@@ -177,7 +177,8 @@ index 0000000..45c9188
 ++    if ((!fd->ps5_park_reg && !fd->ps5_park_dir) || fd->ps5_parked || fd->unix_fd == -1) return 0;
 ++    if (!fd->inode || !fd->closed || !fd->unix_name) return 0;
 ++    if (fd->closed->unix_fd != fd->unix_fd || fd->closed->disp_flags) return 0;
-++    if (fd->cacheable || fd->poll_index != -1) return 0;
+++    if (fd->cacheable) return 0;
+++    if (fd->poll_index != -1 && (pollfd[fd->poll_index].fd != -1 || pollfd[fd->poll_index].events)) return 0;
 ++    if ((fd->options & FILE_DELETE_ON_CLOSE)) return 0;
 ++    if (fd->ps5_park_reg && (fd->access & (FILE_UNIX_WRITE_ACCESS | DELETE))) return 0;
 ++    if (!list_empty( &fd->locks ) || !list_empty( &fd->inode->locks )) return 0;
@@ -356,7 +357,7 @@ index 0000000..45c9188
 + static void ps5_park_directory( struct fd *fd, int flags )
 + {
 +     int threshold = ps5_park_threshold();
-+@@ -1936,13 +2186,44 @@ static void ps5_park_directory( struct fd *fd, int flags )
++@@ -1936,13 +2187,44 @@ static void ps5_park_directory( struct fd *fd, int flags )
 +     if (fd->unix_fd == -1 || !fd->inode || !fd->closed || !fd->unix_name || fd->closed->disp_flags ||
 +         !list_empty( &fd->inode->locks ))
 +         return;
@@ -403,7 +404,7 @@ index 0000000..45c9188
 + }
 + 
 + /* a parked fd's unix_fd, opened again by its name (see ps5_unpark_directory) */
-+@@ -1951,20 +2232,42 @@ static int ps5_reopen_directory( struct fd *fd )
++@@ -1951,20 +2233,42 @@ static int ps5_reopen_directory( struct fd *fd )
 +     struct stat st;
 +     int unix_fd;
 + 
@@ -449,7 +450,7 @@ index 0000000..45c9188
 +     return 0;
 + }
 + #define PS5_UNPARK_OR_RETURN(fd) do { if (ps5_unpark_directory( fd ) == -1) return; } while (0)
-+@@ -2003,9 +2306,18 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
++@@ -2003,9 +2307,18 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
 +         if (!closed) goto failed;
 +         if ((fd->unix_fd = dup( orig->unix_fd )) == -1)
 +         {
@@ -471,7 +472,7 @@ index 0000000..45c9188
 +         }
 +         closed->unix_fd = fd->unix_fd;
 +         closed->disp_flags = 0;
-+@@ -2252,8 +2564,14 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++@@ -2252,8 +2565,14 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 + 
 +     if ((fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode )) == -1)
 +     {
@@ -487,7 +488,7 @@ index 0000000..45c9188
 +         {
 +             if ((access & FILE_UNIX_WRITE_ACCESS) || (flags & O_CREAT))
 +                 fd->unix_fd = open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
-+@@ -2292,6 +2610,9 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++@@ -2292,6 +2611,9 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 +         if ((path = dup_fd_name( root, name )))
 +         {
 +             fd->unix_name = realpath_dup( path );
@@ -497,7 +498,7 @@ index 0000000..45c9188
 +             free( path );
 +         }
 + 
-+@@ -2366,6 +2687,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
++@@ -2366,6 +2688,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 + 
 + #ifdef PS5_PARK_DIRECTORIES
 +     if (S_ISDIR( st.st_mode )) ps5_park_directory( fd, flags );
@@ -505,7 +506,7 @@ index 0000000..45c9188
 + #endif
 +     if (root_fd != -1) fchdir( server_dir_fd ); /* go back to the server dir */
 +     return fd;
-+@@ -2424,6 +2746,7 @@ int get_unix_fd( struct fd *fd )
++@@ -2424,6 +2747,7 @@ int get_unix_fd( struct fd *fd )
 + {
 + #ifdef PS5_PARK_DIRECTORIES
 +     if (ps5_unpark_directory( fd ) == -1) return -1;
@@ -513,7 +514,7 @@ index 0000000..45c9188
 + #endif
 +     if (fd->unix_fd == -1) set_error( fd->no_fd_status );
 +     return fd->unix_fd;
-+@@ -2452,6 +2775,9 @@ int is_same_file_fd( struct fd *fd1, struct fd *fd2 )
++@@ -2452,6 +2776,9 @@ int is_same_file_fd( struct fd *fd1, struct fd *fd2 )
 + /* allow the fd to be cached (can't be reset once set) */
 + void allow_fd_caching( struct fd *fd )
 + {
@@ -523,7 +524,7 @@ index 0000000..45c9188
 +     fd->cacheable = 1;
 + }
 + 
-+@@ -3226,7 +3552,9 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
++@@ -3226,7 +3553,9 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
 + 
 +         LIST_FOR_EACH_ENTRY( fd_ptr, &fd->inode->open, struct fd, inode_entry )
 +         {
