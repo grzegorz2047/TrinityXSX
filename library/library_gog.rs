@@ -1532,7 +1532,158 @@ pub fn apply_gog_script_registry(game_dir: &Path, is_64bit: bool) -> usize {
             let _ = RegFlushKey(HKEY_CURRENT_USER);
         }
     }
+    // Wine's `NtFlushKey` does not synchronously rewrite `user.reg` / `system.reg` before
+    // `sceSystemServiceLoadExec` terminates wineserver, so also persist directly to the prefix
+    // `.reg` files on PS5 when present.
+    let prefix_dir = Path::new(PS5_STORAGE_ROOT).join("prefix");
+    if prefix_dir.is_dir() && !entries.is_empty() {
+        persist_entries_to_wine_reg_files(&prefix_dir, &entries, is_64bit);
+    }
     written
+}
+
+fn escape_wine_reg_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
+            c => {
+                let mut buf = [0u16; 2];
+                for u in c.encode_utf16(&mut buf) {
+                    if *u <= 0xFF {
+                        out.push_str(&format!("\\x{:02x}", *u));
+                    } else {
+                        out.push_str(&format!("\\x{:04x}", *u));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn format_wine_reg_value_line(name: &str, value: &GogRegValue) -> String {
+    let key_part = if name.is_empty() { "@".to_owned() } else { format!("\"{}\"", escape_wine_reg_str(name)) };
+    match value {
+        GogRegValue::String(v) => format!("{key_part}=\"{}\"", escape_wine_reg_str(v)),
+        GogRegValue::Dword(d) => format!("{key_part}=dword:{d:08x}"),
+    }
+}
+
+/// Upsert registry entries into a Wine `.reg` file (`user.reg` or `system.reg`).
+/// Returns `Some(new_text)` only when at least one section or value changed.
+pub fn upsert_wine_reg_text(existing: &str, updates: &[(String, String, GogRegValue)]) -> Option<String> {
+    if updates.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = existing.lines().map(str::to_owned).collect();
+    let mut changed = false;
+
+    for (subkey, name, value) in updates {
+        let escaped_key = escape_wine_reg_str(subkey);
+        let section_prefix_low = format!("[{}]", escaped_key.to_ascii_lowercase());
+        let val_prefix_low = if name.is_empty() {
+            "@=".to_owned()
+        } else {
+            format!("\"{}\"=", escape_wine_reg_str(name).to_ascii_lowercase())
+        };
+        let desired_line = format_wine_reg_value_line(name, value);
+
+        // Locate existing section matching `[escaped_key]` (ignoring trailing Unix timestamp)
+        let sec_idx = lines.iter().position(|ln| {
+            let low = ln.to_ascii_lowercase();
+            low == section_prefix_low || low.starts_with(&format!("{section_prefix_low} "))
+        });
+
+        if let Some(start) = sec_idx {
+            let mut end = start + 1;
+            while end < lines.len() && !lines[end].starts_with('[') {
+                end += 1;
+            }
+            // Trim trailing blank lines from section body for clean insertion
+            let mut body_end = end;
+            while body_end > start + 1 && lines[body_end - 1].trim().is_empty() {
+                body_end -= 1;
+            }
+            if let Some(rel_idx) =
+                lines[start + 1..body_end].iter().position(|ln| ln.to_ascii_lowercase().starts_with(&val_prefix_low))
+            {
+                let idx = start + 1 + rel_idx;
+                if lines[idx] != desired_line {
+                    lines[idx] = desired_line;
+                    changed = true;
+                }
+            } else {
+                lines.insert(body_end, desired_line);
+                changed = true;
+            }
+        } else {
+            if !lines.last().is_some_and(|l| l.is_empty()) {
+                lines.push(String::new());
+            }
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(1_795_000_000);
+            lines.push(format!("[{escaped_key}] {ts}"));
+            lines.push(desired_line);
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Some(out)
+}
+
+fn wow6432_subkey(subkey: &str) -> Option<String> {
+    let low = subkey.to_ascii_lowercase();
+    if low.starts_with("software\\wow6432node\\") {
+        return None;
+    }
+    let rest = subkey.get(9..)?;
+    if low.starts_with("software\\") {
+        Some(format!("Software\\Wow6432Node\\{rest}"))
+    } else {
+        None
+    }
+}
+
+fn persist_entries_to_wine_reg_files(prefix_dir: &Path, entries: &[GogRegEntry], is_64bit: bool) {
+    let mut hkcu_updates = Vec::new();
+    let mut hklm_updates = Vec::new();
+    for entry in entries {
+        match entry.root {
+            GogRegRoot::CurrentUser => {
+                hkcu_updates.push((entry.subkey.clone(), entry.name.clone(), entry.value.clone()));
+            }
+            GogRegRoot::LocalMachine => {
+                hklm_updates.push((entry.subkey.clone(), entry.name.clone(), entry.value.clone()));
+                if !is_64bit {
+                    if let Some(wow) = wow6432_subkey(&entry.subkey) {
+                        hklm_updates.push((wow, entry.name.clone(), entry.value.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    for (file_name, updates) in [("user.reg", hkcu_updates), ("system.reg", hklm_updates)] {
+        if updates.is_empty() {
+            continue;
+        }
+        let path = prefix_dir.join(file_name);
+        if let Ok(existing) = fs::read_to_string(&path) {
+            if let Some(updated) = upsert_wine_reg_text(&existing, &updates) {
+                let _ = fs::write(&path, updated);
+            }
+        }
+    }
 }
 
 /// Extract a GOG offline installer in-process using bundled `trinity_innoextract.dll` (zlib).
@@ -2310,6 +2461,30 @@ mod tests {
             no_ver.extend_from_slice(&u.to_le_bytes());
         }
         assert!(parse_gog_sdb_wine_version(&no_ver).is_none());
+    }
+
+    #[test]
+    fn upsert_wine_reg_text_updates_appends_and_is_idempotent() {
+        let base = "WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\AppDefaults] 1700000000\n#time=123\n\n[Software\\\\Vendor\\\\Game] 1700000000\n\"First Time\"=dword:00000001\n";
+        let updates = vec![
+            (
+                "Software\\Wine\\AppDefaults\\ClassicGame.exe".to_owned(),
+                "Version".to_owned(),
+                GogRegValue::String("win98".into()),
+            ),
+            ("Software\\Vendor\\Game".to_owned(), "First Time".to_owned(), GogRegValue::Dword(0)),
+            (
+                "Software\\Vendor\\Game".to_owned(),
+                "InstallDir".to_owned(),
+                GogRegValue::String("Z:\\mnt\\ext1\\game".into()),
+            ),
+        ];
+        let updated = upsert_wine_reg_text(base, &updates).expect("first upsert should modify text");
+        assert!(updated.contains("[Software\\\\Wine\\\\AppDefaults\\\\ClassicGame.exe] "));
+        assert!(updated.contains("\"Version\"=\"win98\""));
+        assert!(updated.contains("\"First Time\"=dword:00000000"));
+        assert!(updated.contains("\"InstallDir\"=\"Z:\\\\mnt\\\\ext1\\\\game\""));
+        assert!(upsert_wine_reg_text(&updated, &updates).is_none(), "second upsert must be a no-op");
     }
 
     #[test]
