@@ -10,6 +10,7 @@ The library shows these statuses and applies the listed preset to a game with no
 | Title | Identity, version & TitleId | Status | TrinityXSX | Notes |
 | --- | --- | --- | --- | --- |
 | **Age of Empires II: The Conquerors** | `PC.AOE2-CON` `1.5` | **Playable** | v0.2.12 | 32-bit fixed-base PE playable with audio and DualSense Mouse & Keyboard mode; pick the expansion executable in R1 Game info. |
+| **Crysis Remastered** | `GOG.1103900211` `1.0.0.0` (`38F969C0`) | **Playable** | v0.2.19 | 64-bit DX11 (DXVK) 1080p gameplay with automatic DualSense XInput, rumble and audio verified (~1.5 GiB dmem); lower Raytracing quality for higher framerate. |
 | **Heroes of Might and Magic 3 Complete** | `GOG.1207658787` `4.0` (`6D6FC0AD`) | **Playable** | v0.2.13 | Full 1440x1080 (4:3) gameplay and battles with audio and DualSense/USB Mouse & Keyboard mode; automatic DDrawCompat xdd.dll forwarder, Win98 SDB compatibility, and D:/E:/F: storage drive mapping. |
 | **Heroes of Might and Magic 4 Complete** | `GOG.1207658915` `3.0` (`CFFC2F9C`) | **Playable** | v0.2.12 | Smooth 1080p (4:3 fit) gameplay via bundled ddraw.dll and DXVK D3D9 with audio, DualSense Mouse & Keyboard mode, and automatic save folder creation. |
 | **Hollow Knight: Silksong** | `GOG.1558393671` `1.0.30000` (`34320054`) | **Playable** | v0.2.9 | Smooth 1080p gameplay, DualSense XInput and audio via GOG PC handoff; press Options to skip opening video cutscene. |
@@ -18,6 +19,7 @@ The library shows these statuses and applies the listed preset to a game with no
 | **The Witcher 2: Assassins of Kings Enhanced Edition** | `GOG.1207658930` `3.5.0.26` (`60F703B1`) | **Playable** | v0.2.11 | Locked 60 FPS 1080p gameplay, DualSense XInput and audio via GOG PC handoff + Wine Mono 11.3.0; switch Controls to Gamepad in Options (or use Touchpad Mouse+KB mode). |
 | **Worms Forts: Under Siege** | `PC.worms-forts-under-siege-2-0-0-9` `2.0.0.9` | **Playable** | v0.2.12 | 32-bit fixed-base PE via Mesa Zink (OpenGL) with DualSense Mouse & Keyboard mode and audio verified on PS5. |
 | **XCL Test Title** | `XCL.TestTitle` | **Playable** | v0.2.7 | Passes 51/51: full D3D12.X + vkd3d-proton + RADV verification suite, 60 FPS fullscreen. |
+| **The Blood of Dawnwalker** | `GOG.1889754300` `1.0.1.256189` (`DBF2BB41`) | **In-game (issues)** | v0.2.19 | Unreal Engine 5.5.4 (DX12 via vkd3d-proton 12.1 + descriptor buffer) compiles shaders and enters gameplay with automatic DualSense XInput; lower graphics quality to stay within PS5 12 GiB UMA. |
 <!-- compat:end -->
 
 ## Reporting a game you tested

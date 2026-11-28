@@ -111,3 +111,23 @@ status = "playable"
 release = "v0.2.13"
 notes = "Full 1440x1080 (4:3) gameplay and battles with audio and DualSense/USB Mouse & Keyboard mode; automatic DDrawCompat xdd.dll forwarder, Win98 SDB compatibility, and D:/E:/F: storage drive mapping."
 reports = []
+
+[[title]]
+title_id = "38F969C0"
+identity = "GOG.1103900211"
+name = "Crysis Remastered"
+versions = ["1.0.0.0"]
+status = "playable"
+release = "v0.2.19"
+notes = "64-bit DX11 (DXVK) 1080p gameplay with automatic DualSense XInput, rumble and audio verified (~1.5 GiB dmem); lower Raytracing quality for higher framerate."
+reports = []
+
+[[title]]
+title_id = "DBF2BB41"
+identity = "GOG.1889754300"
+name = "The Blood of Dawnwalker"
+versions = ["1.0.1.256189"]
+status = "ingame"
+release = "v0.2.19"
+notes = "Unreal Engine 5.5.4 (DX12 via vkd3d-proton 12.1 + descriptor buffer) compiles shaders and enters gameplay with automatic DualSense XInput; lower graphics quality to stay within PS5 12 GiB UMA."
+reports = []
