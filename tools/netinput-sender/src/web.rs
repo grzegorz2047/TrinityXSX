@@ -12,7 +12,7 @@ use crate::link::{now_ms, Link};
 use crate::ws::{self, Frame, Request};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -20,6 +20,9 @@ use std::time::Duration;
 pub const WEB_PORT: u16 = 9397;
 const PAGE: &str = include_str!("web/index.html");
 const TICK: Duration = Duration::from_millis(25);
+/// A capturing page that says nothing for this long (it sends `h` every 500 ms) has hung or is paused:
+/// what it held is released, as the PS5's own server does, so no key stays down on the console.
+const SILENT_MS: u64 = 1500;
 
 #[link(name = "shell32")]
 extern "system" {
@@ -117,15 +120,25 @@ fn is_upgrade(request: &Request) -> bool {
         && request.header("sec-websocket-key").is_some()
 }
 
-/// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats and watches for a long Esc.
+fn release_if_silent(link: &mut Link, silent_ms: u64) -> bool {
+    if link.capture.on && silent_ms >= SILENT_MS {
+        link.release();
+        return true;
+    }
+    false
+}
+
+/// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats, watches for a long Esc, and
+/// releases everything if a capturing page goes silent.
 fn session(stream: TcpStream, udp_port: u16) {
     println!("page connected");
     let Ok(writer) = stream.try_clone() else { return };
     let writer = Arc::new(Mutex::new(writer));
     let link: Arc<Mutex<Option<Link>>> = Arc::new(Mutex::new(None));
     let closed = Arc::new(AtomicBool::new(false));
+    let heard = Arc::new(AtomicU64::new(now_ms()));
     {
-        let (link, writer, closed) = (link.clone(), writer.clone(), closed.clone());
+        let (link, writer, closed, heard) = (link.clone(), writer.clone(), closed.clone(), heard.clone());
         thread::spawn(move || {
             let mut reported = u64::MAX;
             let mut ticks = 0u32;
@@ -134,7 +147,11 @@ fn session(stream: TcpStream, udp_port: u16) {
                 ticks += 1;
                 let mut note = None;
                 if let Some(link) = link.lock().unwrap().as_mut() {
-                    if link.tick().panic {
+                    let silent = now_ms().saturating_sub(heard.load(Ordering::SeqCst));
+                    if release_if_silent(link, silent) {
+                        println!("page silent for {silent} ms - capture stopped, everything released");
+                        note = Some("stopped".to_string());
+                    } else if link.tick().panic {
                         println!("PANIC: Esc held - capture stopped ({} datagrams sent)", link.sent);
                         note = Some("panic".to_string());
                     } else if ticks.is_multiple_of(20) && link.sent != reported {
@@ -150,7 +167,9 @@ fn session(stream: TcpStream, udp_port: u16) {
     }
     let mut reader = stream;
     loop {
-        let reply = match ws::read_frame(&mut reader) {
+        let frame = ws::read_frame(&mut reader);
+        heard.store(now_ms(), Ordering::SeqCst);
+        let reply = match frame {
             Ok(Frame::Text(text)) => command(&mut link.lock().unwrap(), &text, udp_port),
             Ok(Frame::Ping(payload)) => {
                 let _ = ws::write_pong(&mut *writer.lock().unwrap(), &payload);
@@ -176,8 +195,8 @@ fn session(stream: TcpStream, udp_port: u16) {
 /// One command from the page; the reply to send back, if any.
 ///
 /// `target <host>` · `on` · `off` · `k <vk> <0|1>` · `b <button> <0|1>` · `m <dx> <dy>` · `w <detents>` ·
-/// `h` (the page's heartbeat, which the PS5's own server needs and this one does not: heartbeats go out by
-/// timer here)
+/// `h` (the page's heartbeat: it needs no answer, and like every frame it tells `session` the page is alive;
+/// the datagram heartbeats to the PS5 go out by timer)
 pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<String> {
     let mut words = text.split_whitespace();
     let verb = words.next()?;
@@ -186,7 +205,7 @@ pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<Str
         return None;
     }
     if verb == "target" {
-        let host = text["target".len()..].trim();
+        let host = text.trim_start().strip_prefix("target").unwrap_or("").trim();
         if let Some(old) = link.as_mut() {
             old.release();
         }
@@ -273,5 +292,22 @@ mod tests {
         assert_eq!(command(&mut link, "off", 9).as_deref(), Some("off"));
         let p = link.as_ref().unwrap().capture.packet(0, 0);
         assert_eq!((p.flags, p.keys, p.buttons), (0, [0; 32], 0));
+        // Leading ASCII or Unicode whitespace before `target` must not panic or truncate the address.
+        assert!(command(&mut link, "\u{00a0} target 192.168.1.250", 9).unwrap().starts_with("target 192.168.1.250:9 "));
+    }
+
+    #[test]
+    fn silent_page_is_released_at_timeout() {
+        let mut link = Some(Link::connect("127.0.0.1", 9).unwrap());
+        assert_eq!(command(&mut link, "on", 9).as_deref(), Some("on"));
+        command(&mut link, "k 87 1", 9);
+        let l = link.as_mut().unwrap();
+        assert!(!release_if_silent(l, SILENT_MS - 1));
+        assert!(l.capture.on);
+        assert!(release_if_silent(l, SILENT_MS));
+        assert!(!l.capture.on);
+        assert_eq!(l.capture.packet(0, 0).keys, [0; 32]);
+        // Once stopped, further silence is a no-op.
+        assert!(!release_if_silent(l, SILENT_MS * 2));
     }
 }

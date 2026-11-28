@@ -13,6 +13,8 @@ pub const VK_F12: u8 = 0x7b;
 pub const VK_ESCAPE: u8 = 0x1b;
 /// How long Esc must be held to stop capturing.
 pub const PANIC_MS: u64 = 1500;
+/// Longer than Windows' longest typematic delay (1 s): a key-down sooner after the last one is a repeat.
+const REPEAT_GAP_MS: u64 = 1100;
 const CTRL: [u8; 3] = [0x11, 0xa2, 0xa3];
 const ALT: [u8; 3] = [0x12, 0xa4, 0xa5];
 
@@ -42,6 +44,9 @@ pub struct Capture {
     esc_since: Option<u64>,
     /// The Esc that panicked; its release is not anyone's.
     swallow_esc_up: bool,
+    /// When F12 and Esc last went down (ms), to tell auto-repeat from a new press.
+    f12_down_ms: u64,
+    esc_down_ms: u64,
 }
 
 /// What one event did.
@@ -87,6 +92,7 @@ impl Capture {
             Some(since) if self.on && now_ms.saturating_sub(since) >= PANIC_MS => {
                 self.stop();
                 self.swallow_esc_up = true;
+                self.esc_down_ms = now_ms;
                 PANIC
             }
             _ => PASS,
@@ -94,6 +100,33 @@ impl Capture {
     }
 
     pub fn key(&mut self, vk: u8, down: bool, now_ms: u64) -> Outcome {
+        // Low-level hooks see auto-repeat as more key-downs. Repeats of the F12 that toggled are nobody's:
+        // they neither toggle again nor reach the PS5 or Windows, even once Ctrl and Alt are let go first.
+        // A down after a pause longer than any typematic delay is a new press (its release was lost, as on
+        // the secure desktop), and counts.
+        if vk == VK_F12 && down && self.swallow_f12_up {
+            let repeat = now_ms.saturating_sub(self.f12_down_ms) < REPEAT_GAP_MS;
+            self.f12_down_ms = now_ms;
+            if repeat {
+                return SWALLOW;
+            }
+            self.swallow_f12_up = false;
+        }
+        // Likewise the repeats of the Esc that panicked, until its release.
+        if vk == VK_ESCAPE && down && self.swallow_esc_up && !self.on {
+            let repeat = now_ms.saturating_sub(self.esc_down_ms) < REPEAT_GAP_MS;
+            self.esc_down_ms = now_ms;
+            if repeat {
+                return SWALLOW;
+            }
+            self.swallow_esc_up = false;
+        }
+        if vk == VK_F12 && down {
+            self.f12_down_ms = now_ms;
+        }
+        if vk == VK_ESCAPE && down {
+            self.esc_down_ms = now_ms;
+        }
         if vk == VK_F12 && down && self.any(&CTRL) && self.any(&ALT) {
             if self.on {
                 self.stop();
@@ -105,6 +138,10 @@ impl Capture {
         }
         if vk == VK_F12 && !down && self.swallow_f12_up {
             self.swallow_f12_up = false;
+            if key_held(&self.windows_keys, VK_F12) {
+                set_key(&mut self.windows_keys, VK_F12, false);
+                return PASS;
+            }
             return SWALLOW;
         }
         if vk == VK_ESCAPE && self.on {
@@ -122,7 +159,10 @@ impl Capture {
         }
         if !down && key_held(&self.windows_keys, vk) {
             set_key(&mut self.windows_keys, vk, false);
-            return PASS;
+            // Windows gets the release it is owed; if the key was pressed again while capturing, the PS5 too.
+            let changed = self.on && key_held(&self.keys, vk);
+            set_key(&mut self.keys, vk, false);
+            return Outcome { verdict: Verdict::Pass, changed, toggled: false, panic: false };
         }
         if !self.on {
             if down {
@@ -316,6 +356,81 @@ mod tests {
     }
 
     #[test]
+    fn a_held_shortcut_toggles_once() {
+        let mut c = Capture::default();
+        c.key(0xa2, true, 0);
+        c.key(0xa4, true, 0);
+        assert!(c.key(VK_F12, true, 0).toggled);
+        // Auto-repeat while the shortcut is held: no more toggles.
+        for t in 1..20 {
+            assert_eq!(c.key(VK_F12, true, t * 33), SWALLOW);
+        }
+        assert!(c.on);
+        // Ctrl and Alt let go first, F12 still repeating: it never reaches the PS5.
+        c.key(0xa2, false, 700);
+        c.key(0xa4, false, 700);
+        assert_eq!(c.key(VK_F12, true, 733), SWALLOW);
+        assert_eq!(c.key(VK_F12, false, 760), SWALLOW);
+        assert!(!key_held(&c.packet(1, 1).keys, VK_F12));
+        // The next F12 is an ordinary key again.
+        assert!(c.key(VK_F12, true, 900).changed);
+        assert!(c.key(VK_F12, false, 950).changed);
+        assert!(!key_held(&c.packet(1, 2).keys, VK_F12));
+    }
+
+    #[test]
+    fn esc_repeats_after_a_panic_are_nobodys() {
+        let mut c = Capture::default();
+        c.start();
+        c.key(VK_ESCAPE, true, 0);
+        for t in [500, 533, 566, 1000, 1400] {
+            c.key(VK_ESCAPE, true, t);
+        }
+        assert!(c.tick(PANIC_MS).panic);
+        // Esc still held after the panic: its repeats and its release reach neither Windows nor the PS5.
+        assert_eq!(c.key(VK_ESCAPE, true, PANIC_MS + 33), SWALLOW);
+        assert_eq!(c.key(VK_ESCAPE, false, PANIC_MS + 100), SWALLOW);
+        // The next session: a tap of Esc is pressed and released on the PS5.
+        c.start();
+        assert!(c.key(VK_ESCAPE, true, 10_000).changed);
+        assert!(c.key(VK_ESCAPE, false, 10_050).changed);
+        assert!(!key_held(&c.packet(1, 1).keys, VK_ESCAPE));
+    }
+
+    #[test]
+    fn a_lost_release_does_not_eat_the_next_press() {
+        // Ctrl+Alt+F12 starts capturing, but the F12 release never comes (the secure desktop took it).
+        let mut c = Capture::default();
+        c.key(0xa2, true, 0);
+        c.key(0xa4, true, 0);
+        assert!(c.key(VK_F12, true, 0).toggled);
+        // Much later, Ctrl+Alt+F12 again: a new press, it stops capturing.
+        assert!(c.key(VK_F12, true, 5_000).toggled);
+        assert!(!c.on);
+        // A panic whose Esc release was lost: a later Esc is Windows' again.
+        let mut c = Capture::default();
+        c.start();
+        c.key(VK_ESCAPE, true, 0);
+        assert!(c.tick(PANIC_MS).panic);
+        assert_eq!(c.key(VK_ESCAPE, true, 9_000), PASS);
+        assert_eq!(c.key(VK_ESCAPE, false, 9_050), PASS);
+    }
+
+    #[test]
+    fn a_key_windows_holds_is_released_on_the_ps5_too() {
+        let mut c = Capture::default();
+        // Q goes down before capture (Windows has it), then is pressed again while capturing.
+        c.key(b'Q', true, 0);
+        toggle(&mut c);
+        c.key(0xa2, false, 0);
+        c.key(0xa4, false, 0);
+        c.key(b'Q', true, 10);
+        let o = c.key(b'Q', false, 20);
+        assert!(o.changed && o.verdict == Verdict::Pass);
+        assert!(!key_held(&c.packet(1, 1).keys, b'Q'));
+    }
+
+    #[test]
     fn a_stale_panic_flag_does_not_eat_the_next_esc() {
         let mut c = Capture::default();
         c.start();
@@ -327,5 +442,33 @@ mod tests {
         let o = c.key(VK_ESCAPE, false, 10_100);
         assert!(o.changed && o.verdict == Verdict::Swallow);
         assert!(!crate::protocol::key_held(&c.packet(1, 1).keys, VK_ESCAPE));
+    }
+
+    #[test]
+    fn esc_repeat_after_timer_panic_without_prior_repeats_is_swallowed() {
+        let mut c = Capture::default();
+        c.start();
+        c.key(VK_ESCAPE, true, 0);
+        assert!(c.tick(PANIC_MS).panic);
+        // Even if no auto-repeat arrived before the panic timer fired, repeats right after are swallowed.
+        assert_eq!(c.key(VK_ESCAPE, true, PANIC_MS + 33), SWALLOW);
+        assert_eq!(c.key(VK_ESCAPE, false, PANIC_MS + 100), SWALLOW);
+        // A later Esc press is Windows' again.
+        assert_eq!(c.key(VK_ESCAPE, true, PANIC_MS + 200), PASS);
+        assert_eq!(c.key(VK_ESCAPE, false, PANIC_MS + 250), PASS);
+    }
+
+    #[test]
+    fn f12_held_before_shortcut_still_releases_to_windows() {
+        let mut c = Capture::default();
+        // F12 pressed while not capturing (Windows owns it), then Ctrl+Alt added and F12 repeats.
+        assert_eq!(c.key(VK_F12, true, 0), PASS);
+        assert_eq!(c.key(0xa2, true, 100), PASS);
+        assert_eq!(c.key(0xa4, true, 120), PASS);
+        assert!(c.key(VK_F12, true, 500).toggled);
+        assert_eq!(c.key(VK_F12, true, 533), SWALLOW);
+        // Releasing F12 must pass the release back to Windows so F12 does not stay stuck there.
+        assert_eq!(c.key(VK_F12, false, 560), PASS);
+        assert!(!key_held(&c.packet(1, 1).keys, VK_F12));
     }
 }
