@@ -141,3 +141,13 @@ status = "playable"
 release = "v0.2.20"
 notes = "1080p gameplay via bundled ddraw.dll and DXVK D3D9 with audio; use Arrows + Action input preset in R1 Game info (D-pad arrows, Triangle Enter, R1 Ctrl action, Cross Space)."
 reports = []
+
+[[title]]
+title_id = "931EF12D"
+identity = "GOG.1963513391"
+name = "Cuphead"
+versions = ["1.3.9"]
+status = "playable"
+release = "v0.2.19"
+notes = "Smooth 1080p Unity gameplay with automatic DualSense XInput controls and audio via GOG PC handoff."
+reports = []
