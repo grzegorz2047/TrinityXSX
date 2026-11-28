@@ -151,3 +151,13 @@ status = "playable"
 release = "v0.2.19"
 notes = "Smooth 1080p Unity gameplay with automatic DualSense XInput controls and audio via GOG PC handoff."
 reports = []
+
+[[title]]
+title_id = "9F9184AD"
+identity = "GOG.1789244239"
+name = "Breach 2"
+versions = ["1.0"]
+status = "playable"
+release = "v0.2.20"
+notes = "MS-DOS classic running via bundled Windows DOSBox with automatic GOG .bat launcher and argument resolution plus DualSense Mouse & Keyboard controls."
+reports = []

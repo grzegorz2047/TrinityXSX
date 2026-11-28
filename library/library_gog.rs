@@ -883,6 +883,212 @@ fn is_exe_file_task(task: &serde_json::Value) -> bool {
     is_file && has_exe
 }
 
+fn is_batch_file_task(task: &serde_json::Value) -> bool {
+    let is_file = task.get("type").and_then(|x| x.as_str()).is_none_or(|t| t.eq_ignore_ascii_case("FileTask"));
+    let has_bat = task.get("path").and_then(|x| x.as_str()).is_some_and(|p| {
+        let low = p.trim().to_ascii_lowercase();
+        low.ends_with(".bat") || low.ends_with(".cmd")
+    });
+    is_file && has_bat
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GogLaunchTask {
+    exe_rel: String,
+    arguments: Option<String>,
+    working_dir_rel: Option<String>,
+}
+
+/// Split the first command token (quoted or unquoted) from the remaining command-line arguments.
+fn split_first_cmd_token(line: &str) -> Option<(&str, &str)> {
+    let s = line.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some((&rest[..end], rest[end + 1..].trim()))
+    } else {
+        match s.find(|c: char| c.is_ascii_whitespace()) {
+            Some(pos) => Some((&s[..pos], s[pos..].trim())),
+            None => Some((s, "")),
+        }
+    }
+}
+
+/// Parse a GOG `.bat`/`.cmd` launcher (common in DOSBox-bundled classics like
+/// `.\dosbox_windows\dosbox "GAME.EXE" -conf "dosbox_game.conf" -noconsole -exit`)
+/// into a real `.exe` path, command-line arguments, and working directory.
+fn parse_batch_launch(base_dir: &Path, bat_rel: &str) -> Option<GogLaunchTask> {
+    let resolved_bat = resolve_relative_ci(base_dir, bat_rel)?;
+    let bat_path = base_dir.join(&resolved_bat);
+    let bat_parent_rel = Path::new(&resolved_bat)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('/', "\\"))
+        .filter(|s| !s.is_empty() && s != ".");
+    let bat_parent_dir = bat_path.parent().unwrap_or(base_dir);
+    let text = fs::read_to_string(&bat_path).ok()?;
+
+    for raw in text.lines() {
+        let mut line = raw.trim();
+        if line.is_empty() || line.starts_with("::") || line.starts_with(':') {
+            continue;
+        }
+        line = line.trim_start_matches('@').trim();
+        let low = line.to_ascii_lowercase();
+        if low.is_empty()
+            || low.starts_with("rem ")
+            || low == "rem"
+            || low.starts_with("echo")
+            || low.starts_with("set ")
+            || low.starts_with("cd ")
+            || low.starts_with("pushd ")
+            || low.starts_with("popd")
+            || low == "cls"
+            || low == "pause"
+            || low.starts_with("exit")
+        {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("call ").or_else(|| line.strip_prefix("CALL ")) {
+            line = rest.trim();
+        } else if let Some(rest) = line.strip_prefix("start ").or_else(|| line.strip_prefix("START ")) {
+            let mut r = rest.trim();
+            while r.starts_with('/') {
+                if let Some((_, next)) = split_first_cmd_token(r) {
+                    r = next;
+                } else {
+                    break;
+                }
+            }
+            if let Some(after_title) = r.strip_prefix("\"\"") {
+                r = after_title.trim();
+            }
+            line = r;
+        }
+        let Some((cmd_tok, rest_args)) = split_first_cmd_token(line) else { continue };
+        let cmd_clean = cmd_tok.trim();
+        if cmd_clean.is_empty() || cmd_clean.contains('%') {
+            continue;
+        }
+        let resolved_in_parent = resolve_relative_ci(bat_parent_dir, cmd_clean)
+            .filter(|p| p.to_ascii_lowercase().ends_with(".exe"))
+            .or_else(|| {
+                if !cmd_clean.to_ascii_lowercase().ends_with(".exe") {
+                    resolve_relative_ci(bat_parent_dir, &format!("{cmd_clean}.exe"))
+                } else {
+                    None
+                }
+            });
+        if let Some(exe_in_parent) = resolved_in_parent {
+            let exe_rel = match &bat_parent_rel {
+                Some(prefix) => format!("{prefix}\\{exe_in_parent}"),
+                None => exe_in_parent,
+            };
+            let arguments = (!rest_args.is_empty()).then(|| rest_args.to_owned());
+            return Some(GogLaunchTask { exe_rel, arguments, working_dir_rel: bat_parent_rel });
+        }
+    }
+    None
+}
+
+fn sanitize_profile_args(raw: &str) -> Option<String> {
+    let clean: String = raw.chars().filter(|c| !c.is_control() && *c != '\n' && *c != '\r').collect();
+    let trimmed = clean.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn resolve_gog_play_task(dir: &Path, task: &serde_json::Value) -> Option<GogLaunchTask> {
+    let raw_path = task.get("path").and_then(|x| x.as_str())?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    if is_batch_file_task(task) {
+        return parse_batch_launch(dir, raw_path);
+    }
+    if !is_exe_file_task(task) {
+        return None;
+    }
+    let exe_rel = resolve_relative_ci(dir, raw_path).unwrap_or_else(|| {
+        raw_path.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").collect::<Vec<_>>().join("\\")
+    });
+    let arguments = task.get("arguments").and_then(|x| x.as_str()).and_then(sanitize_profile_args);
+    let working_dir_rel = task
+        .get("workingDir")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(|s| s.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".").collect::<Vec<_>>().join("\\"))
+        .filter(|s| !s.is_empty());
+    Some(GogLaunchTask { exe_rel, arguments, working_dir_rel })
+}
+
+fn find_gog_info_detailed(dir: &Path) -> Option<(String, String, GogLaunchTask)> {
+    let rd = fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with("goggame-") && s.ends_with(".info") {
+            let text = fs::read_to_string(entry.path()).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let game_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_owned();
+            let game_id = v.get("gameId").and_then(|x| x.as_str()).unwrap_or("00000001").trim().to_owned();
+            let tasks = v.get("playTasks").and_then(|x| x.as_array());
+            if let Some(arr) = tasks {
+                let is_game_cat = |t: &&serde_json::Value| {
+                    t.get("category").and_then(|c| c.as_str()).is_some_and(|c| c.eq_ignore_ascii_case("game"))
+                };
+                let is_primary = |t: &&serde_json::Value| t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true);
+                // Prefer a direct `category == "game"` `.exe` over a `.NET` / external `launcher`
+                // task (e.g. The Witcher 2 lists Launcher.exe as primary and Bin//witcher2.exe as
+                // game), then fall back to `.bat`/`.cmd` game launchers (e.g. GOG DOSBox classics).
+                let chosen = arr
+                    .iter()
+                    .find(|t| is_exe_file_task(t) && is_game_cat(t) && is_primary(t))
+                    .or_else(|| arr.iter().find(|t| is_exe_file_task(t) && is_game_cat(t)))
+                    .or_else(|| arr.iter().find(|t| is_exe_file_task(t) && is_primary(t)))
+                    .or_else(|| arr.iter().find(|t| is_exe_file_task(t)))
+                    .or_else(|| arr.iter().find(|t| is_batch_file_task(t) && is_game_cat(t) && is_primary(t)))
+                    .or_else(|| arr.iter().find(|t| is_batch_file_task(t) && is_game_cat(t)))
+                    .or_else(|| arr.iter().find(|t| is_batch_file_task(t) && is_primary(t)))
+                    .or_else(|| arr.iter().find(|t| is_batch_file_task(t)));
+                if let Some(task) = chosen {
+                    if let Some(resolved) = resolve_gog_play_task(dir, task) {
+                        return Some((game_name, game_id, resolved));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve optional GOG launch arguments and working directory when `exe_path` matches the
+/// title's primary GOG `playTask` (including `.bat` DOSBox wrappers and `arguments`/`workingDir`).
+fn resolve_gog_handoff_launch(gog_root: &Path, exe_path: &Path) -> (Option<String>, Option<PathBuf>) {
+    let Some((_, _, task)) = find_gog_info_detailed(gog_root) else {
+        return (None, None);
+    };
+    let expected = gog_root.join(&task.exe_rel);
+    let norm = |p: &Path| strip_verbatim_prefix(&p.to_string_lossy()).replace('/', "\\").to_ascii_lowercase();
+    if norm(&expected) != norm(exe_path) {
+        return (None, None);
+    }
+    let wd = match &task.working_dir_rel {
+        Some(rel) => {
+            let candidate = gog_root.join(rel);
+            if candidate.is_dir() {
+                Some(candidate)
+            } else {
+                Some(gog_root.to_path_buf())
+            }
+        }
+        None if task.arguments.is_some() => Some(gog_root.to_path_buf()),
+        None => None,
+    };
+    (task.arguments, wd)
+}
+
 /// Resolve a GOG relative executable path (`Bin//witcher2.exe`) case-insensitively against disk
 /// so `MicrosoftGame.config` records the exact on-disk casing (`bin\witcher2.exe`).
 fn resolve_relative_ci(base: &Path, rel: &str) -> Option<String> {
@@ -916,55 +1122,7 @@ fn resolve_relative_ci(base: &Path, rel: &str) -> Option<String> {
 }
 
 fn find_gog_info(dir: &Path) -> Option<(String, String, String)> {
-    let rd = fs::read_dir(dir).ok()?;
-    for entry in rd.flatten() {
-        let name = entry.file_name();
-        let s = name.to_string_lossy();
-        if s.starts_with("goggame-") && s.ends_with(".info") {
-            let text = fs::read_to_string(entry.path()).ok()?;
-            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let game_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_owned();
-            let game_id = v.get("gameId").and_then(|x| x.as_str()).unwrap_or("00000001").trim().to_owned();
-            let tasks = v.get("playTasks").and_then(|x| x.as_array());
-            let mut exe_rel = String::new();
-            if let Some(arr) = tasks {
-                // Prefer a direct `category == "game"` executable over a `.NET` / external `launcher`
-                // task (e.g. The Witcher 2 lists Launcher.exe as primary and Bin//witcher2.exe as game).
-                let chosen = arr
-                    .iter()
-                    .find(|t| {
-                        is_exe_file_task(t)
-                            && t.get("category")
-                                .and_then(|c| c.as_str())
-                                .is_some_and(|c| c.eq_ignore_ascii_case("game"))
-                            && t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true)
-                    })
-                    .or_else(|| {
-                        arr.iter().find(|t| {
-                            is_exe_file_task(t)
-                                && t.get("category")
-                                    .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.eq_ignore_ascii_case("game"))
-                        })
-                    })
-                    .or_else(|| {
-                        arr.iter()
-                            .find(|t| is_exe_file_task(t) && t.get("isPrimary").and_then(|b| b.as_bool()) == Some(true))
-                    })
-                    .or_else(|| arr.iter().find(|t| is_exe_file_task(t)))
-                    .or_else(|| arr.first());
-                if let Some(task) = chosen {
-                    if let Some(p) = task.get("path").and_then(|x| x.as_str()) {
-                        exe_rel = p.trim().to_owned();
-                    }
-                }
-            }
-            if !exe_rel.is_empty() {
-                return Some((game_name, game_id, exe_rel));
-            }
-        }
-    }
-    None
+    find_gog_info_detailed(dir).map(|(name, id, task)| (name, id, task.exe_rel))
 }
 
 fn is_utility_exe_name(low: &str) -> bool {
@@ -1977,9 +2135,15 @@ pub fn write_pc_handoff(
     }
     let prefix_dir = root.join("prefix");
     ensure_dosdevices_storage_drives(&prefix_dir);
+    let gog_root = find_gog_root_dir(exe_path);
+    let (gog_args, gog_work_dir) =
+        gog_root.as_deref().map(|r| resolve_gog_handoff_launch(r, exe_path)).unwrap_or((None, None));
     let clean_exe_raw = strip_verbatim_prefix(&exe_path.to_string_lossy());
-    let work_dir_raw =
-        exe_path.parent().map(|p| strip_verbatim_prefix(&p.to_string_lossy())).unwrap_or_else(|| "C:\\XCL".into());
+    let work_dir_raw = gog_work_dir
+        .as_deref()
+        .or_else(|| exe_path.parent())
+        .map(|p| strip_verbatim_prefix(&p.to_string_lossy()))
+        .unwrap_or_else(|| "C:\\XCL".into());
     let clean_exe = ensure_drive_c_mount_links_and_map_path(&prefix_dir, &clean_exe_raw);
     let work_dir = ensure_drive_c_mount_links_and_map_path(&prefix_dir, &work_dir_raw);
 
@@ -2009,12 +2173,12 @@ pub fn write_pc_handoff(
 
     // Apply standard GOG metadata fixes (language sync for multi-language installers +
     // `goggame-*.script` registry/folder actions), walking up to 5 levels for deep binary trees.
-    if let Some(gog_root) = find_gog_root_dir(exe_path) {
+    if let Some(gog_root) = gog_root.as_deref() {
         let ui_lang = library::load_ui_settings(&library::ui_settings_file()).language;
-        if let Some(lang_label) = sync_gog_info_language(&gog_root, ui_lang) {
+        if let Some(lang_label) = sync_gog_info_language(gog_root, ui_lang) {
             println!("TrinityXSX: synced GOG game language to {lang_label}");
         }
-        let applied = apply_gog_script_registry(&gog_root, is_64bit);
+        let applied = apply_gog_script_registry(gog_root, is_64bit);
         if applied > 0 {
             println!("TrinityXSX: applied {applied} GOG script registry key(s)");
         }
@@ -2081,6 +2245,7 @@ pub fn write_pc_handoff(
     let profile_text = format_pc_handoff_profile(
         safe_name,
         &clean_exe,
+        gog_args.as_deref(),
         &work_dir,
         arch,
         gfx,
@@ -2202,6 +2367,7 @@ fn pc_input_section(mode: PcInputMode, is_config_tool: bool) -> &'static str {
 fn format_pc_handoff_profile(
     safe_name: &str,
     clean_exe: &str,
+    arguments: Option<&str>,
     work_dir: &str,
     arch: &str,
     gfx: &str,
@@ -2215,6 +2381,7 @@ fn format_pc_handoff_profile(
 ) -> String {
     let input_block = pc_input_section(resolved_mode, is_config_tool);
     let view_mode = if is_config_tool { "desktop" } else { "window" };
+    let args_line = arguments.and_then(sanitize_profile_args).map(|a| format!("arguments = {a}\n")).unwrap_or_default();
     let dx_list = if use_local_ddraw {
         "d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8,ddraw"
     } else {
@@ -2239,6 +2406,7 @@ fn format_pc_handoff_profile(
          id = {PC_PROFILE_ID}\n\
          name = {safe_name}\n\
          executable = {clean_exe}\n\
+         {args_line}\
          working_directory = {work_dir}\n\
          dll_overrides = {dx_list}=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input,krnl386.exe16=d\n\
          prefix = default\n\
@@ -2365,6 +2533,7 @@ mod tests {
         let profile = format_pc_handoff_profile(
             "Hollow Knight: Silksong",
             "Z:\\mnt\\ext1\\xboxseries\\silksong\\Hollow Knight Silksong.exe",
+            None,
             "Z:\\mnt\\ext1\\xboxseries\\silksong",
             "pe64",
             "dxvk",
@@ -2396,6 +2565,7 @@ mod tests {
         let profile = format_pc_handoff_profile(
             "Classic Strategy",
             "Z:\\mnt\\ext1\\xboxseries\\rts\\game.exe",
+            None,
             "Z:\\mnt\\ext1\\xboxseries\\rts",
             "pe32",
             "dxvk",
@@ -2422,6 +2592,7 @@ mod tests {
         let arrows = format_pc_handoff_profile(
             "Classic Platformer",
             "Z:\\games\\plat\\game.exe",
+            None,
             "Z:\\games\\plat",
             "pe32",
             "dxvk",
@@ -2442,6 +2613,7 @@ mod tests {
         let fps = format_pc_handoff_profile(
             "Classic FPS",
             "Z:\\games\\fps\\game.exe",
+            None,
             "Z:\\games\\fps",
             "pe32",
             "dxvk",
@@ -2467,6 +2639,7 @@ mod tests {
         let profile = format_pc_handoff_profile(
             "Setup Utility",
             "Z:\\games\\foo\\R3_Setup_DX8.exe",
+            None,
             "Z:\\games\\foo",
             "pe32",
             "dxvk",
@@ -2501,6 +2674,7 @@ mod tests {
         let profile = format_pc_handoff_profile(
             "Classic 2D Strategy",
             "C:\\ext1\\classic\\game.exe",
+            None,
             "C:\\ext1\\classic",
             "pe32",
             "dxvk",
@@ -2513,6 +2687,53 @@ mod tests {
             "1440x1080",
         );
         assert!(profile.contains("desktop = 1440x1080\n"));
+    }
+
+    #[test]
+    fn finalize_gog_resolves_batch_dosbox_launcher_and_handoff_arguments() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-dosbox-bat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("dosbox_windows")).unwrap();
+        fs::write(tmp.join("dosbox_windows").join("dosbox.exe"), b"MZ\x90\x00").unwrap();
+        fs::write(
+            tmp.join("PlayClassic.bat"),
+            ".\\dosbox_windows\\dosbox \"CLASSIC.EXE\" -conf \"dosbox_classic.conf\" -noconsole -exit\r\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("goggame-999999.info"),
+            r#"{"gameId":"999999","name":"Classic DOS","playTasks":[{"category":"game","isPrimary":true,"path":"PlayClassic.bat","type":"FileTask"}]}"#,
+        )
+        .unwrap();
+
+        let fin = finalize_gog_game(&tmp, "Fallback").unwrap();
+        assert_eq!(fin.name, "Classic DOS");
+        assert_eq!(fin.executable_rel, "dosbox_windows\\dosbox.exe");
+        let xml = fs::read_to_string(tmp.join("MicrosoftGame.config")).unwrap();
+        assert!(xml.contains("Name=\"dosbox_windows\\dosbox.exe\""));
+
+        let (args, wd) = resolve_gog_handoff_launch(&tmp, &tmp.join("dosbox_windows").join("dosbox.exe"));
+        assert_eq!(args.as_deref(), Some("\"CLASSIC.EXE\" -conf \"dosbox_classic.conf\" -noconsole -exit"));
+        assert_eq!(wd.as_deref(), Some(tmp.as_path()));
+
+        let profile = format_pc_handoff_profile(
+            "Classic DOS",
+            "C:\\ext1\\xboxseries\\classic\\dosbox_windows\\dosbox.exe",
+            args.as_deref(),
+            "C:\\ext1\\xboxseries\\classic",
+            "pe32",
+            "dxvk",
+            "off",
+            "true",
+            PcInputMode::MouseKeyboard,
+            false,
+            false,
+            Some("C:/XCL/dxvk-pe32.conf"),
+            "1920x1080",
+        );
+        assert!(profile.contains("arguments = \"CLASSIC.EXE\" -conf \"dosbox_classic.conf\" -noconsole -exit\n"));
+        assert!(profile.contains("working_directory = C:\\ext1\\xboxseries\\classic\n"));
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

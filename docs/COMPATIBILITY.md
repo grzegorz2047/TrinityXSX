@@ -10,6 +10,7 @@ The library shows these statuses and applies the listed preset to a game with no
 | Title | Identity, version & TitleId | Status | TrinityXSX | Notes |
 | --- | --- | --- | --- | --- |
 | **Age of Empires II: The Conquerors** | `PC.AOE2-CON` `1.5` | **Playable** | v0.2.12 | 32-bit fixed-base PE playable with audio and DualSense Mouse & Keyboard mode; pick the expansion executable in R1 Game info. |
+| **Breach 2** | `GOG.1789244239` `1.0` (`9F9184AD`) | **Playable** | v0.2.20 | MS-DOS classic running via bundled Windows DOSBox with automatic GOG .bat launcher and argument resolution plus DualSense Mouse & Keyboard controls. |
 | **Crysis Remastered** | `GOG.1103900211` `1.0.0.0` (`38F969C0`) | **Playable** | v0.2.19 | 64-bit DX11 (DXVK) 1080p gameplay with automatic DualSense XInput, rumble and audio verified (~1.5 GiB dmem); lower Raytracing quality for higher framerate. |
 | **Cuphead** | `GOG.1963513391` `1.3.9` (`931EF12D`) | **Playable** | v0.2.19 | Smooth 1080p Unity gameplay with automatic DualSense XInput controls and audio via GOG PC handoff. |
 | **Gothic 2 Gold** | `GOG.1207658718` `2.7` (`645E6961`) | **Playable** | v0.2.20 | 1080p gameplay via bundled ddraw.dll and DXVK D3D9 with audio; use Arrows + Action input preset in R1 Game info (D-pad arrows, Triangle Enter, R1 Ctrl action, Cross Space). |
