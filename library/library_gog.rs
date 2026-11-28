@@ -205,13 +205,27 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
     let opt_size = read_u16_le(&header, pe_off + 20).unwrap_or(0) as usize;
     let opt_off = pe_off + 24;
     let magic = read_u16_le(&header, opt_off).unwrap_or(0);
-    let (is_64bit, data_dir_off) = match magic {
-        0x20B => (true, opt_off + 112), // PE32+
-        0x10B => (false, opt_off + 96), // PE32
+    let (is_64bit, image_base, num_rva_off, data_dir_off) = match magic {
+        0x20B => {
+            let ib = read_u32_le(&header, opt_off + 24).unwrap_or(0);
+            (true, ib, opt_off + 108, opt_off + 112) // PE32+
+        }
+        0x10B => {
+            let ib = read_u32_le(&header, opt_off + 28).unwrap_or(0);
+            (false, ib, opt_off + 92, opt_off + 96) // PE32
+        }
         _ => return None,
     };
 
+    let num_data_dirs = read_u32_le(&header, num_rva_off).unwrap_or(0) as usize;
     let import_rva = read_u32_le(&header, data_dir_off + 8).unwrap_or(0);
+    // Delay-Load Import Directory (DataDirectory[13], offset 13 * 8 = 104): used heavily by
+    // Unreal Engine 4/5 and MSVC `/DELAYLOAD` builds for `XINPUT1_4.dll`, `d3d12.dll`, `d3d11.dll`.
+    let delay_import_rva = if num_data_dirs == 0 || num_data_dirs > 13 {
+        read_u32_le(&header, data_dir_off + 13 * 8).unwrap_or(0)
+    } else {
+        0
+    };
     let sec_off = opt_off + opt_size;
     let mut sections = Vec::with_capacity(num_sections.min(64));
     for i in 0..num_sections.min(64) {
@@ -236,13 +250,31 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
     };
 
     let mut imports = Vec::new();
+    let mut name_buf = [0u8; 128];
+    let mut push_dll_at_rva = |f: &mut File, name_rva: u32| {
+        if let Some(name_off) = rva_to_off(name_rva) {
+            if f.seek(SeekFrom::Start(name_off as u64)).is_ok() {
+                let rn = f.read(&mut name_buf).unwrap_or(0);
+                let slice = &name_buf[..rn];
+                let end = slice.iter().position(|&b| b == 0).unwrap_or(rn);
+                if end > 0 {
+                    if let Ok(s) = std::str::from_utf8(&slice[..end]) {
+                        let low = s.to_ascii_lowercase();
+                        if !imports.contains(&low) {
+                            imports.push(low);
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     if import_rva != 0 {
         if let Some(imp_file_off) = rva_to_off(import_rva) {
             let mut desc_buf = vec![0u8; 256 * 20];
             if f.seek(SeekFrom::Start(imp_file_off as u64)).is_ok() {
                 let n = f.read(&mut desc_buf).unwrap_or(0);
                 desc_buf.truncate(n);
-                let mut name_buf = [0u8; 128];
                 let mut idx = 0usize;
                 while idx * 20 + 20 <= desc_buf.len() {
                     let desc = idx * 20;
@@ -251,18 +283,32 @@ fn read_pe_imports(pe_path: &Path) -> Option<(bool, Vec<String>)> {
                     if name_rva == 0 && ft_rva == 0 {
                         break;
                     }
-                    if let Some(name_off) = rva_to_off(name_rva) {
-                        if f.seek(SeekFrom::Start(name_off as u64)).is_ok() {
-                            let rn = f.read(&mut name_buf).unwrap_or(0);
-                            let slice = &name_buf[..rn];
-                            let end = slice.iter().position(|&b| b == 0).unwrap_or(rn);
-                            if end > 0 {
-                                if let Ok(s) = std::str::from_utf8(&slice[..end]) {
-                                    imports.push(s.to_ascii_lowercase());
-                                }
-                            }
-                        }
+                    push_dll_at_rva(&mut f, name_rva);
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    if delay_import_rva != 0 {
+        if let Some(delay_file_off) = rva_to_off(delay_import_rva) {
+            let mut desc_buf = vec![0u8; 256 * 32];
+            if f.seek(SeekFrom::Start(delay_file_off as u64)).is_ok() {
+                let n = f.read(&mut desc_buf).unwrap_or(0);
+                desc_buf.truncate(n);
+                let mut idx = 0usize;
+                while idx * 32 + 32 <= desc_buf.len() {
+                    let desc = idx * 32;
+                    let attrs = read_u32_le(&desc_buf, desc).unwrap_or(0);
+                    let raw_name = read_u32_le(&desc_buf, desc + 4).unwrap_or(0);
+                    if raw_name == 0 {
+                        break;
                     }
+                    // `grAttrs & 1` indicates RVA-based descriptors (standard PE32/PE32+); legacy
+                    // VC6 PE32 descriptors stored virtual addresses relative to `ImageBase`.
+                    let name_rva =
+                        if (attrs & 1) != 0 || is_64bit { raw_name } else { raw_name.wrapping_sub(image_base) };
+                    push_dll_at_rva(&mut f, name_rva);
                     idx += 1;
                 }
             }
@@ -1988,8 +2034,10 @@ pub fn write_pc_handoff(
         if is_64bit {
             let conf_path = prefix_dir.join("drive_c").join("XCL").join("dxvk-pe64.conf");
             const PE64_DXVK_CONF: &str =
-                "# Auto-generated by TrinityXSX for 64-bit DXVK titles on PS5 (reduces kernel open-file pressure)\n\
-                 dxvk.numCompilerThreads = 2\n";
+                "# Auto-generated by TrinityXSX for 64-bit DXVK/DXGI titles on PS5 (12 GiB UMA shared CPU+GPU)\n\
+                 dxvk.numCompilerThreads = 2\n\
+                 dxgi.maxDeviceMemory = 4096\n\
+                 dxgi.maxSharedMemory = 1024\n";
             if fs::read_to_string(&conf_path).ok().as_deref() != Some(PE64_DXVK_CONF) {
                 let _ = fs::write(&conf_path, PE64_DXVK_CONF);
             }
@@ -2155,6 +2203,18 @@ fn format_pc_handoff_profile(
         "d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8"
     };
     let dxvk_conf_line = dxvk_conf_path.map(|p| format!("env = DXVK_CONFIG_FILE={p}\n")).unwrap_or_default();
+    // PS5 RADV lacks hardware PRT (`has_sparse_prt=false`), so vkd3d-proton caps TiledResourcesTier
+    // at 1 and drops MaxSupportedFeatureLevel from 12_1 down to 11_1 (0xb100) even though RADV
+    // natively supports SM 6.8, ResourceBindingTier 3, ROVs, ConservativeRasterizationTier 3, and
+    // DXR 1.1. Modern D3D12 / UE5 SM6 titles reject adapters below 12_0; overriding to 12_1 unlocks
+    // them without falsely claiming VRS/12_2. We also disable experimental VK_EXT_descriptor_heap
+    // (falling back to prospero-win's validated VK_EXT_descriptor_buffer path) and DXR on PS5 RADV
+    // to prevent shader-compilation hangs/faults; both env vars are ignored by DX8-11 games.
+    let vkd3d_env_lines = if arch == "pe64" && gfx == "dxvk" {
+        "env = VKD3D_FEATURE_LEVEL=12_1\nenv = VKD3D_CONFIG=no_descriptor_heap,nodxr\n"
+    } else {
+        ""
+    };
     format!(
         "; Generated dynamically by TrinityXSX for PC/GOG game handoff\n\
          [application]\n\
@@ -2183,6 +2243,7 @@ fn format_pc_handoff_profile(
          [debug]\n\
          winedebug = err+all\n\
          env = VKD3D_SHADER_CACHE_PATH=C:/XCL/cache/pc-game\n\
+         {vkd3d_env_lines}\
          env = DXVK_LOG_PATH=C:/XCL\n\
          {dxvk_conf_line}"
     )
@@ -2300,7 +2361,11 @@ mod tests {
         assert!(profile.contains(
             "dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8=n,b;xinput1_1,xinput1_2,xinput1_3,xinput1_4,xinput9_1_0=b;windows.gaming.input,krnl386.exe16=d"
         ));
+        assert!(profile.contains("winedebug = err+all\n"));
+        assert!(profile.contains("env = VKD3D_FEATURE_LEVEL=12_1\n"));
+        assert!(profile.contains("env = VKD3D_CONFIG=no_descriptor_heap,nodxr\n"));
         assert!(profile.contains("env = DXVK_CONFIG_FILE=C:/XCL/dxvk-pe64.conf\n"));
+        assert!(profile.lines().filter(|l| l.starts_with("env = ")).count() <= 5);
         assert!(profile.contains("desktop = 1920x1080\n"));
         assert!(profile.contains("view = window\n"));
         assert!(profile.contains("[runtime]\nthread_scheduling = true"));
@@ -2325,6 +2390,7 @@ mod tests {
             "1920x1080",
         );
         assert!(profile.contains("dll_overrides = d3d12,d3d12core,dxgi,d3d11,d3d10core,d3d9,d3d8,ddraw=n,b;"));
+        assert!(!profile.contains("VKD3D_FEATURE_LEVEL"));
         assert!(profile.contains("env = DXVK_CONFIG_FILE=C:/XCL/dxvk-pe32.conf\n"));
         assert!(profile.contains("[input]\nmode = keyboard\nmouse = left_stick\nmouse_speed = 900\n"));
         assert!(profile.contains("cross = mouse_left\n"));
@@ -2540,6 +2606,40 @@ mod tests {
             .unwrap();
         assert_eq!(
             detect_pe_kind(&stub_exe),
+            PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, has_gamepad_api: true }
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_pe_kind_reads_delay_load_xinput_and_d3d12_imports() {
+        let tmp = std::env::temp_dir().join(format!("trinityxsx-delay-import-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // Build a PE32+ with OPENGL32.dll in static imports and XINPUT1_4.dll + d3d12.dll only
+        // in the Delay-Load Import Directory (DataDirectory[13]), matching Unreal Engine 4/5.
+        let mut pe = build_minimal_pe64_with_imports(&["KERNEL32.dll", "OPENGL32.dll"]);
+        // NumberOfRvaAndSizes at opt_off (0x98) + 108 = 0x104 -> set 16
+        pe[0x104..0x108].copy_from_slice(&16u32.to_le_bytes());
+        // DataDirectory[13] at 0x98 + 112 + 13*8 = 0x170 -> point to RVA 0x1200 (file off 0x400)
+        pe[0x170..0x174].copy_from_slice(&0x1200u32.to_le_bytes());
+        pe[0x174..0x178].copy_from_slice(&96u32.to_le_bytes());
+        let delay_dlls = ["XINPUT1_4.dll", "d3d12.dll"];
+        let mut str_off = 0x500usize;
+        for (i, dll) in delay_dlls.iter().enumerate() {
+            let desc = 0x400 + i * 32;
+            let name_rva = 0x1000u32 + (str_off - 0x200) as u32;
+            pe[desc..desc + 4].copy_from_slice(&1u32.to_le_bytes()); // grAttrs = dlattrRva
+            pe[desc + 4..desc + 8].copy_from_slice(&name_rva.to_le_bytes());
+            pe[str_off..str_off + dll.len()].copy_from_slice(dll.as_bytes());
+            pe[str_off + dll.len()] = 0;
+            str_off += dll.len() + 1;
+        }
+        let exe_path = tmp.join("UnrealGame.exe");
+        fs::write(&exe_path, &pe).unwrap();
+        assert_eq!(
+            detect_pe_kind(&exe_path),
             PeLaunchKind::PcNative { is_64bit: true, prefer_opengl: false, has_gamepad_api: true }
         );
         let _ = fs::remove_dir_all(&tmp);
