@@ -1,54 +1,57 @@
-# Build and publish a complete GitHub Release (including standalone PPSA83601.ffpkg.zip)
-# when pushing a v* tag or running manually.
-name: Release
+# Build and stage a DRAFT GitHub Release (including standalone PPSA83601.ffpkg.zip)
+# from a release/X.Y.Z branch. Tags do not trigger this workflow: publish the draft
+# by hand after testing the built image on a PS5, and GitHub creates tag vX.Y.Z at
+# the exact tested commit.
+name: Release (draft)
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - 'release/*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g. v0.2.1)'
-        required: true
-        type: string
-      prerelease:
-        description: 'Mark as prerelease'
-        default: true
-        type: boolean
 
-permissions:
-  contents: write
+permissions: {}
+
+# One run per release branch at a time so two runs never create duplicate drafts.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  standalone:
-    name: Standalone tests & prospero-win patches
+  prepare:
+    name: Version, metadata & release notes
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      content_version: ${{ steps.meta.outputs.content_version }}
     steps:
       - uses: actions/checkout@v7
-      - run: python3 -m unittest standalone.test_standalone -v
-      - run: bash -n tools/build-standalone-ffpkg.sh
-      - name: Verify sce_sys/param.json contentVersion matches release tag
+        with:
+          persist-credentials: false
+
+      - name: Host tests (release guard, standalone & compatibility)
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          python3 - "$TAG" <<'PY'
-          import json, re, sys
-          from pathlib import Path
-          tag = sys.argv[1]
-          m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", tag)
-          assert m, f"Release tag {tag!r} does not match vX.Y.Z"
-          maj, minor, patch = (int(x) for x in m.groups())
-          expected = f"{max(maj, 1):02d}.{minor:03d}.{patch:03d}"
-          param = json.loads(Path("sce_sys/param.json").read_text(encoding="utf-8-sig"))
-          actual = param.get("contentVersion")
-          assert param.get("titleId") == "PPSA83601", f"unexpected titleId: {param.get('titleId')}"
-          assert actual == expected, (
-              f"sce_sys/param.json contentVersion={actual!r} does not match release tag {tag!r} (expected {expected!r}). "
-              "Bump sce_sys/param.json before tagging!"
-          )
-          print(f"Release version guard OK: tag={tag} contentVersion={actual}")
-          PY
+          python3 -m unittest tools.test_release_guard -v
+          python3 -m unittest standalone.test_standalone -v
+          python3 tools/compat.py --check
+          bash -n tools/build-standalone-ffpkg.sh
+
+      - name: Validate version from release/X.Y.Z branch & repo metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -I tools/release_guard.py version --ref "$GITHUB_REF")
+          CONTENT_VERSION=$(python3 -I tools/release_guard.py content-version --version "$VERSION")
+          python3 -I tools/release_guard.py check-repo --version "$VERSION" --root .
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "content_version=$CONTENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Prepared draft release v$VERSION (contentVersion=$CONTENT_VERSION) from $GITHUB_SHA ($GITHUB_REF_NAME)"
+
       - name: Verify patches/prospero-win apply cleanly
         run: |
           set -euo pipefail
@@ -60,18 +63,31 @@ jobs:
           for p in patches/prospero-win/*.patch; do
             git -C "$tmp/pw" apply --whitespace=nowarn "$PWD/$p"
           done
+          python3 tools/netinput-sender/make_page_c.py --check "$tmp/pw/src/pw_webinput_page.c"
+          (cd "$tmp/pw" && for t in "tests/test_pw_netinput.c src/pw_netinput.c" \
+               "tests/test_pw_webinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_netinput.c" \
+               "-DPW_NETINPUT_PS5_HOST_TEST tests/test_pw_netinput_ps5.c native/pw_netinput_ps5.c src/pw_netinput.c" \
+               "tests/test_pw_game_profile.c src/pw_game_profile.c src/pw_app_profile.c" \
+               "tests/test_pw_game_menu.c src/pw_game_menu.c" \
+               "tests/test_pw_launcher_render.c src/pw_launcher_render.c"; do
+             cc -std=c11 -O1 -Wall -Wextra -Werror $t -o test && ./test; done)
           rm -rf "$tmp"
 
   xcl:
     name: Build XCL (release)
+    needs: [prepare]
     runs-on: windows-2025
     timeout-minutes: 60
+    permissions:
+      contents: read
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Restore cached XCL output
         id: out
@@ -120,11 +136,16 @@ jobs:
 
   vkd3d-proton:
     name: Build vkd3d-proton (MSYS2 UCRT64)
+    needs: [prepare]
     runs-on: windows-2025
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Restore cached vkd3d-proton output
         id: out
@@ -181,11 +202,16 @@ jobs:
 
   innoextract:
     name: Build trinity_innoextract.dll (MSYS2 UCRT64)
+    needs: [prepare]
     runs-on: windows-2025
     timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Restore cached innoextract output
         id: out
@@ -223,12 +249,17 @@ jobs:
 
   netinput-sender:
     name: txin-sender.exe (keyboard & mouse over the LAN)
+    needs: [prepare]
     runs-on: windows-2025
     timeout-minutes: 20
+    permissions:
+      contents: read
     env:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Rust (stable, MSVC)
         run: |
@@ -251,11 +282,15 @@ jobs:
 
   standalone-ffpkg:
     name: Build standalone PPSA83601.ffpkg
-    needs: [xcl, vkd3d-proton, innoextract, standalone]
+    needs: [prepare, xcl, vkd3d-proton, innoextract]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -280,7 +315,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .work/wine-cache
-          key: wine-cache-v3-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'patches/prospero-win/0014-*', 'patches/prospero-win/0017-*', 'patches/prospero-win/0018-*', 'patches/prospero-win/0019-*', 'standalone/native/build_prefix_seed.py') }}
+          key: wine-cache-v3-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'patches/prospero-win/0014-*', 'patches/prospero-win/0017-*', 'patches/prospero-win/0018-*', 'patches/prospero-win/0019-*', 'patches/prospero-win/0020-*', 'standalone/native/build_prefix_seed.py') }}
 
       - name: Fetch DXVK and DXC
         run: tools/fetch-deps.sh
@@ -299,19 +334,11 @@ jobs:
           path: innoextract
 
       - name: Assemble XCL runtime & build PPSA83601.ffpkg
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          CONTENT_VERSION: ${{ needs.prepare.outputs.content_version }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
-          CONTENT_VERSION=$(python3 - "$TAG" <<'PY'
-          import re, sys
-          m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", sys.argv[1])
-          if m:
-              maj, minor, patch = (int(x) for x in m.groups())
-              print(f"{max(maj, 1):02d}.{minor:03d}.{patch:03d}")
-          else:
-              print("01.000.016")
-          PY
-          )
           echo "Building PPSA83601.ffpkg for ${TAG} (contentVersion=${CONTENT_VERSION})"
           tools/make-ps5-package.sh
           bash tools/build-standalone-ffpkg.sh \
@@ -321,6 +348,9 @@ jobs:
             --wine-cache .work/wine-cache \
             --output dist/ffpkg/PPSA83601.ffpkg \
             --zip-output dist/ffpkg/PPSA83601.zip
+          python3 -I tools/release_guard.py check-zip-sce-sys \
+            --zip dist/ffpkg/PPSA83601.zip \
+            --sce-sys sce_sys
           (cd dist/ffpkg && zip -6 "PPSA83601-${TAG}.ffpkg.zip" PPSA83601.ffpkg)
           rm -f dist/ffpkg/PPSA83601.ffpkg
           ls -lh dist/ffpkg/
@@ -333,15 +363,20 @@ jobs:
             dist/ffpkg/PPSA83601-*.ffpkg.zip
           if-no-files-found: error
 
-  publish:
-    name: Assemble & publish GitHub Release
-    needs: [xcl, vkd3d-proton, innoextract, standalone, standalone-ffpkg, netinput-sender]
+  package:
+    name: Assemble release files & SHA256SUMS.txt
+    needs: [prepare, xcl, vkd3d-proton, innoextract, standalone-ffpkg, netinput-sender]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/cache@v6
         with:
@@ -369,83 +404,104 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: standalone-ffpkg
-          path: release-assets
+          path: dist/release
 
       - uses: actions/download-artifact@v8
         with:
           name: txin-sender
           path: txin-sender
 
-      - name: Assemble release assets
+      - name: Collect flat release directory & hash every asset
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag || github.ref_name }}"
-          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
           tools/make-ps5-package.sh
-          mkdir -p release-assets
-          cp xcl/target/release/xcl.exe "release-assets/xcl-library-${TAG}.exe"
-          cp txin-sender/txin-sender.exe "release-assets/txin-sender-${TAG}.exe"
-          (cd dist/prospero-win && zip -qr "../../release-assets/TrinityXSX-prospero-win-${TAG}.zip" .)
-          (
-            cd release-assets
-            sha256sum "PPSA83601.zip" "PPSA83601-${TAG}.ffpkg.zip" "xcl-library-${TAG}.exe" "txin-sender-${TAG}.exe" "TrinityXSX-prospero-win-${TAG}.zip" > "SHA256SUMS-${TAG}.txt"
-          )
-          cat "release-assets/SHA256SUMS-${TAG}.txt"
+          mkdir -p dist/release
+          cp xcl/target/release/xcl.exe "dist/release/xcl-library-${TAG}.exe"
+          cp txin-sender/txin-sender.exe "dist/release/txin-sender-${TAG}.exe"
+          (cd dist/prospero-win && zip -qr "../../dist/release/TrinityXSX-prospero-win-${TAG}.zip" .)
+          git archive --format=tar.gz --prefix="TrinityXSX-${TAG}/" \
+            -o "dist/release/TrinityXSX-${TAG}-source.tar.gz" "$GITHUB_SHA"
+          python3 -I tools/release_guard.py sums dist/release
+          ls -lh dist/release/
 
-      - name: Create or update GitHub Release (with retry)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: trinityxsx-${{ needs.prepare.outputs.version }}-release
+          path: dist/release/
+          if-no-files-found: error
+
+  draft:
+    name: Create or update draft GitHub Release
+    needs: [prepare, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: trinityxsx-${{ needs.prepare.outputs.version }}-release
+          path: dist/release
+
+      - name: Verify every release file against SHA256SUMS.txt
+        run: python3 -I tools/release_guard.py verify dist/release
+
+      - name: Create or update draft release (never touches a published release)
         run: |
           set -euo pipefail
-          . ./pins.env
-          XCL_LAST=$(ls patches/xcl/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
-          PW_LAST=$(ls patches/prospero-win/[0-9][0-9][0-9][0-9]-*.patch | sort | tail -n 1 | xargs basename | cut -c1-4)
-          cat > release-notes.md <<EOF
-          ## What's new in TrinityXSX ${RELEASE_TAG}
+          shopt -s inherit_errexit
+          guard() { python3 -I tools/release_guard.py "$@"; }
+          view="$RUNNER_TEMP/release.json"
 
-          - **Fixed 32-bit Non-Relocatable PC Games (\`ps5-pie-high.ld\`):** Linked \`pw_runner.bin\` above 4 GiB (\`0x100000000\`, matching upstream \`prospero-win\`), freeing \`0x00400000\` so classic fixed-base PE32 games (such as *Worms Forts: Under Siege* and *Age of Empires II*) no longer fail with \`STATUS_CONFLICTING_ADDRESSES\` (\`0xC0000018\`).
-          - **Bundled Wine Mono \`${WINE_MONO_VERSION}\` (.NET / C++/CLI / XNA support):** \`PPSA83601.ffpkg\` bundles open-source Wine Mono \`${WINE_MONO_VERSION}\` (32-bit & 64-bit) under read-only \`/app0/win/wine/share/wine/mono\`. Added *The Witcher 2: Assassins of Kings Enhanced Edition* (GOG \`3.5.0.26\`, locked 60 FPS 1080p) to \`library/compat.toml\` as Playable.
-          - **Live DualSense Input Mode Toggle & Xbox Back/Select Fix (Touchpad patch \`0015\`):** Right-half Touchpad (or \`L3 + R3\`) opens **TRINITYXSX MENU** with live \`GAMEPAD (XINPUT)\` ⇄ \`MOUSE+KB\` switching; left-half Touchpad sends **Xbox \`Back / Select / View\`** (\`0x0020\`) directly to the game.
-          - **Generic PC/GOG Executable & Controls Selectors:** Multi-\`.exe\` PC games now offer an **Executable** picker right inside **Game info (\`R1\`)** alongside **PC Controls** (\`Auto\` / \`Gamepad (XInput)\` / \`Mouse & Keyboard\`), persisted in \`ui_settings.toml\` with zero title hardcoding.
-
-          ### Included CI-built assets
-          - \`PPSA83601.zip\` — standalone PS5 app folder (\`PPSA83601/\`) for ProsperoStore and \`/data/homebrew/PPSA83601\`.
-          - \`PPSA83601-${RELEASE_TAG}.ffpkg.zip\` — standalone UFS2 image (\`fsck_ufs\` verified) for \`/mnt/ext1/PPSA83601.ffpkg\`.
-          - \`xcl-library-${RELEASE_TAG}.exe\` — drop-in XCL library + runtime binary for \`/data/homebrew/PPSA83601/prefix/drive_c/XCL/xcl-library.exe\`.
-          - \`txin-sender-${RELEASE_TAG}.exe\` — run it on a Windows PC to play with its keyboard and mouse: it opens a page in the browser (full screen, Ctrl+Alt+F12 starts capturing, holding Esc for 1.5 s always stops it).
-          - \`TrinityXSX-prospero-win-${RELEASE_TAG}.zip\` — patched XCL + vkd3d-proton + DXVK + DXC runtime bundle.
-          - \`SHA256SUMS-${RELEASE_TAG}.txt\` — SHA-256 checksums for all release assets.
-
-          ### Pinned upstream revisions
-          - **XCL:** \`${XCL_REV}\` (+ patches \`0001\`..\`${XCL_LAST}\`)
-          - **vkd3d-proton:** \`${VKD3D_REV}\` (dxil-spirv \`${DXIL_SPIRV_REV}\`)
-          - **DXVK:** \`v${DXVK_VERSION}\` · **DXC:** \`${DXC_TAG}\` · **Wine Mono:** \`${WINE_MONO_VERSION}\`
-          - **prospero-win:** \`${PROSPERO_WIN_TAG}\` (\`${PROSPERO_WIN_REV}\` + patches \`0001\`..\`${PW_LAST}\`)
-          - **PS5-Lapy-JB-Daemon:** \`${LAPY_REV}\`
-
-          No games, keys, BIOS, or console SDK files are included.
-          EOF
-
-          publish_once() {
-            if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-              gh release upload "${RELEASE_TAG}" release-assets/* --clobber
-            else
-              PRERELEASE_FLAG="--prerelease"
-              if [ "${{ inputs.prerelease }}" = "false" ]; then
-                PRERELEASE_FLAG=""
-              fi
-              gh release create "${RELEASE_TAG}" release-assets/* \
-                --title "TrinityXSX ${RELEASE_TAG}" \
-                --notes-file release-notes.md \
-                $PRERELEASE_FLAG
-            fi
+          decide() {
+            local code=0
+            gh release view "$TAG" --json tagName,isDraft,isImmutable,targetCommitish,assets \
+              > "$view" 2> "$RUNNER_TEMP/release.err" || code=$?
+            git -c credential.helper= -c credential.helper='!gh auth git-credential' \
+              ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" > "$RUNNER_TEMP/tags.txt" \
+              || { echo "::error::git ls-remote --tags failed" >&2; return 1; }
+            guard decide --tag "$TAG" --sha "$GITHUB_SHA" --view-exit "$code" \
+              --view-stdout "$view" --view-stderr "$RUNNER_TEMP/release.err" \
+              --remote-tag "$RUNNER_TEMP/tags.txt"
           }
 
-          for attempt in 1 2 3 4; do
-            if publish_once; then
-              exit 0
-            fi
-            delay=$((attempt * 15))
-            echo "GitHub Release API attempt ${attempt} failed; retrying in ${delay}s..." >&2
-            sleep "$delay"
-          done
-          echo "Failed to publish release ${RELEASE_TAG} after 4 attempts" >&2
-          exit 1
+          notes="docs/release-notes/${TAG}.md"
+          title="TrinityXSX ${TAG}"
+          action=$(decide)
+          echo "Release ${TAG}: ${action}"
+
+          if [[ $action == create ]]; then
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$title" \
+              --notes-file "$notes" dist/release/*
+          else
+            # Never pass --draft on edit: a release published between checks must not be reverted.
+            gh release edit "$TAG" --target "$GITHUB_SHA" --title "$title" --notes-file "$notes"
+            [[ $(decide) == update ]]
+            gh release upload "$TAG" dist/release/* --clobber
+            [[ $(decide) == update ]]
+            guard stale dist/release --view-stdout "$view" | while IFS= read -r name; do
+              echo "::warning::draft $TAG still has asset $name, which this run did not upload"
+            done
+          fi
+
+          gh release view "$TAG" --json isDraft,url,targetCommitish,assets \
+            -q '"draft: \(.isDraft)  target: \(.targetCommitish)  assets: \(.assets | length)\n\(.url)"'
+
+          {
+            echo "### Draft release ${TAG} (${action})"
+            echo
+            echo "Commit \`${GITHUB_SHA}\`; verify on PS5, then publish the draft by hand (GitHub creates tag \`${TAG}\`)."
+            echo
+            echo '```'
+            cat dist/release/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
