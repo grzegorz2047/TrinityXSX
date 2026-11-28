@@ -1929,9 +1929,27 @@ fn ensure_drive_c_mount_links_and_map_path(prefix_dir: &Path, win_path: &str) ->
     let table_path = drive_c.join(".pw-symlinks");
     let existing = fs::read_to_string(&table_path).unwrap_or_default();
     let mut lines: Vec<String> = existing.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect();
-    let entry_prefix = format!("{link_name}\t");
-    if !lines.iter().any(|l| l.starts_with(&entry_prefix)) {
-        lines.push(format!("{link_name}\t{unix_target}"));
+    // prospero-win's `.pw-symlinks` table is case-sensitive and invisible to `readdir()`
+    // case-folding, so legacy Windows engines that uppercase path components (`C:\EXT1\...`)
+    // fail with ENOENT unless uppercase/titlecase aliases are present alongside lowercase.
+    let upper = link_name.to_ascii_uppercase();
+    let mut title_chars = link_name.chars();
+    let title = match title_chars.next() {
+        Some(first) => format!("{}{}", first.to_ascii_uppercase(), title_chars.as_str()),
+        None => String::new(),
+    };
+    let mut changed = false;
+    for alias in [link_name, upper.as_str(), title.as_str()] {
+        if alias.is_empty() {
+            continue;
+        }
+        let entry_prefix = format!("{alias}\t");
+        if !lines.iter().any(|l| l.starts_with(&entry_prefix)) {
+            lines.push(format!("{alias}\t{unix_target}"));
+            changed = true;
+        }
+    }
+    if changed {
         let mut content = lines.join("\n");
         content.push('\n');
         if fs::write(&table_path, content).is_err() {
@@ -2767,12 +2785,15 @@ mod tests {
         let mapped = ensure_drive_c_mount_links_and_map_path(&tmp, "Z:\\mnt\\ext1\\xboxseries\\demo\\Game.exe");
         assert_eq!(mapped, "C:\\ext1\\xboxseries\\demo\\Game.exe");
         let table = fs::read_to_string(tmp.join("drive_c").join(".pw-symlinks")).unwrap();
-        assert_eq!(table, "ext1\t/mnt/ext1\n");
+        assert_eq!(table, "ext1\t/mnt/ext1\nEXT1\t/mnt/ext1\nExt1\t/mnt/ext1\n");
 
-        // Second call is idempotent and does not duplicate the symlink line
+        // Second call is idempotent and does not duplicate symlink lines
         let mapped2 = ensure_drive_c_mount_links_and_map_path(&tmp, "Z:\\mnt\\ext1\\xboxseries\\demo");
         assert_eq!(mapped2, "C:\\ext1\\xboxseries\\demo");
-        assert_eq!(fs::read_to_string(tmp.join("drive_c").join(".pw-symlinks")).unwrap(), "ext1\t/mnt/ext1\n");
+        assert_eq!(
+            fs::read_to_string(tmp.join("drive_c").join(".pw-symlinks")).unwrap(),
+            "ext1\t/mnt/ext1\nEXT1\t/mnt/ext1\nExt1\t/mnt/ext1\n"
+        );
 
         // Paths already on C:\ are left untouched
         assert_eq!(ensure_drive_c_mount_links_and_map_path(&tmp, "C:\\XCL\\Game.exe"), "C:\\XCL\\Game.exe");

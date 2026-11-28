@@ -131,3 +131,13 @@ status = "ingame"
 release = "v0.2.19"
 notes = "Unreal Engine 5.5.4 (DX12 via vkd3d-proton 12.1 + descriptor buffer) compiles shaders and enters gameplay with automatic DualSense XInput; lower graphics quality to stay within PS5 12 GiB UMA."
 reports = []
+
+[[title]]
+title_id = "645E6961"
+identity = "GOG.1207658718"
+name = "Gothic 2 Gold"
+versions = ["2.7"]
+status = "playable"
+release = "v0.2.20"
+notes = "1080p gameplay via bundled ddraw.dll and DXVK D3D9 with audio; use Arrows + Action input preset in R1 Game info (D-pad arrows, Triangle Enter, R1 Ctrl action, Cross Space)."
+reports = []
