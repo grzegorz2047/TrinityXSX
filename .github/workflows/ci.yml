@@ -25,8 +25,12 @@ on:
       - tools/test_compat.py
       - tools/ps5_bench.py
       - tools/test_ps5_bench.py
+      - tools/release_guard.py
+      - tools/test_release_guard.py
       - docs/COMPATIBILITY.md
+      - docs/release-notes/**
       - .github/workflows/ci.yml
+      - .github/workflows/release.yml
   pull_request:
     paths:
       - pins.env
@@ -46,8 +50,12 @@ on:
       - tools/test_compat.py
       - tools/ps5_bench.py
       - tools/test_ps5_bench.py
+      - tools/release_guard.py
+      - tools/test_release_guard.py
       - docs/COMPATIBILITY.md
+      - docs/release-notes/**
       - .github/workflows/ci.yml
+      - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
       build_ffpkg:
@@ -73,10 +81,11 @@ jobs:
       - name: Run standalone unit tests
         run: python3 -m unittest standalone.test_standalone -v
 
-      - name: Compatibility database (library/compat.toml), its table, and the benchmark tool
+      - name: Compatibility database (library/compat.toml), release guard, and benchmark tool
         run: |
           python3 -m unittest tools.test_compat -v
           python3 -m unittest tools.test_ps5_bench -v
+          python3 -m unittest tools.test_release_guard -v
           python3 tools/compat.py --check
 
       - name: Verify sce_sys ProsperoStore metadata
@@ -95,9 +104,9 @@ jobs:
           print(f"sce_sys OK: titleId={param['titleId']} contentVersion={cv} icon0={w}x{h}")
           PY
 
-      - name: Syntax-check tools/sync_upstream.py & standalone build scripts
+      - name: Syntax-check tools/sync_upstream.py, release_guard.py & standalone build scripts
         run: |
-          python3 -m py_compile tools/sync_upstream.py standalone/native/build_launcher.py standalone/native/build_prefix_seed.py
+          python3 -m py_compile tools/sync_upstream.py tools/release_guard.py standalone/native/build_launcher.py standalone/native/build_prefix_seed.py
           bash -n tools/build-standalone-ffpkg.sh
           bash -n tools/setup-sources.sh
 
