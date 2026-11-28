@@ -32,6 +32,7 @@ NTDLL_MODULE = "win/wine/lib/wine/x86_64-unix/ntdll.prx"
 NTDLL_SUBPAGE_PATCH = "0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessible-page-run-hot.patch"
 WIN32U_MODULE = "win/wine/lib/wine/x86_64-unix/win32u.prx"
 WIN32U_MENU_PAUSE_PATCH = "0987-win32u-ps5-pause-vulkan-present-while-title-menu-open.patch"
+WIN32U_TOAST_PATCH = "0992-win32u-ps5-vulkan-toast-overlay.patch"
 SOURCES = (
     "native/wine64_main.c", "native/pw_diagnostics.c", "native/pw_audio_ps5.c",
     "native/pw_data_mount.c", "native/pw_lapy_elevation.c",
@@ -41,7 +42,7 @@ SOURCES = (
     "native/pw_wine_prefix.c",
     "src/pw_result.c", "src/pw_wine_start.c", "src/pw_wine_launch.c", "src/pw_game_profile.c",
     "src/pw_prefix_temp.c", "src/pw_app_profile.c", "src/pw_profile_catalog.c",
-    "src/pw_launcher_render.c", "src/pw_present.c", "src/pw_pad.c", "src/pw_game_menu.c",
+    "src/pw_launcher_render.c", "src/pw_present.c", "src/pw_pad.c", "src/pw_game_menu.c", "src/pw_toast.c",
     "src/pw_osk.c", "src/pw_hid.c", "src/pw_netinput.c", "src/pw_webinput.c", "src/pw_webinput_page.c",
     "src/pw_spinner.c",
     "src/pw_script_input.c",
@@ -86,7 +87,7 @@ def rebuilt_ntdll(wine_build: Path) -> tuple[Path, str, bool] | None:
     return path, digest, NTDLL_SUBPAGE_PATCH in patches
 
 
-def rebuilt_win32u(wine_build: Path) -> tuple[Path, str, bool] | None:
+def rebuilt_win32u(wine_build: Path) -> tuple[Path, str, bool, bool] | None:
     path = wine_build / "prx/sce_module/win32u.prx"
     if not path.is_file():
         return None
@@ -102,7 +103,7 @@ def rebuilt_win32u(wine_build: Path) -> tuple[Path, str, bool] | None:
         digest = file_digest(stream, "sha256").hexdigest()
     if module.get("sha256") != digest:
         raise ValueError("win32u.prx does not match the build report SHA-256")
-    return path, digest, WIN32U_MENU_PAUSE_PATCH in patches
+    return path, digest, WIN32U_MENU_PAUSE_PATCH in patches, WIN32U_TOAST_PATCH in patches
 
 
 def extract_wine_mono(archive_path: Path, dest_dir: Path) -> tuple[int, str]:
@@ -295,6 +296,8 @@ def build(
             if win32u_mod:
                 if win32u_mod[2]:
                     sources.write("Patch: patches/prospero-win/0014-Pause-Vulkan-present-in-win32u-while-Touchpad-menu-open.patch\n")
+                if win32u_mod[3]:
+                    sources.write("Patch: patches/prospero-win/0023-Add-semi-transparent-in-game-toast-notifications.patch\n")
                 sources.write(f"win32u.prx SHA-256: {win32u_mod[1]}\n")
             if mono_info:
                 sources.write(f"Wine Mono {wine_mono_version}: {mono_info[0]} files, SHA-256: {mono_info[1]}\n")

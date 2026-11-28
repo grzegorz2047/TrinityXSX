@@ -144,6 +144,18 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "PC session active") => "Aktywna sesja PC",
         (Lang::Pl, "PC connected") => "Połączono z PC",
         (Lang::Pl, "Click the page to capture") => "Kliknij stronę, aby przechwycić",
+        (Lang::Pl, "In-game notifications") => "Powiadomienia w grze",
+        (Lang::Pl, "Show semi-transparent top-right notifications for PC K+M handoff and live controls (applies immediately).") => {
+            "Półprzezroczyste komunikaty w prawym górnym rogu (sesja PC K+M i zmiany sterowania — działają od razu)."
+        }
+        (Lang::Pt, "In-game notifications") => "Notificações no jogo",
+        (Lang::Pt, "Show semi-transparent top-right notifications for PC K+M handoff and live controls (applies immediately).") => {
+            "Exibir notificações semitransparentes no canto superior direito para PC K+M e controles (aplica na hora)."
+        }
+        (Lang::Es, "In-game notifications") => "Notificaciones en juego",
+        (Lang::Es, "Show semi-transparent top-right notifications for PC K+M handoff and live controls (applies immediately).") => {
+            "Muestra avisos semitransparentes arriba a la derecha para PC K+M y controles (se aplica al instante)."
+        }
         (Lang::Pt, "PC keyboard & mouse") => "Teclado e mouse do PC",
         (Lang::Pt, "Off (USB on the PS5 only)") => "Desligado (só USB no PS5)",
         (Lang::Pt, "txin-sender program") => "Programa txin-sender",
