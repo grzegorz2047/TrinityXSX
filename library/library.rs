@@ -1869,6 +1869,19 @@ pub fn save_show_fps_setting(profile_path: &Path, enabled: bool) -> io::Result<(
     save_display_profile_value(profile_path, "show_fps", if enabled { "true" } else { "false" })
 }
 
+/// Read `[display] toasts` from a prospero-win `.profile` file (defaults to `true`).
+pub fn read_toasts_setting(profile_path: &Path) -> bool {
+    !matches!(
+        read_display_profile_value(profile_path, "toasts").as_deref().map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("false" | "0" | "off")
+    )
+}
+
+/// Update `[display] toasts = true | false` inside a prospero-win `.profile` file.
+pub fn save_toasts_setting(profile_path: &Path, enabled: bool) -> io::Result<()> {
+    save_display_profile_value(profile_path, "toasts", if enabled { "true" } else { "false" })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageSpace {
     pub label: String,
@@ -2551,6 +2564,24 @@ mod tests {
 
         save_show_fps_setting(&profile, true).unwrap();
         assert_eq!(fs::read_to_string(&profile).unwrap(), "[Display]\nframegen = 4\nshow_fps = true\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toasts_setting_defaults_true_and_round_trips() {
+        let dir = temp_dir("profile-toasts");
+        let profile = dir.join("t.profile");
+        assert!(read_toasts_setting(&profile));
+
+        fs::write(&profile, "[application]\nid = a\n\n[display]\nshow_fps = true\n").unwrap();
+        assert!(read_toasts_setting(&profile));
+
+        save_toasts_setting(&profile, false).unwrap();
+        assert!(!read_toasts_setting(&profile));
+        assert!(read_show_fps_setting(&profile));
+
+        save_toasts_setting(&profile, true).unwrap();
+        assert!(read_toasts_setting(&profile));
         let _ = fs::remove_dir_all(&dir);
     }
 

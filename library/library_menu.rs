@@ -24,7 +24,7 @@ const PATH_ROWS: usize = 6;
 const BROWSER_ROWS: usize = 7;
 const SETTINGS_ROWS: usize = 8;
 /// Rows of the app settings screen; the last one restarts TrinityXSX.
-const APP_ROWS: usize = 7;
+const APP_ROWS: usize = 8;
 const SETTINGS_COUNT: usize = 13;
 const PC_SETTINGS_COUNT: usize = 5;
 
@@ -113,6 +113,8 @@ struct Menu {
     remote: library::RemoteInput,
     remote_status: library::RemoteInputStatus,
     remote_poll_ticks: u8,
+    /// `[display] toasts` in the runtime profile; the runner applies it live within two seconds.
+    toasts: bool,
     storage_line: String,
     app_row: usize,
     paths: Vec<String>,
@@ -190,6 +192,7 @@ impl Menu {
         self.ui = library::load_ui_settings(&self.ui_file);
         self.framegen = library::read_framegen_setting(&self.profile_file);
         self.show_fps = library::read_show_fps_setting(&self.profile_file);
+        self.toasts = library::read_toasts_setting(&self.profile_file);
         self.remote = library::read_remote_input_setting(&self.profile_file);
         self.remote_status = library::read_remote_input_status().unwrap_or_default();
         self.storage_line = library::format_storage_line(&library::storage_space_summary());
@@ -1000,6 +1003,16 @@ impl Menu {
                                 tr(self.ui.language, self.remote.label_key()),
                                 tr(self.ui.language, hint)
                             );
+                        }
+                        Err(e) => self.status = format!("Cannot save profile: {e}"),
+                    }
+                }
+                6 => {
+                    self.toasts = !self.toasts;
+                    match library::save_toasts_setting(&self.profile_file, self.toasts) {
+                        Ok(()) => {
+                            let label = tr(self.ui.language, if self.toasts { "On" } else { "Off" });
+                            self.status = format!("{}: {label}", tr(self.ui.language, "In-game notifications"));
                         }
                         Err(e) => self.status = format!("Cannot save profile: {e}"),
                     }
@@ -1922,6 +1935,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                     _ => None,
                 }
             };
+            let toasts_val = t(if menu.toasts { "On" } else { "Off" }).to_owned();
             let rows = [
                 (t("Install GOG Games"), gog_val),
                 (t("Interface language"), menu.ui.language.display_name().to_owned()),
@@ -1929,21 +1943,22 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 (t("Frame Generation"), fg_val),
                 (t("FPS Counter"), fps_val),
                 (t("PC keyboard & mouse"), remote_val),
+                (t("In-game notifications"), toasts_val),
                 (t("Restart TrinityXSX now"), restart_val),
             ];
             let restart_row = rows.len() - 1;
             for (idx, (label, val)) in rows.iter().enumerate() {
-                let top = 198 + (idx as i32) * 70;
+                let top = 192 + (idx as i32) * 64;
                 let selected = idx == menu.app_row;
-                fill(dc, region(left, top, right, 62), if selected { card_sel } else { card_bg });
+                fill(dc, region(left, top, right, 56), if selected { card_sel } else { card_bg });
                 if selected {
                     fill(
                         dc,
-                        region(left, top, left + scale(6), 62),
+                        region(left, top, left + scale(6), 56),
                         if idx == restart_row && any_pending { amber } else { mint },
                     );
                 }
-                text(dc, label, region(left + scale(26), top + 14, right - scale(560), 34), scale(26), 600, snow);
+                text(dc, label, region(left + scale(26), top + 11, right - scale(560), 34), scale(25), 600, snow);
                 let val_color = if idx == restart_row && any_pending {
                     amber
                 } else if (idx == 0 && pending_gog > 0) || selected {
@@ -1954,8 +1969,8 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 text_aligned(
                     dc,
                     val,
-                    region(right - scale(580), top + 14, right - scale(26), 34),
-                    scale(26),
+                    region(right - scale(580), top + 11, right - scale(26), 34),
+                    scale(25),
                     600,
                     val_color,
                     DT_SINGLELINE | DT_RIGHT | DT_END_ELLIPSIS,
@@ -1971,11 +1986,14 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 3 => t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
                 4 => t("Show or hide the live FPS counter in the top-left corner (requires restart)."),
                 5 => t("Control games with a PC keyboard and mouse over LAN (Browser with PIN, txin-sender, or both)."),
+                6 => t(
+                    "Show semi-transparent top-right notifications for PC K+M handoff and live controls (applies immediately).",
+                ),
                 _ => t("Restart TrinityXSX cleanly to apply display changes such as Frame Generation or FPS counter."),
             };
-            text(dc, row_hint, region(left, 710, right, 44), scale(23), 400, snow);
+            text(dc, row_hint, region(left, 716, right, 44), scale(23), 400, snow);
             if let Some(line) = &remote_line {
-                text(dc, line, region(left, 786, right, 50), scale(30), 700, mint);
+                text(dc, line, region(left, 788, right, 50), scale(30), 700, mint);
             }
             text(dc, &menu.status, region(left, 892, right, 38), scale(23), 400, mint);
             draw_button_hints(
@@ -2556,6 +2574,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, 
     let ui = library::load_ui_settings(&ui_file);
     let framegen = library::read_framegen_setting(&profile_file);
     let show_fps = library::read_show_fps_setting(&profile_file);
+    let toasts = library::read_toasts_setting(&profile_file);
     let remote = library::read_remote_input_setting(&profile_file);
     let remote_status = library::read_remote_input_status().unwrap_or_default();
     let active_framegen = std::env::var("PW_FRAMEGEN")
@@ -2583,6 +2602,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, 
         remote,
         remote_status,
         remote_poll_ticks: 0,
+        toasts,
         storage_line: String::new(),
         app_row: 0,
         paths,

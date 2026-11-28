@@ -1,0 +1,2591 @@
+From 3857060c02c059f8cb3092b31d875c38422b9230 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 16:05:53 +0100
+Subject: [PATCH] Add semi-transparent in-game toast notifications (Vulkan +
+ GDI)
+
+---
+ Makefile                                      |    3 +-
+ PUBLICATION_ALLOWLIST.txt                     |    5 +
+ native/wine64_main.c                          |  204 ++-
+ src/pw_game_profile.c                         |    9 +
+ src/pw_game_profile.h                         |    3 +
+ src/pw_toast.c                                |  299 ++++
+ src/pw_toast.h                                |   49 +
+ tests/test_build_wine_ps5.py                  |   12 +-
+ tests/test_pw_game_profile.c                  |    6 +
+ tests/test_pw_toast.c                         |  115 ++
+ tests/test_pw_wine_sink.c                     |   42 +
+ tools/build_native.sh                         |    2 +-
+ tools/build_wine_ps5.sh                       |   10 +-
+ ...0992-win32u-ps5-vulkan-toast-overlay.patch | 1334 +++++++++++++++++
+ wine/ps5/menu/pw_title_toast.h                |   36 +
+ wine/ps5/pw_wine_sink.c                       |   41 +
+ wine/ps5/pw_wine_sink.h                       |    8 +
+ 17 files changed, 2158 insertions(+), 20 deletions(-)
+ create mode 100644 src/pw_toast.c
+ create mode 100644 src/pw_toast.h
+ create mode 100644 tests/test_pw_toast.c
+ create mode 100644 wine/patches/0992-win32u-ps5-vulkan-toast-overlay.patch
+ create mode 100644 wine/ps5/menu/pw_title_toast.h
+
+diff --git a/Makefile b/Makefile
+index ae686e9..8f450c4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -94,6 +94,7 @@ $(eval $(call test_rule,test_pw_ws2_32_libc,tests/test_pw_ws2_32_libc.c wine/ps5
+ $(eval $(call test_rule,test_pw_launcher_render,tests/test_pw_launcher_render.c src/pw_launcher_render.c,))
+ $(eval $(call test_rule,test_pw_pad,tests/test_pw_pad.c src/pw_pad.c,))
+ $(eval $(call test_rule,test_pw_game_menu,tests/test_pw_game_menu.c src/pw_game_menu.c,))
++$(eval $(call test_rule,test_pw_toast,tests/test_pw_toast.c src/pw_toast.c,))
+ $(eval $(call test_rule,test_pw_osk,tests/test_pw_osk.c src/pw_osk.c,))
+ $(eval $(call test_rule,test_pw_osk_ps5,tests/test_pw_osk_ps5.c native/pw_osk_ps5.c src/pw_osk.c src/pw_result.c,-DPW_OSK_PS5_HOST_TEST))
+ $(eval $(call test_rule,test_pw_vm,tests/test_pw_vm.c src/pw_vm.c src/pw_vm_posix.c src/pw_result.c,))
+@@ -151,7 +152,7 @@ $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
+ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog test_pw_present \
+ 	test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc test_vk_replay test_vk_wire test_vk_codec \
+ 	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_netinput test_pw_netinput_ps5 test_pw_webinput test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
+-	test_pw_wine_threads test_pw_wine_compat test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_pw_game_menu test_pw_osk test_pw_osk_ps5 \
++	test_pw_wine_threads test_pw_wine_compat test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_pw_game_menu test_pw_toast test_pw_osk test_pw_osk_ps5 \
+ 	test_pw_guest_fp test_pw_vm test_pw_x86_block test_pw_x86_flat test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top \
+ 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
+ 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 0459e86..5455fa2 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -76,6 +76,8 @@ src/pw_pad.c
+ src/pw_pad.h
+ src/pw_game_menu.c
+ src/pw_game_menu.h
++src/pw_toast.c
++src/pw_toast.h
+ src/pw_osk.c
+ src/pw_osk.h
+ src/pw_guest_call.c
+@@ -86,6 +88,7 @@ tests/test_pw_audio_mix.c
+ tests/test_pw_app_profile.c
+ tests/test_pw_pad.c
+ tests/test_pw_game_menu.c
++tests/test_pw_toast.c
+ tests/test_pw_pad_ps5.c
+ tests/test_status_vocabulary.py
+ tests/test_classify_x86.py
+@@ -522,6 +525,8 @@ wine/patches/0902-win32u-ps5-send-extended-keys-as-extended.patch
+ wine/patches/0903-ntdll-ps5-keep-the-fs-base-of-a-resumed-64-bit-thread.patch
+ wine/ps5/input/pw_key_shared.h
+ wine/ps5/menu/pw_title_menu.h
++wine/ps5/menu/pw_title_toast.h
++wine/patches/0992-win32u-ps5-vulkan-toast-overlay.patch
+ tests/lab/pw_qpc_bridge.c
+ tests/lab/pw_key_bridge.c
+ tools/test_wine_qpc_bridge.py
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 2d46ef0..c0ce97c 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -36,6 +36,8 @@
+ #include "../src/pw_script_input.h"
+ #include "../src/pw_wine_launch.h"
+ #include "../src/pw_game_menu.h"
++#include "../src/pw_toast.h"
++#include "../wine/ps5/menu/pw_title_toast.h"
+ #include "pw_data_mount.h"
+ #include "pw_audio_ps5.h"
+ #include "pw_pad_ps5.h"
+@@ -598,10 +600,75 @@ static int vulkan_frames_flip(VulkanFrames *vf, const PwPresentFrame *frame, int
+     return status == 0;
+ }
+ 
++static struct {
++    void (*set_toast)(const struct pw_title_toast *);
++    int enabled;
++    int last_profile_toasts;
++    struct pw_title_toast active;
++    uint8_t rgba[PW_TOAST_BYTES];
++    uint32_t rendered_seq;
++    int gdi_had_toast;
++    uint64_t reclaim_toast_ns;
++} title_toast = { .enabled = 1, .last_profile_toasts = -1 };
++
++static void toast_clear(void)
++{
++    if (title_toast.active.visible) {
++        title_toast.active.visible = 0;
++        title_toast.active.line1[0] = '\0';
++        title_toast.active.line2[0] = '\0';
++        if (title_toast.set_toast) title_toast.set_toast(NULL);
++    }
++}
++
++static void toast_post(uint64_t now, uint32_t accent, const char *line1, const char *line2)
++{
++    struct pw_title_toast next;
++
++    if (!title_toast.enabled || !line1 || !line1[0]) return;
++    memset(&next, 0, sizeof(next));
++    next.version = PW_TITLE_TOAST_VERSION;
++    next.sequence = title_toast.active.sequence + 1u;
++    next.visible = 1;
++    next.accent = accent;
++    next.duration_ms = PW_TOAST_DEFAULT_DURATION_MS;
++    next.created_ns = now;
++    snprintf(next.line1, sizeof(next.line1), "%s", line1);
++    if (line2 && line2[0]) snprintf(next.line2, sizeof(next.line2), "%s", line2);
++    title_toast.active = next;
++    if (title_toast.set_toast) title_toast.set_toast(&next);
++}
++
++static uint8_t toast_current_opacity(uint64_t now)
++{
++    uint64_t elapsed_ms;
++
++    if (!title_toast.active.visible) return 0u;
++    elapsed_ms = now > title_toast.active.created_ns ? (now - title_toast.active.created_ns) / 1000000ull : 0u;
++    if (elapsed_ms >= title_toast.active.duration_ms) {
++        toast_clear();
++        return 0u;
++    }
++    return pw_toast_opacity(elapsed_ms, title_toast.active.duration_ms);
++}
++
++static void toast_apply_gdi(uint8_t *bgrx, uint32_t width, uint32_t height, uint32_t stride, uint8_t opacity)
++{
++    if (!opacity || !bgrx) return;
++    if (title_toast.rendered_seq != title_toast.active.sequence) {
++        if (pw_toast_render_rgba8(title_toast.rgba, sizeof(title_toast.rgba),
++                                  title_toast.active.line1, title_toast.active.line2,
++                                  title_toast.active.accent) != 0)
++            return;
++        title_toast.rendered_seq = title_toast.active.sequence;
++    }
++    pw_toast_blend_bgrx8(bgrx, width, height, stride, title_toast.rgba, opacity);
++}
++
+ /* 1 when the newest GDI frame, or the spinner while the game loads, was
+  * shown through the Vulkan driver. A game presenting has shown content. */
+ static int vulkan_frames_show(VulkanFrames *vf, uint64_t *sequence, int scaling, Loading *loading,
+-                              uint64_t now, uint64_t started)
++                              uint64_t now, uint64_t started, uint8_t toast_opacity)
+ {
+     PwPresentView view;
+     PwPresentFrame spinner;
+@@ -617,10 +684,31 @@ static int vulkan_frames_show(VulkanFrames *vf, uint64_t *sequence, int scaling,
+     loading->presenting_since = 0;
+     if (pw_wine_frame_box_take(&frames, sequence, frame_shown, PW_WINE64_MAX_FRAME, &view) == 1 &&
+         loading_admits(loading, &view)) {
++        if (toast_opacity) {
++            toast_apply_gdi(frame_shown, view.width, view.height, view.stride, toast_opacity);
++            title_toast.gdi_had_toast = 1;
++        } else {
++            title_toast.gdi_had_toast = 0;
++        }
+         const PwPresentFrame frame = { view.pixels, view.width, view.height, view.stride,
+                                        PW_PRESENT_BGRX8 };
+         return vulkan_frames_flip(vf, &frame, scaling);
+     }
++    if ((toast_opacity || title_toast.gdi_had_toast) && *sequence > 0) {
++        uint64_t force_seq = 0;
++        if (pw_wine_frame_box_take(&frames, &force_seq, frame_shown, PW_WINE64_MAX_FRAME, &view) == 1 &&
++            loading_admits(loading, &view)) {
++            if (toast_opacity) {
++                toast_apply_gdi(frame_shown, view.width, view.height, view.stride, toast_opacity);
++                title_toast.gdi_had_toast = 1;
++            } else {
++                title_toast.gdi_had_toast = 0;
++            }
++            const PwPresentFrame frame = { view.pixels, view.width, view.height, view.stride,
++                                           PW_PRESENT_BGRX8 };
++            return vulkan_frames_flip(vf, &frame, scaling);
++        }
++    }
+     if ((next = loading_frame(loading, now, started, &spinner)))
+         return vulkan_frames_flip(vf, next, PW_PRESENT_SCALE_FIT);
+     return 0;
+@@ -1397,8 +1485,8 @@ static void remote_switch(int mode, uint64_t now, int (*post_input)(const PwWine
+     if (!remote_session_refresh()) remote_note();
+ }
+ 
+-/* [input] remote as the library's profile says now, or -1 when it cannot be read. */
+-static int remote_profile_mode(void)
++/* [input] remote and [display] toasts as the library's profile says now; returns 0 on success. */
++static int library_profile_live_settings(int *remote_out, int *toasts_out)
+ {
+     static uint8_t text[REMOTE_PROFILE_MAX];
+     static PwGameProfile parsed;
+@@ -1412,7 +1500,9 @@ static int remote_profile_mode(void)
+     n = read(fd, text, sizeof(text));
+     close(fd);
+     if (n <= 0 || pw_game_profile_parse(text, (size_t)n, &parsed) != PW_OK) return -1;
+-    return (int)parsed.input.remote;
++    if (remote_out) *remote_out = (int)parsed.input.remote;
++    if (toasts_out) *toasts_out = parsed.display.toasts ? 1 : 0;
++    return 0;
+ }
+ 
+ /* Persists a live Touchpad-menu PC INPUT mode change back to the library profile. */
+@@ -2069,7 +2159,10 @@ int main(int argc, char **argv)
+         game_menu.remote_toggle = post_input != NULL;
+         set_menu = (void (*)(const struct pw_title_menu *))
+             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_menu");
+-        PS5LOG_LOG("PW_WINE64 menu=%s", set_menu ? "touchpad" : "local-only");
++        title_toast.set_toast = (void (*)(const struct pw_title_toast *))
++            (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_toast");
++        PS5LOG_LOG("PW_WINE64 menu=%s toast=%s", set_menu ? "touchpad" : "local-only",
++                   title_toast.set_toast ? "vulkan+gdi" : "gdi-only");
+         video_status = pw_videoout_ps5_open(&video);
+         pad_status = pw_pad_ps5_platform_ops(&pad_ops);
+         if (pad_status == PW_OK)
+@@ -2093,8 +2186,16 @@ int main(int argc, char **argv)
+             /* A PC's keyboard and mouse over the LAN, as the library's settings say
+              * (remote_input); without them, as this program's own profile says. */
+             {
+-                int mode = remote_profile_mode();
+-                remote_input.last_profile_mode = mode;
++                int mode = -1, toasts = -1;
++                if (library_profile_live_settings(&mode, &toasts) == 0) {
++                    remote_input.last_profile_mode = mode;
++                    title_toast.last_profile_toasts = toasts;
++                    title_toast.enabled = toasts;
++                } else {
++                    remote_input.last_profile_mode = -1;
++                    title_toast.last_profile_toasts = -1;
++                    title_toast.enabled = game ? game->display.toasts : 1;
++                }
+                 if (mode < 0) mode = game ? (int)game->input.remote : PW_GAME_REMOTE_OFF;
+                 remote_switch(mode, now_ns(), NULL, NULL, NULL);
+                 game_menu.remote_mode = remote_input.mode;
+@@ -2210,13 +2311,28 @@ int main(int argc, char **argv)
+         int pc_activity_this_tick = 0;
+         if (post_input) {
+             if (tick % (2 * PW_WINE64_TICKS_PER_S) == 0) {
+-                int mode = remote_profile_mode();
+-                if (mode >= 0 && (mode != remote_input.last_profile_mode ||
+-                                  (mode == remote_input.mode && remote_input.status != PW_OK))) {
+-                    remote_input.last_profile_mode = mode;
+-                    remote_switch(mode, now, post_input, &posted, &refused);
+-                    game_menu.remote_mode = remote_input.mode;
+-                    remote_session_changed = 1;
++                int mode = -1, toasts = -1;
++                if (library_profile_live_settings(&mode, &toasts) == 0) {
++                    if (toasts != title_toast.last_profile_toasts) {
++                        int prev_toasts = title_toast.enabled;
++                        title_toast.last_profile_toasts = toasts;
++                        title_toast.enabled = toasts;
++                        if (!toasts) toast_clear();
++                        else if (!prev_toasts && !game_menu.open)
++                            toast_post(now, PW_TITLE_TOAST_ACCENT_MINT,
++                                       "NOTIFICATIONS ENABLED", "TOP-RIGHT OVERLAY ACTIVE");
++                    }
++                    if (mode >= 0 && (mode != remote_input.last_profile_mode ||
++                                      (mode == remote_input.mode && remote_input.status != PW_OK))) {
++                        remote_input.last_profile_mode = mode;
++                        remote_switch(mode, now, post_input, &posted, &refused);
++                        game_menu.remote_mode = remote_input.mode;
++                        remote_session_changed = 1;
++                        if (remote_input.mode != PW_GAME_REMOTE_OFF && remote_input.status != PW_OK &&
++                            !game_menu.open)
++                            toast_post(now, PW_TITLE_TOAST_ACCENT_CORAL,
++                                       "PC INPUT PORT FAILED", "CHECK TOUCHPAD MENU OR SETTINGS");
++                    }
+                 }
+             }
+             if (remote_input.udp_open || remote_input.web_open) {
+@@ -2242,20 +2358,45 @@ int main(int argc, char **argv)
+             } else {
+                 remote_menu_held = 0;
+             }
+-            if (remote_session_refresh()) remote_session_changed = 1;
++            int prev_session_state = remote_input.session_state;
++            int session_refreshed = remote_session_refresh();
++            if (session_refreshed) remote_session_changed = 1;
+             game_menu.remote_session = remote_input.session_state;
+             if (remote_input.session_state == PC_SESSION_CAPTURING) {
+                 if (remote_session_changed || pc_activity_this_tick) pc_pad_handoff = 1;
+             } else {
+                 pc_pad_handoff = 0;
+             }
++            int restored_pad = 0;
+             if ((remote_input.session_state == PC_SESSION_NONE || remote_input.mode == PW_GAME_REMOTE_OFF) &&
+                 pc_hide_pad) {
+                 pc_hide_pad = 0;
+                 game_menu.pc_hide_pad = 0;
++                restored_pad = 1;
+                 PS5LOG_LOG("PW_WINE64 pc session ended: gamepad restored");
+                 remote_session_changed = 1;
+             }
++            if (session_refreshed && !game_menu.open) {
++                if (remote_input.session_state == PC_SESSION_CAPTURING &&
++                    prev_session_state != PC_SESSION_CAPTURING) {
++                    const char *l1 = remote_input.session_source == PC_SOURCE_SENDER
++                        ? "PC K+M ACTIVE (SENDER)" : "PC K+M ACTIVE (BROWSER)";
++                    const char *l2 = (allow_input_toggle && pc_hide_pad)
++                        ? "F9 MENU - GAMEPAD HIDDEN"
++                        : (allow_input_toggle && !live_mouse_kb)
++                        ? "F9 MENU - PAD MUTED (OR HIDE PAD)"
++                        : "F9 MENU - ESC TO RELEASE";
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_MINT, l1, l2);
++                } else if (remote_input.session_state == PC_SESSION_CONNECTED &&
++                           prev_session_state == PC_SESSION_NONE) {
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_MINT,
++                               "PC BROWSER CONNECTED", "CLICK PAGE TO CAPTURE K+M");
++                } else if (remote_input.session_state == PC_SESSION_NONE &&
++                           prev_session_state != PC_SESSION_NONE) {
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_AMBER, "PC SESSION ENDED",
++                               restored_pad ? "DUALSENSE GAMEPAD RESTORED" : "DUALSENSE ACTIVE");
++                }
++            }
+         }
+ #if PW_WINE64_SCRIPT
+         while (post_input && script_key_next < script_key_count &&
+@@ -2353,6 +2494,7 @@ int main(int argc, char **argv)
+                 released = view.released;
+                 neutral = view.neutral;
+                 if (!was_open && game_menu.open) {
++                    toast_clear();
+                     /* Refresh compact FPS/VRAM telemetry snapshot when opening menu. */
+                     menu_telemetry[0] = '\0';
+                     menu_notice[0] = '\0';
+@@ -2390,12 +2532,18 @@ int main(int argc, char **argv)
+                     pc_hide_pad = game_menu.pc_hide_pad;
+                     pc_pad_handoff = 0;
+                     pointer = (PwWinePointer){ 0, 0 };
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_AMBER,
++                               live_mouse_kb ? "CONTROLS: MOUSE + KEYBOARD" : "CONTROLS: GAMEPAD (XINPUT)",
++                               "CHANGED LIVE VIA TOUCHPAD MENU");
+                     PS5LOG_LOG("PW_WINE64 menu action=toggle-input mode=%s pc_hide_pad=%d",
+                                live_mouse_kb ? "mouse_kb" : "xinput", pc_hide_pad);
+                 } else if (view.action == PW_GAME_MENU_ACTION_TOGGLE_PC_PAD) {
+                     pc_hide_pad = game_menu.pc_hide_pad;
+                     pointer = (PwWinePointer){ 0, 0 };
+                     if (pc_hide_pad && rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_AMBER,
++                               pc_hide_pad ? "PC K+M ONLY (PAD HIDDEN)" : "GAMEPAD RESTORED",
++                               pc_hide_pad ? "PAD RETURNS WHEN PC SESSION ENDS" : "DUALSENSE ACTIVE AGAIN");
+                     PS5LOG_LOG("PW_WINE64 menu action=toggle-pc-pad hide=%d", pc_hide_pad);
+                 } else if (view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE) {
+                     remote_switch(game_menu.remote_mode, now, post_input, &posted, &refused);
+@@ -2475,6 +2623,11 @@ int main(int argc, char **argv)
+             if (!game_menu.open && !osk_ps5.showing && pc_pad_handoff && !pc_hide_pad &&
+                 pad_user_active(seen)) {
+                 pc_pad_handoff = 0;
++                if (now - title_toast.reclaim_toast_ns >= 10000000000ull) {
++                    title_toast.reclaim_toast_ns = now;
++                    toast_post(now, PW_TITLE_TOAST_ACCENT_AMBER,
++                               "DUALSENSE RECLAIMED", "MOVE PC MOUSE TO SWITCH BACK");
++                }
+             }
+         }
+         /* XInput controller 0: the DualSense, and in a script build the
+@@ -2598,6 +2751,7 @@ int main(int argc, char **argv)
+             PS5LOG_LOG("PW_WINE64 display released to vulkan close=%s shown=%llu",
+                        pw_result_name(closed), (unsigned long long)shown);
+         }
++        uint8_t toast_op = toast_current_opacity(now);
+         if (game_menu.open && frame_shown) {
+             if (!menu_drawn_open || menu_drawn_cursor != game_menu.cursor ||
+                 menu_drawn_lines != menu_snapshot.lines) {
+@@ -2635,17 +2789,35 @@ int main(int argc, char **argv)
+ 
+             if (pw_wine_frame_box_take(&frames, &shown_sequence, frame_shown, PW_WINE64_MAX_FRAME,
+                                        &view) == 1 && loading_admits(&loading, &view)) {
++                if (toast_op) {
++                    toast_apply_gdi(frame_shown, view.width, view.height, view.stride, toast_op);
++                    title_toast.gdi_had_toast = 1;
++                } else {
++                    title_toast.gdi_had_toast = 0;
++                }
+                 if (show_scaled(&video, &view, scaling) == PW_OK) {
+                     shown++;          /* present waits for the vblank */
+                     presented = 1;
+                 }
++            } else if ((toast_op || title_toast.gdi_had_toast) && shown_sequence > 0) {
++                uint64_t force_seq = 0;
++                if (pw_wine_frame_box_take(&frames, &force_seq, frame_shown, PW_WINE64_MAX_FRAME,
++                                           &view) == 1 && loading_admits(&loading, &view)) {
++                    if (toast_op) {
++                        toast_apply_gdi(frame_shown, view.width, view.height, view.stride, toast_op);
++                        title_toast.gdi_had_toast = 1;
++                    } else {
++                        title_toast.gdi_had_toast = 0;
++                    }
++                    if (show_scaled(&video, &view, scaling) == PW_OK) presented = 1;
++                }
+             } else if ((next = loading_frame(&loading, now, started, &spinner)) &&
+                        pw_videoout_ps5_present_scaled(&video, next, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
+                 presented = 1;
+             }
+         } else if (frame_shown && __atomic_load_n(&display_closed, __ATOMIC_ACQUIRE)) {
+             if (!vulkan_frames.resolved) vulkan_frames_resolve(&vulkan_frames, start.descriptor);
+-            (void)vulkan_frames_show(&vulkan_frames, &shown_sequence, scaling, &loading, now, started);
++            (void)vulkan_frames_show(&vulkan_frames, &shown_sequence, scaling, &loading, now, started, toast_op);
+         }
+         if (!presented) usleep(PW_WINE64_TICK_US);
+ 
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 464bffa..230741b 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -215,6 +215,14 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
+         *seen |= 8u;
+         return PW_OK;
+     }
++    if (is(key, key_length, "toasts")) {
++        if (*seen & 256u) return PW_ERR_MALFORMED;
++        if (is(v, n, "true")) display->toasts = 1;
++        else if (is(v, n, "false")) display->toasts = 0;
++        else return PW_ERR_UNSUPPORTED;
++        *seen |= 256u;
++        return PW_OK;
++    }
+     if (is(key, key_length, "framegen")) {
+         if (*seen & 128u) return PW_ERR_MALFORMED;
+         if (is(v, n, "off")) display->framegen = 0;
+@@ -533,6 +541,7 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
+     pw_game_input_init(&parsed.input);
+     parsed.input.mouse_speed = 0;       /* unset until a line sets it */
+     parsed.display.show_fps = 1;        /* on unless the profile says false */
++    parsed.display.toasts = 1;          /* on unless the profile says false */
+     parsed.display.refresh = 60;
+     if ((status = parse_sections(bytes, length, &parsed, NULL, &application_end)) != PW_OK)
+         return status;
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index 561cab2..bfb18a9 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -14,6 +14,8 @@
+  *                          ; framegen, frame generation's own instead, the
+  *                          ; game's frames and the screen's pictures a second
+  *                          ; ("30 -> 60", PW_FRAMEGEN_HUD), for any backend
++ *   toasts = true          ; semi-transparent top-right in-game notification pills
++ *                          ; for PC K+M handoff and live Touchpad toggles (default: true)
+  *   menu = true            ; L3+R3 opens prospero-win's menu over the game
+  *                          ; (pw_game_menu; drawn by DXVK's HUD, so DXVK games
+  *                          ; only); default false
+@@ -130,6 +132,7 @@ typedef struct PwGameDisplay {
+     PwGameScaling scaling;
+     PwGameView view;            /* window by default: a small game fills the TV */
+     int show_fps;               /* the graphics backend's frame-rate counter */
++    int toasts;                 /* semi-transparent top-right in-game notifications */
+     int menu;                   /* the in-game menu (pw_game_menu) */
+     uint32_t framegen;          /* pictures per game frame, 2..4; 0 off (PW_FRAMEGEN) */
+     uint32_t refresh;           /* parsed (60 or 120) but unused since Zink */
+diff --git a/src/pw_toast.c b/src/pw_toast.c
+new file mode 100644
+index 0000000..1bd532b
+--- /dev/null
++++ b/src/pw_toast.c
+@@ -0,0 +1,299 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_toast.h"
++#include <string.h>
++
++typedef struct PwToastGlyph { char c; uint8_t rows[7]; } PwToastGlyph;
++
++/* 5x7 dot-matrix glyphs (bit 4 is the leftmost column). */
++static const PwToastGlyph pw_toast_glyphs[] = {
++    {' ', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
++    {'!', {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}},
++    {'#', {0x0a, 0x0a, 0x1f, 0x0a, 0x1f, 0x0a, 0x0a}},
++    {'%', {0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}},
++    {'&', {0x0c, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0d}},
++    {'\'', {0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00}},
++    {'(', {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02}},
++    {')', {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08}},
++    {'+', {0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00}},
++    {',', {0x00, 0x00, 0x00, 0x00, 0x0c, 0x04, 0x08}},
++    {'-', {0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00}},
++    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c}},
++    {'/', {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00}},
++    {'0', {0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e}},
++    {'1', {0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e}},
++    {'2', {0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f}},
++    {'3', {0x1f, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0e}},
++    {'4', {0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02}},
++    {'5', {0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e}},
++    {'6', {0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e}},
++    {'7', {0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
++    {'8', {0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e}},
++    {'9', {0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c}},
++    {':', {0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00}},
++    {'<', {0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02}},
++    {'=', {0x00, 0x00, 0x1f, 0x00, 0x1f, 0x00, 0x00}},
++    {'>', {0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08}},
++    {'?', {0x0e, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}},
++    {'A', {0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11}},
++    {'B', {0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e}},
++    {'C', {0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e}},
++    {'D', {0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e}},
++    {'E', {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f}},
++    {'F', {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10}},
++    {'G', {0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f}},
++    {'H', {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11}},
++    {'I', {0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e}},
++    {'J', {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0c}},
++    {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
++    {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f}},
++    {'M', {0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11}},
++    {'N', {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11}},
++    {'O', {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e}},
++    {'P', {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10}},
++    {'Q', {0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d}},
++    {'R', {0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11}},
++    {'S', {0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e}},
++    {'T', {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
++    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e}},
++    {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04}},
++    {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a}},
++    {'X', {0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11}},
++    {'Y', {0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04}},
++    {'Z', {0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f}},
++    {'[', {0x0e, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0e}},
++    {']', {0x0e, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0e}},
++    {'_', {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f}},
++    {'|', {0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
++};
++
++static const PwToastGlyph *pw_toast_find_glyph(char ch)
++{
++    const PwToastGlyph *fallback = &pw_toast_glyphs[0];
++    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
++    for (size_t i = 0; i < sizeof(pw_toast_glyphs) / sizeof(pw_toast_glyphs[0]); i++) {
++        if (pw_toast_glyphs[i].c == ch) return &pw_toast_glyphs[i];
++        if (pw_toast_glyphs[i].c == '?') fallback = &pw_toast_glyphs[i];
++    }
++    return fallback;
++}
++
++static int pw_toast_outside_corner(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r)
++{
++    int32_t dx = x < r ? (r - 1 - x) : (x >= w - r ? (x - (w - r)) : -1);
++    int32_t dy = y < r ? (r - 1 - y) : (y >= h - r ? (y - (h - r)) : -1);
++    return dx >= 0 && dy >= 0 && dx * dx + dy * dy >= r * r;
++}
++
++/* 4x4 subpixel coverage (0..16) inside a rounded rectangle of radius r. */
++static uint32_t pw_toast_corner_cov(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r)
++{
++    if (x >= r && x < w - r) return 16u;
++    if (y >= r && y < h - r) return 16u;
++    uint32_t hits = 0;
++    const int32_t sw = w * 4, sh = h * 4, sr = r * 4;
++    for (int32_t sy = 0; sy < 4; sy++) {
++        for (int32_t sx = 0; sx < 4; sx++) {
++            if (!pw_toast_outside_corner(x * 4 + sx, y * 4 + sy, sw, sh, sr)) hits++;
++        }
++    }
++    return hits;
++}
++
++static void pw_toast_blend_px(uint8_t *rgba, int32_t x, int32_t y,
++                              uint8_t r, uint8_t g, uint8_t b, uint8_t a)
++{
++    if (x < 0 || y < 0 || x >= PW_TOAST_WIDTH || y >= PW_TOAST_HEIGHT || !a) return;
++    uint8_t *p = rgba + ((size_t)y * PW_TOAST_WIDTH + (size_t)x) * 4u;
++    if (p[3] == 0) {
++        p[0] = r; p[1] = g; p[2] = b; p[3] = a;
++        return;
++    }
++    uint32_t sa = a, da = p[3];
++    uint32_t out_a = sa + (da * (255u - sa) + 127u) / 255u;
++    if (!out_a) { p[0] = p[1] = p[2] = p[3] = 0; return; }
++    uint32_t inv_sa = 255u - sa;
++    p[0] = (uint8_t)((sa * r + ((da * inv_sa + 127u) / 255u) * p[0] + out_a / 2u) / out_a);
++    p[1] = (uint8_t)((sa * g + ((da * inv_sa + 127u) / 255u) * p[1] + out_a / 2u) / out_a);
++    p[2] = (uint8_t)((sa * b + ((da * inv_sa + 127u) / 255u) * p[2] + out_a / 2u) / out_a);
++    p[3] = (uint8_t)(out_a > 255u ? 255u : out_a);
++}
++
++static void pw_toast_draw_text(uint8_t *rgba, int32_t x, int32_t y, const char *s, int32_t scale,
++                               uint8_t r, uint8_t g, uint8_t b, uint8_t a, int32_t max_w)
++{
++    int32_t used = 0;
++    if (!s || scale <= 0) return;
++    for (; *s; s++) {
++        if (used + 5 * scale > max_w) break;
++        const PwToastGlyph *gl = pw_toast_find_glyph(*s);
++        for (int32_t row = 0; row < 7; row++) {
++            for (int32_t col = 0; col < 5; col++) {
++                if (!(gl->rows[row] & (0x10u >> col))) continue;
++                int32_t px = x + used + col * scale;
++                int32_t py = y + row * scale;
++                /* Soft 1px shadow behind glyph pixel for bright scenes. */
++                for (int32_t dy = 0; dy < scale; dy++) {
++                    for (int32_t dx = 0; dx < scale; dx++) {
++                        pw_toast_blend_px(rgba, px + dx + 1, py + dy + 1, 6, 12, 16, 140);
++                    }
++                }
++            }
++        }
++        for (int32_t row = 0; row < 7; row++) {
++            for (int32_t col = 0; col < 5; col++) {
++                if (!(gl->rows[row] & (0x10u >> col))) continue;
++                int32_t px = x + used + col * scale;
++                int32_t py = y + row * scale;
++                for (int32_t dy = 0; dy < scale; dy++) {
++                    for (int32_t dx = 0; dx < scale; dx++) {
++                        pw_toast_blend_px(rgba, px + dx, py + dy, r, g, b, a);
++                    }
++                }
++            }
++        }
++        used += 6 * scale;
++    }
++}
++
++PW_TOAST_API uint8_t pw_toast_opacity(uint64_t elapsed_ms, uint32_t duration_ms)
++{
++    uint32_t fade_in = PW_TOAST_FADE_IN_MS;
++    uint32_t fade_out = PW_TOAST_FADE_OUT_MS;
++
++    if (!duration_ms || elapsed_ms >= duration_ms) return 0u;
++    if (fade_in + fade_out > duration_ms) {
++        fade_in = duration_ms / 4u;
++        fade_out = duration_ms - fade_in;
++    }
++    if (fade_in && elapsed_ms < fade_in) {
++        uint64_t v = (elapsed_ms * 255u + fade_in / 2u) / fade_in;
++        return (uint8_t)(v > 255u ? 255u : v);
++    }
++    if (fade_out && elapsed_ms > duration_ms - fade_out) {
++        uint64_t rem = duration_ms - elapsed_ms;
++        uint64_t v = (rem * 255u + fade_out / 2u) / fade_out;
++        return (uint8_t)(v > 255u ? 255u : v);
++    }
++    return 255u;
++}
++
++PW_TOAST_API int pw_toast_render_rgba8(uint8_t *rgba, size_t capacity,
++                                       const char *line1, const char *line2, uint32_t accent)
++{
++    const int32_t W = PW_TOAST_WIDTH, H = PW_TOAST_HEIGHT, R = 10, STRIPE = 6;
++    uint8_t acc_r = 133, acc_g = 230, acc_b = 189; /* mint */
++
++    if (!rgba || capacity < (size_t)PW_TOAST_BYTES) return -1;
++    if (accent == PW_TOAST_ACCENT_AMBER) {
++        acc_r = 247; acc_g = 198; acc_b = 114;
++    } else if (accent == PW_TOAST_ACCENT_CORAL) {
++        acc_r = 242; acc_g = 118; acc_b = 118;
++    }
++
++    memset(rgba, 0, (size_t)PW_TOAST_BYTES);
++
++    for (int32_t y = 0; y < H; y++) {
++        /* Subtle vertical dark-glass gradient. */
++        uint8_t bg_r = (uint8_t)(22 - (8 * y) / (H - 1));
++        uint8_t bg_g = (uint8_t)(35 - (11 * y) / (H - 1));
++        uint8_t bg_b = (uint8_t)(43 - (13 * y) / (H - 1));
++        uint8_t bg_a = (uint8_t)(210 - (12 * y) / (H - 1));
++
++        for (int32_t x = 0; x < W; x++) {
++            uint32_t cov = pw_toast_corner_cov(x, y, W, H, R);
++            if (!cov) continue;
++            uint8_t *p = rgba + ((size_t)y * W + (size_t)x) * 4u;
++            if (x < STRIPE) {
++                p[0] = acc_r;
++                p[1] = acc_g;
++                p[2] = acc_b;
++                p[3] = (uint8_t)((242u * cov + 8u) / 16u);
++            } else {
++                int inner_border = (x == W - 1 || y == 0 || y == H - 1) ||
++                                   (cov > 0 && cov < 16u);
++                if (inner_border) {
++                    /* Crisp glass highlight rim. */
++                    p[0] = (uint8_t)((bg_r * 2u + 150u) / 3u);
++                    p[1] = (uint8_t)((bg_g * 2u + 190u) / 3u);
++                    p[2] = (uint8_t)((bg_b * 2u + 200u) / 3u);
++                    p[3] = (uint8_t)((220u * cov + 8u) / 16u);
++                } else {
++                    p[0] = bg_r;
++                    p[1] = bg_g;
++                    p[2] = bg_b;
++                    p[3] = (uint8_t)((bg_a * cov + 8u) / 16u);
++                }
++            }
++        }
++    }
++
++    const int32_t text_x = 20;
++    const int32_t max_w = W - text_x - 16;
++    const int has_line2 = line2 && line2[0] != '\0';
++    if (line1 && line1[0]) {
++        if (has_line2) {
++            pw_toast_draw_text(rgba, text_x, 9, line1, 2, 242, 249, 250, 255, max_w);
++            pw_toast_draw_text(rgba, text_x, 30, line2, 2, 176, 204, 210, 245, max_w);
++        } else {
++            size_t len = strlen(line1);
++            int32_t scale = ((int32_t)len * 18 <= max_w) ? 3 : 2;
++            int32_t ty = (H - 7 * scale) / 2;
++            pw_toast_draw_text(rgba, text_x, ty, line1, scale, 242, 249, 250, 255, max_w);
++        }
++    }
++    return 0;
++}
++
++#ifndef PW_TOAST_NO_BGRX8
++PW_TOAST_API void pw_toast_blend_bgrx8(uint8_t *dst_bgrx, uint32_t dst_w, uint32_t dst_h,
++                                       uint32_t dst_stride, const uint8_t *toast_rgba,
++                                       uint8_t opacity)
++{
++    if (!dst_bgrx || !toast_rgba || !opacity || dst_w < 64 || dst_h < 64 || dst_stride < dst_w * 4u)
++        return;
++
++    /* Scale proportionally to height relative to 1080p, clamped to <= 65% width. */
++    uint32_t draw_w = (uint32_t)(((uint64_t)PW_TOAST_WIDTH * dst_h + 540u) / 1080u);
++    uint32_t draw_h = (uint32_t)(((uint64_t)PW_TOAST_HEIGHT * dst_h + 540u) / 1080u);
++    uint32_t max_w = (dst_w * 65u) / 100u;
++    if (draw_w > max_w && draw_w > 0) {
++        draw_h = (uint32_t)(((uint64_t)draw_h * max_w) / draw_w);
++        draw_w = max_w;
++    }
++    if (draw_w < 120u) draw_w = 120u;
++    if (draw_h < 24u) draw_h = 24u;
++    if (draw_w >= dst_w || draw_h >= dst_h) return;
++
++    uint32_t margin_x = (uint32_t)(((uint64_t)36u * dst_h + 540u) / 1080u);
++    uint32_t margin_y = (uint32_t)(((uint64_t)28u * dst_h + 540u) / 1080u);
++    if (margin_x < 10u) margin_x = 10u;
++    if (margin_y < 8u) margin_y = 8u;
++    if (draw_w + margin_x > dst_w) margin_x = dst_w - draw_w;
++    if (draw_h + margin_y > dst_h) margin_y = dst_h - draw_h;
++
++    uint32_t ox = dst_w - margin_x - draw_w;
++    uint32_t oy = margin_y;
++
++    for (uint32_t dy = 0; dy < draw_h; dy++) {
++        uint32_t sy = (uint32_t)(((uint64_t)dy * PW_TOAST_HEIGHT) / draw_h);
++        if (sy >= PW_TOAST_HEIGHT) sy = PW_TOAST_HEIGHT - 1u;
++        const uint8_t *srow = toast_rgba + (size_t)sy * PW_TOAST_WIDTH * 4u;
++        uint8_t *drow = dst_bgrx + (size_t)(oy + dy) * dst_stride + (size_t)ox * 4u;
++
++        for (uint32_t dx = 0; dx < draw_w; dx++) {
++            uint32_t sx = (uint32_t)(((uint64_t)dx * PW_TOAST_WIDTH) / draw_w);
++            if (sx >= PW_TOAST_WIDTH) sx = PW_TOAST_WIDTH - 1u;
++            const uint8_t *sp = srow + (size_t)sx * 4u;
++            uint32_t sa = ((uint32_t)sp[3] * opacity + 127u) / 255u;
++            if (!sa) continue;
++            uint32_t inv = 255u - sa;
++            uint8_t *dp = drow + (size_t)dx * 4u;
++            /* dst is BGRX8, src is RGBA8. */
++            dp[0] = (uint8_t)((sp[2] * sa + dp[0] * inv + 127u) / 255u);
++            dp[1] = (uint8_t)((sp[1] * sa + dp[1] * inv + 127u) / 255u);
++            dp[2] = (uint8_t)((sp[0] * sa + dp[2] * inv + 127u) / 255u);
++            dp[3] = 0xffu;
++        }
++    }
++}
++#endif
+diff --git a/src/pw_toast.h b/src/pw_toast.h
+new file mode 100644
+index 0000000..66d8a66
+--- /dev/null
++++ b/src/pw_toast.h
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_TOAST_H
++#define PW_TOAST_H
++/*
++ * Pure C rasterizer and fade/blend helper for semi-transparent top-right
++ * in-game notification pills. Shared between the native GDI presenter
++ * (native/wine64_main.c) and win32u's PS5 Vulkan toast overlay so both paths
++ * draw the exact same pill.
++ */
++#include <stddef.h>
++#include <stdint.h>
++
++enum {
++    PW_TOAST_WIDTH = 560,
++    PW_TOAST_HEIGHT = 54,
++    PW_TOAST_BYTES = PW_TOAST_WIDTH * PW_TOAST_HEIGHT * 4,
++    PW_TOAST_FADE_IN_MS = 150,
++    PW_TOAST_FADE_OUT_MS = 400,
++    PW_TOAST_DEFAULT_DURATION_MS = 3300,
++    PW_TOAST_ACCENT_MINT = 0,
++    PW_TOAST_ACCENT_AMBER = 1,
++    PW_TOAST_ACCENT_CORAL = 2,
++};
++
++#ifdef PW_TOAST_INTERNAL
++#define PW_TOAST_API static
++#else
++#define PW_TOAST_API
++#endif
++
++/* Global fade opacity (0..255) at elapsed_ms into a duration_ms toast.
++ * Returns 0 once expired (elapsed_ms >= duration_ms). */
++PW_TOAST_API uint8_t pw_toast_opacity(uint64_t elapsed_ms, uint32_t duration_ms);
++
++/* Rasterizes a 560x54 straight-alpha RGBA8 pill into rgba (capacity >=
++ * PW_TOAST_BYTES). Returns 0 on success, -1 on invalid arguments. */
++PW_TOAST_API int pw_toast_render_rgba8(uint8_t *rgba, size_t capacity,
++                                       const char *line1, const char *line2, uint32_t accent);
++
++#ifndef PW_TOAST_NO_BGRX8
++/* Alpha-blends a 560x54 straight-alpha RGBA8 toast pill into a top-down BGRX8
++ * frame in the top-right corner with global opacity (0..255), scaled smoothly
++ * for the target frame dimensions. */
++PW_TOAST_API void pw_toast_blend_bgrx8(uint8_t *dst_bgrx, uint32_t dst_w, uint32_t dst_h,
++                                       uint32_t dst_stride, const uint8_t *toast_rgba,
++                                       uint8_t opacity);
++#endif
++
++#endif
+diff --git a/tests/test_build_wine_ps5.py b/tests/test_build_wine_ps5.py
+index 8ccf8fd..70565a8 100644
+--- a/tests/test_build_wine_ps5.py
++++ b/tests/test_build_wine_ps5.py
+@@ -284,15 +284,25 @@ def check_vk_runtime_staging() -> None:
+         headers = []
+         for family, module, name in [('time', 'ntdll', 'pw_qpc_clock.h'),
+                                      ('menu', 'ntdll', 'pw_title_menu.h'),
++                                     ('menu', 'ntdll', 'pw_title_toast.h'),
+                                      ('input', 'win32u', 'pw_key_shared.h')]:
+             if f'wine/ps5/{family}/' not in block:
+                 continue
+             original = base / f'wine/ps5/{family}/{name}'
+-            original.parent.mkdir(parents=True)
++            original.parent.mkdir(parents=True, exist_ok=True)
+             original.write_text(f'{family} shared ABI fixture\n')
+             target = source / f'dlls/{module}/{name}'
+             target.parent.mkdir(parents=True, exist_ok=True)
+             headers.append((original, target))
++        for src_name, dst_name in [('pw_toast.h', 'pw_toast.h'), ('pw_toast.c', 'pw_toast_impl.h')]:
++            if f'src/{src_name}' not in block:
++                continue
++            original = base / 'src' / src_name
++            original.parent.mkdir(parents=True, exist_ok=True)
++            original.write_text(f'{src_name} fixture\n')
++            target = source / 'dlls/win32u' / dst_name
++            target.parent.mkdir(parents=True, exist_ok=True)
++            headers.append((original, target))
+         helper = base / 'tools/stage_vk_batch.py'
+         helper.write_text('import sys, pathlib\nassert sys.argv[1:] == ["--source", '
+                           + repr(str(source)) + ', "--repo", ' + repr(str(base))
+diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
+index f85435b..7b8fe11 100644
+--- a/tests/test_pw_game_profile.c
++++ b/tests/test_pw_game_profile.c
+@@ -262,6 +262,9 @@ static void test_refusals(void)
+         APP "[display]\nshow_fps = yes\n",                     /* only true or false */
+         APP "[display]\nshow_fps =\n",
+         APP "[display]\nshow_fps = true\nshow_fps = false\n",   /* twice */
++        APP "[display]\ntoasts = yes\n",                        /* only true or false */
++        APP "[display]\ntoasts =\n",
++        APP "[display]\ntoasts = true\ntoasts = false\n",       /* twice */
+         APP "[display]\nrefresh = 90\n",                      /* 60 or 120 only */
+         APP "[display]\nrefresh =\n",
+         APP "[display]\nrefresh = 120\nrefresh = 60\n",         /* twice */
+@@ -388,6 +391,9 @@ static void test_presets(void)
+     assert(parse(APP "[input]\npreset = bomb\n", &p) == PW_OK && !p.input.player2[0]);
+ 
+     /* A PC's keyboard and mouse: off unless the profile says otherwise. */
++    assert(parse(APP "[display]\nshow_fps = true\n", &p) == PW_OK && p.display.toasts == 1);
++    assert(parse(APP "[display]\ntoasts = false\n", &p) == PW_OK && p.display.toasts == 0);
++    assert(parse(APP "[display]\ntoasts = true\n", &p) == PW_OK && p.display.toasts == 1);
+     assert(parse(APP "[input]\nmode = xinput\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_OFF);
+     assert(parse(APP "[input]\nremote = sender\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_SENDER);
+     assert(parse(APP "[input]\nremote = browser\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BROWSER);
+diff --git a/tests/test_pw_toast.c b/tests/test_pw_toast.c
+new file mode 100644
+index 0000000..90e0391
+--- /dev/null
++++ b/tests/test_pw_toast.c
+@@ -0,0 +1,115 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "../src/pw_toast.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++static void test_opacity_envelope(void)
++{
++    assert(pw_toast_opacity(0, 3300) == 0);
++    assert(pw_toast_opacity(75, 3300) >= 125 && pw_toast_opacity(75, 3300) <= 130);
++    assert(pw_toast_opacity(150, 3300) == 255);
++    assert(pw_toast_opacity(1500, 3300) == 255);
++    assert(pw_toast_opacity(2900, 3300) == 255);
++    assert(pw_toast_opacity(3100, 3300) >= 125 && pw_toast_opacity(3100, 3300) <= 130);
++    assert(pw_toast_opacity(3299, 3300) > 0 && pw_toast_opacity(3299, 3300) < 5);
++    assert(pw_toast_opacity(3300, 3300) == 0);
++    assert(pw_toast_opacity(99999, 3300) == 0);
++    assert(pw_toast_opacity(10, 0) == 0);
++
++    /* Short duration scales fade-in/out without underflow. */
++    assert(pw_toast_opacity(50, 200) == 255);
++    assert(pw_toast_opacity(125, 200) > 0 && pw_toast_opacity(125, 200) < 255);
++    assert(pw_toast_opacity(200, 200) == 0);
++}
++
++static void test_raster_and_accents(void)
++{
++    static uint8_t rgba[PW_TOAST_BYTES];
++
++    assert(pw_toast_render_rgba8(NULL, sizeof(rgba), "HELLO", NULL, PW_TOAST_ACCENT_MINT) == -1);
++    assert(pw_toast_render_rgba8(rgba, PW_TOAST_BYTES - 1, "HELLO", NULL, PW_TOAST_ACCENT_MINT) == -1);
++
++    /* Two-line mint toast. */
++    assert(pw_toast_render_rgba8(rgba, sizeof(rgba), "PC K+M ACTIVE", "F9 MENU - PAD MUTED",
++                                 PW_TOAST_ACCENT_MINT) == 0);
++    /* Outer corner (0,0) is rounded away (alpha == 0). */
++    assert(rgba[3] == 0);
++    /* Left accent stripe mid-height (x=2, y=27) has mint RGB. */
++    const uint8_t *stripe = rgba + ((size_t)27 * PW_TOAST_WIDTH + 2u) * 4u;
++    assert(stripe[0] == 133 && stripe[1] == 230 && stripe[2] == 189 && stripe[3] == 242);
++    /* Glass interior background away from text is semi-transparent (alpha ~198..210). */
++    const uint8_t *glass = rgba + ((size_t)27 * PW_TOAST_WIDTH + (PW_TOAST_WIDTH - 6u)) * 4u;
++    assert(glass[3] >= 180 && glass[3] <= 225);
++
++    /* Check that white text ink pixels were drawn in the text band. */
++    int ink = 0;
++    for (int y = 9; y < 23; y++) {
++        for (int x = 20; x < 240; x++) {
++            const uint8_t *p = rgba + ((size_t)y * PW_TOAST_WIDTH + (size_t)x) * 4u;
++            if (p[0] > 220 && p[1] > 220 && p[2] > 220 && p[3] == 255) ink++;
++        }
++    }
++    assert(ink > 100);
++
++    /* Amber and coral accents. */
++    assert(pw_toast_render_rgba8(rgba, sizeof(rgba), "DUALSENSE RECLAIMED", NULL,
++                                 PW_TOAST_ACCENT_AMBER) == 0);
++    assert(stripe[0] == 247 && stripe[1] == 198 && stripe[2] == 114);
++
++    assert(pw_toast_render_rgba8(rgba, sizeof(rgba), "PC INPUT PORT FAILED", "CHECK SETTINGS",
++                                 PW_TOAST_ACCENT_CORAL) == 0);
++    assert(stripe[0] == 242 && stripe[1] == 118 && stripe[2] == 118);
++}
++
++static void test_bgrx8_blend(void)
++{
++    static uint8_t rgba[PW_TOAST_BYTES];
++    static uint8_t frame[800 * 600 * 4];
++    const uint32_t W = 800, H = 600, stride = W * 4u;
++
++    assert(pw_toast_render_rgba8(rgba, sizeof(rgba), "PC K+M ACTIVE", "F9 MENU",
++                                 PW_TOAST_ACCENT_MINT) == 0);
++
++    /* Fill frame with flat BGRX8 grey (80, 100, 120, 255). */
++    for (uint32_t i = 0; i < W * H; i++) {
++        frame[i * 4 + 0] = 80;
++        frame[i * 4 + 1] = 100;
++        frame[i * 4 + 2] = 120;
++        frame[i * 4 + 3] = 255;
++    }
++
++    /* Opacity 0 leaves frame untouched. */
++    pw_toast_blend_bgrx8(frame, W, H, stride, rgba, 0);
++    for (uint32_t i = 0; i < W * H; i++) {
++        assert(frame[i * 4 + 0] == 80 && frame[i * 4 + 1] == 100 && frame[i * 4 + 2] == 120);
++    }
++
++    /* Full opacity blends into top-right quadrant only, leaving top-left untouched. */
++    pw_toast_blend_bgrx8(frame, W, H, stride, rgba, 255);
++    assert(frame[0] == 80 && frame[1] == 100 && frame[2] == 120);
++
++    int touched_tr = 0, touched_bl = 0;
++    for (uint32_t y = 0; y < 120; y++) {
++        for (uint32_t x = 400; x < W; x++) {
++            const uint8_t *p = frame + ((size_t)y * W + x) * 4u;
++            if (p[0] != 80 || p[1] != 100 || p[2] != 120) touched_tr++;
++        }
++    }
++    for (uint32_t y = 300; y < H; y++) {
++        for (uint32_t x = 0; x < 400; x++) {
++            const uint8_t *p = frame + ((size_t)y * W + x) * 4u;
++            if (p[0] != 80 || p[1] != 100 || p[2] != 120) touched_bl++;
++        }
++    }
++    assert(touched_tr > 2000 && touched_bl == 0);
++}
++
++int main(void)
++{
++    test_opacity_envelope();
++    test_raster_and_accents();
++    test_bgrx8_blend();
++    puts("test_pw_toast: ok");
++    return 0;
++}
+diff --git a/tests/test_pw_wine_sink.c b/tests/test_pw_wine_sink.c
+index a0ba19a..da11f32 100644
+--- a/tests/test_pw_wine_sink.c
++++ b/tests/test_pw_wine_sink.c
+@@ -219,6 +219,47 @@ static void test_menu(void)
+     assert(got.sequence==6 && !got.open && !got.title[0]);
+ }
+ 
++static void test_toast(void)
++{
++    struct pw_title_toast got,toast;
++    memset(&got,0xa5,sizeof(got));
++    pw_wine_toast(&got);
++    assert(got.version==PW_TITLE_TOAST_VERSION && !got.visible && !got.line1[0]);
++    pw_wine_toast(NULL);
++
++    memset(&toast,0,sizeof(toast));
++    toast.visible=1;toast.accent=PW_TITLE_TOAST_ACCENT_AMBER;toast.duration_ms=3300;
++    toast.created_ns=123456789ull;
++    strcpy(toast.line1,"PC K+M ACTIVE");strcpy(toast.line2,"F9 MENU");
++    pw_wine_set_toast(&toast);
++    pw_wine_toast(&got);
++    assert(got.version==PW_TITLE_TOAST_VERSION && got.sequence==1 && got.visible==1);
++    assert(got.accent==PW_TITLE_TOAST_ACCENT_AMBER && got.duration_ms==3300);
++    assert(got.created_ns==123456789ull && !strcmp(got.line1,"PC K+M ACTIVE") && !strcmp(got.line2,"F9 MENU"));
++
++    /* Re-posting increments sequence so repeated notifications refresh fade-in. */
++    pw_wine_set_toast(&toast);
++    pw_wine_toast(&got);
++    assert(got.sequence==2);
++
++    /* Out-of-range accent and duration are clamped; strings terminated. */
++    toast.accent=99;toast.duration_ms=50;
++    memset(toast.line1,'A',sizeof(toast.line1));
++    memset(toast.line2,'B',sizeof(toast.line2));
++    pw_wine_set_toast(&toast);
++    pw_wine_toast(&got);
++    assert(got.sequence==3 && got.accent==PW_TITLE_TOAST_ACCENT_MINT && got.duration_ms==500);
++    assert(strlen(got.line1)==PW_TITLE_TOAST_COLUMNS-1 && strlen(got.line2)==PW_TITLE_TOAST_COLUMNS-1);
++
++    /* Clearing hides toast; clearing again keeps sequence unchanged. */
++    pw_wine_set_toast(NULL);
++    pw_wine_toast(&got);
++    assert(!got.visible && !got.line1[0]);
++    pw_wine_set_toast(NULL);
++    pw_wine_toast(&got);
++    assert(!got.visible);
++}
++
+ int main(void)
+ {
+     uint32_t frame[4*3];
+@@ -327,5 +368,6 @@ int main(void)
+     assert(!pw_wine_rumble(&left,NULL) && left==0xffff);
+     test_display_release();
+     test_menu();
++    test_toast();
+     return 0;
+ }
+diff --git a/tools/build_native.sh b/tools/build_native.sh
+index f4b6579..d535b15 100755
+--- a/tools/build_native.sh
++++ b/tools/build_native.sh
+@@ -197,7 +197,7 @@ sources=(
+     native/pw_wine_prefix.c
+     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
+     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
+-    src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_netinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_spinner.c src/pw_script_input.c
++    src/pw_pad.c src/pw_game_menu.c src/pw_toast.c src/pw_osk.c src/pw_hid.c src/pw_netinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_spinner.c src/pw_script_input.c
+     src/pw_tsc_calibrate.c
+     wine/ps5/pw_wine_prx.c
+ )
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index bcb8ba2..5cef5d8 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -261,8 +261,14 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
+     fail "cannot stage shared-clock ABI"
+ cp "$root/wine/ps5/menu/pw_title_menu.h" "$tree/dlls/ntdll/pw_title_menu.h" ||
+     fail "cannot stage title-menu ABI"
++cp "$root/wine/ps5/menu/pw_title_toast.h" "$tree/dlls/ntdll/pw_title_toast.h" ||
++    fail "cannot stage title-toast ABI"
+ cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
+     fail "cannot stage shared-input ABI"
++cp "$root/src/pw_toast.h" "$tree/dlls/win32u/pw_toast.h" ||
++    fail "cannot stage toast header"
++cp "$root/src/pw_toast.c" "$tree/dlls/win32u/pw_toast_impl.h" ||
++    fail "cannot stage toast rasterizer"
+ 
+ cflags=${CFLAGS:--g -O2}
+ 
+@@ -273,7 +279,8 @@ stamp=$(
+       for patch in $ordered; do cat "$patches/$patch"; done
+       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
+           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" \
+-          "$root/wine/ps5/menu/pw_title_menu.h"; } | sha256sum | cut -c1-64)
++          "$root/wine/ps5/menu/pw_title_menu.h" "$root/wine/ps5/menu/pw_title_toast.h" \
++          "$root/src/pw_toast.h" "$root/src/pw_toast.c"; } | sha256sum | cut -c1-64)
+ build=$work/build
+ if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
+     rm -rf "$build"
+@@ -420,6 +427,7 @@ if [ "$prx_status" = 0 ]; then
+         pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
+         pw_wine_present pw_wine_next_input pw_wine_input_fd \
+         pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble pw_wine_set_menu pw_wine_menu \
++        pw_wine_set_toast pw_wine_toast \
+         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
+         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
+         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
+diff --git a/wine/patches/0992-win32u-ps5-vulkan-toast-overlay.patch b/wine/patches/0992-win32u-ps5-vulkan-toast-overlay.patch
+new file mode 100644
+index 0000000..951bf78
+--- /dev/null
++++ b/wine/patches/0992-win32u-ps5-vulkan-toast-overlay.patch
+@@ -0,0 +1,1334 @@
++From 42cc9ebf770a36e1f6358b9f5e8cb19ae53f06be Mon Sep 17 00:00:00 2001
++From: TrinityXSX <trinityxsx@users.noreply.github.com>
++Date: Sat, 28 Nov 2026 16:04:02 +0100
++Subject: [PATCH] win32u: Render PS5 in-game toast notifications over Vulkan
++ swapchains.
++
++Hook win32u_vkCreateSwapchainKHR, win32u_vkDestroySwapchainKHR, win32u_vkDestroyDevice, and win32u_vkQueuePresentKHR to composite a lightweight semi-transparent top-right notification pill read from ntdll's pw_wine_toast() onto any presenting Vulkan swapchain (DXVK, vkd3d-proton, Zink, XCL). When no toast is visible, the fast path returns immediately with zero GPU work; if setup fails or a swapchain is unsupported, presentation falls through untouched.
++---
++ dlls/win32u/Makefile.in    |    1 +
++ dlls/win32u/ps5_toast_vk.c | 1186 ++++++++++++++++++++++++++++++++++++
++ dlls/win32u/vulkan.c       |   63 ++
++ 3 files changed, 1250 insertions(+)
++ create mode 100644 dlls/win32u/ps5_toast_vk.c
++
++diff --git a/dlls/win32u/Makefile.in b/dlls/win32u/Makefile.in
++index 2a91f96..a5b96e1 100644
++--- a/dlls/win32u/Makefile.in
+++++ b/dlls/win32u/Makefile.in
++@@ -44,6 +44,7 @@ SOURCES = \
++ 	palette.c \
++ 	path.c \
++ 	ps5drv.c \
+++	ps5_toast_vk.c \
++ 	pen.c \
++ 	printdrv.c \
++ 	rawinput.c \
++diff --git a/dlls/win32u/ps5_toast_vk.c b/dlls/win32u/ps5_toast_vk.c
++new file mode 100644
++index 0000000..b60aef0
++--- /dev/null
+++++ b/dlls/win32u/ps5_toast_vk.c
++@@ -0,0 +1,1186 @@
+++/*
+++ * PS5 Vulkan in-game toast overlay for win32u
+++ *
+++ * Copyright 2026 TrinityXSX
+++ *
+++ * This library is free software; you can redistribute it and/or
+++ * modify it under the terms of the GNU Lesser General Public
+++ * License as published by the Free Software Foundation; either
+++ * version 2.1 of the License, or (at your option) any later version.
+++ *
+++ * This library is distributed in the hope that it will be useful,
+++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++ * Lesser General Public License for more details.
+++ *
+++ * You should have received a copy of the GNU Lesser General Public
+++ * License along with this library; if not, write to the Free Software
+++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+++ */
+++
+++#if 0
+++#pragma makedep unix
+++#endif
+++
+++#include "config.h"
+++
+++#include <dlfcn.h>
+++#include <pthread.h>
+++#include <stdlib.h>
+++#include <string.h>
+++#include <time.h>
+++
+++#include "ntstatus.h"
+++#include "win32u_private.h"
+++#include "wine/debug.h"
+++#ifdef SONAME_LIBVULKAN
+++#include "wine/vulkan.h"
+++#include "wine/vulkan_driver.h"
+++#endif
+++
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++
+++WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
+++
+++#include "../ntdll/pw_title_toast.h"
+++#define PW_TOAST_INTERNAL 1
+++#define PW_TOAST_NO_BGRX8 1
+++#include "pw_toast.h"
+++#include "pw_toast_impl.h"
+++
+++/* Precompiled SPIR-V 1.0 vertex shader (4-vertex triangle strip from gl_VertexIndex).
+++ * Push constants: float4 rect (x0, y0, x1, y1 NDC); float4 params (opacity, 0, 0, 0). */
+++static const uint32_t toast_vs_spv[307] = {
+++    0x07230203u, 0x00010000u, 0x000e0000u, 0x00000032u, 0x00000000u, 0x00020011u, 0x00000001u, 0x0006000bu,
+++    0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u,
+++    0x0008000fu, 0x00000000u, 0x00000002u, 0x6e69616du, 0x00000000u, 0x00000003u, 0x00000004u, 0x00000005u,
+++    0x00030003u, 0x00000005u, 0x00000258u, 0x000a0005u, 0x00000006u, 0x65707974u, 0x7375502eu, 0x6e6f4368u,
+++    0x6e617473u, 0x75502e74u, 0x6f436873u, 0x6174736eu, 0x0073746eu, 0x00050006u, 0x00000006u, 0x00000000u,
+++    0x74636572u, 0x00000000u, 0x00050006u, 0x00000006u, 0x00000001u, 0x61726170u, 0x0000736du, 0x00030005u,
+++    0x00000007u, 0x00006370u, 0x00070005u, 0x00000005u, 0x2e74756fu, 0x2e726176u, 0x43584554u, 0x44524f4fu,
+++    0x00000030u, 0x00040005u, 0x00000002u, 0x6e69616du, 0x00000000u, 0x00040047u, 0x00000003u, 0x0000000bu,
+++    0x0000002au, 0x00040047u, 0x00000004u, 0x0000000bu, 0x00000000u, 0x00040047u, 0x00000005u, 0x0000001eu,
+++    0x00000000u, 0x00050048u, 0x00000006u, 0x00000000u, 0x00000023u, 0x00000000u, 0x00050048u, 0x00000006u,
+++    0x00000001u, 0x00000023u, 0x00000010u, 0x00030047u, 0x00000006u, 0x00000002u, 0x00040015u, 0x00000008u,
+++    0x00000020u, 0x00000000u, 0x0004002bu, 0x00000008u, 0x00000009u, 0x00000001u, 0x0004002bu, 0x00000008u,
+++    0x0000000au, 0x00000000u, 0x00030016u, 0x0000000bu, 0x00000020u, 0x0004002bu, 0x0000000bu, 0x0000000cu,
+++    0x3f800000u, 0x0004002bu, 0x0000000bu, 0x0000000du, 0x00000000u, 0x0004002bu, 0x00000008u, 0x0000000eu,
+++    0x00000002u, 0x00040015u, 0x0000000fu, 0x00000020u, 0x00000001u, 0x0004002bu, 0x0000000fu, 0x00000010u,
+++    0x00000000u, 0x0004002bu, 0x0000000fu, 0x00000011u, 0x00000002u, 0x0004002bu, 0x0000000fu, 0x00000012u,
+++    0x00000001u, 0x0004002bu, 0x0000000fu, 0x00000013u, 0x00000003u, 0x00040017u, 0x00000014u, 0x0000000bu,
+++    0x00000004u, 0x0004001eu, 0x00000006u, 0x00000014u, 0x00000014u, 0x00040020u, 0x00000015u, 0x00000009u,
+++    0x00000006u, 0x00040020u, 0x00000016u, 0x00000001u, 0x00000008u, 0x00040020u, 0x00000017u, 0x00000003u,
+++    0x00000014u, 0x00040017u, 0x00000018u, 0x0000000bu, 0x00000002u, 0x00040020u, 0x00000019u, 0x00000003u,
+++    0x00000018u, 0x00020013u, 0x0000001au, 0x00030021u, 0x0000001bu, 0x0000001au, 0x00020014u, 0x0000001cu,
+++    0x00040020u, 0x0000001du, 0x00000009u, 0x0000000bu, 0x0004003bu, 0x00000015u, 0x00000007u, 0x00000009u,
+++    0x0004003bu, 0x00000016u, 0x00000003u, 0x00000001u, 0x0004003bu, 0x00000017u, 0x00000004u, 0x00000003u,
+++    0x0004003bu, 0x00000019u, 0x00000005u, 0x00000003u, 0x00050036u, 0x0000001au, 0x00000002u, 0x00000000u,
+++    0x0000001bu, 0x000200f8u, 0x0000001eu, 0x0004003du, 0x00000008u, 0x0000001fu, 0x00000003u, 0x000500c7u,
+++    0x00000008u, 0x00000020u, 0x0000001fu, 0x00000009u, 0x000500abu, 0x0000001cu, 0x00000021u, 0x00000020u,
+++    0x0000000au, 0x000600a9u, 0x0000000bu, 0x00000022u, 0x00000021u, 0x0000000cu, 0x0000000du, 0x000500c7u,
+++    0x00000008u, 0x00000023u, 0x0000001fu, 0x0000000eu, 0x000500abu, 0x0000001cu, 0x00000024u, 0x00000023u,
+++    0x0000000au, 0x000600a9u, 0x0000000bu, 0x00000025u, 0x00000024u, 0x0000000cu, 0x0000000du, 0x00050050u,
+++    0x00000018u, 0x00000026u, 0x00000022u, 0x00000025u, 0x00060041u, 0x0000001du, 0x00000027u, 0x00000007u,
+++    0x00000010u, 0x00000010u, 0x0004003du, 0x0000000bu, 0x00000028u, 0x00000027u, 0x00060041u, 0x0000001du,
+++    0x00000029u, 0x00000007u, 0x00000010u, 0x00000011u, 0x0004003du, 0x0000000bu, 0x0000002au, 0x00000029u,
+++    0x0008000cu, 0x0000000bu, 0x0000002bu, 0x00000001u, 0x0000002eu, 0x00000028u, 0x0000002au, 0x00000022u,
+++    0x00060041u, 0x0000001du, 0x0000002cu, 0x00000007u, 0x00000010u, 0x00000012u, 0x0004003du, 0x0000000bu,
+++    0x0000002du, 0x0000002cu, 0x00060041u, 0x0000001du, 0x0000002eu, 0x00000007u, 0x00000010u, 0x00000013u,
+++    0x0004003du, 0x0000000bu, 0x0000002fu, 0x0000002eu, 0x0008000cu, 0x0000000bu, 0x00000030u, 0x00000001u,
+++    0x0000002eu, 0x0000002du, 0x0000002fu, 0x00000025u, 0x00070050u, 0x00000014u, 0x00000031u, 0x0000002bu,
+++    0x00000030u, 0x0000000du, 0x0000000cu, 0x0003003eu, 0x00000004u, 0x00000031u, 0x0003003eu, 0x00000005u,
+++    0x00000026u, 0x000100fdu, 0x00010038u,
+++};
+++
+++/* Precompiled SPIR-V 1.0 fragment shader (combined image sampler binding 0,
+++ * multiplies sampled alpha by push constant params.x). */
+++static const uint32_t toast_fs_spv[257] = {
+++    0x07230203u, 0x00010000u, 0x000e0000u, 0x00000022u, 0x00000000u, 0x00020011u, 0x00000001u, 0x0003000eu,
+++    0x00000000u, 0x00000001u, 0x0007000fu, 0x00000004u, 0x00000001u, 0x6e69616du, 0x00000000u, 0x00000002u,
+++    0x00000003u, 0x00030010u, 0x00000001u, 0x00000007u, 0x00030003u, 0x00000005u, 0x00000258u, 0x000a0005u,
+++    0x00000004u, 0x65707974u, 0x7375502eu, 0x6e6f4368u, 0x6e617473u, 0x75502e74u, 0x6f436873u, 0x6174736eu,
+++    0x0073746eu, 0x00050006u, 0x00000004u, 0x00000000u, 0x74636572u, 0x00000000u, 0x00050006u, 0x00000004u,
+++    0x00000001u, 0x61726170u, 0x0000736du, 0x00030005u, 0x00000005u, 0x00006370u, 0x00060005u, 0x00000006u,
+++    0x65707974u, 0x2e64322eu, 0x67616d69u, 0x00000065u, 0x00030005u, 0x00000007u, 0x00786574u, 0x00070005u,
+++    0x00000002u, 0x762e6e69u, 0x542e7261u, 0x4f435845u, 0x3044524fu, 0x00000000u, 0x00070005u, 0x00000003u,
+++    0x2e74756fu, 0x2e726176u, 0x545f5653u, 0x65677261u, 0x00003074u, 0x00040005u, 0x00000001u, 0x6e69616du,
+++    0x00000000u, 0x00070005u, 0x00000008u, 0x65707974u, 0x6d61732eu, 0x64656c70u, 0x616d692eu, 0x00006567u,
+++    0x00040047u, 0x00000002u, 0x0000001eu, 0x00000000u, 0x00040047u, 0x00000003u, 0x0000001eu, 0x00000000u,
+++    0x00040047u, 0x00000007u, 0x00000022u, 0x00000000u, 0x00040047u, 0x00000007u, 0x00000021u, 0x00000000u,
+++    0x00050048u, 0x00000004u, 0x00000000u, 0x00000023u, 0x00000000u, 0x00050048u, 0x00000004u, 0x00000001u,
+++    0x00000023u, 0x00000010u, 0x00030047u, 0x00000004u, 0x00000002u, 0x00040015u, 0x00000009u, 0x00000020u,
+++    0x00000001u, 0x0004002bu, 0x00000009u, 0x0000000au, 0x00000001u, 0x0004002bu, 0x00000009u, 0x0000000bu,
+++    0x00000000u, 0x00030016u, 0x0000000cu, 0x00000020u, 0x00040017u, 0x0000000du, 0x0000000cu, 0x00000004u,
+++    0x0004001eu, 0x00000004u, 0x0000000du, 0x0000000du, 0x00040020u, 0x0000000eu, 0x00000009u, 0x00000004u,
+++    0x00090019u, 0x00000006u, 0x0000000cu, 0x00000001u, 0x00000002u, 0x00000000u, 0x00000000u, 0x00000001u,
+++    0x00000000u, 0x00040017u, 0x0000000fu, 0x0000000cu, 0x00000002u, 0x00040020u, 0x00000010u, 0x00000001u,
+++    0x0000000fu, 0x00040020u, 0x00000011u, 0x00000003u, 0x0000000du, 0x00020013u, 0x00000012u, 0x00030021u,
+++    0x00000013u, 0x00000012u, 0x0003001bu, 0x00000008u, 0x00000006u, 0x00040020u, 0x00000014u, 0x00000009u,
+++    0x0000000cu, 0x0004003bu, 0x0000000eu, 0x00000005u, 0x00000009u, 0x0004003bu, 0x00000010u, 0x00000002u,
+++    0x00000001u, 0x0004003bu, 0x00000011u, 0x00000003u, 0x00000003u, 0x00040020u, 0x00000015u, 0x00000000u,
+++    0x00000008u, 0x0004003bu, 0x00000015u, 0x00000007u, 0x00000000u, 0x00050036u, 0x00000012u, 0x00000001u,
+++    0x00000000u, 0x00000013u, 0x000200f8u, 0x00000016u, 0x0004003du, 0x0000000fu, 0x00000017u, 0x00000002u,
+++    0x0004003du, 0x00000008u, 0x00000018u, 0x00000007u, 0x00060057u, 0x0000000du, 0x00000019u, 0x00000018u,
+++    0x00000017u, 0x00000000u, 0x00050051u, 0x0000000cu, 0x0000001au, 0x00000019u, 0x00000003u, 0x00060041u,
+++    0x00000014u, 0x0000001bu, 0x00000005u, 0x0000000au, 0x0000000bu, 0x0004003du, 0x0000000cu, 0x0000001cu,
+++    0x0000001bu, 0x00050085u, 0x0000000cu, 0x0000001du, 0x0000001au, 0x0000001cu, 0x00050051u, 0x0000000cu,
+++    0x0000001eu, 0x00000019u, 0x00000000u, 0x00050051u, 0x0000000cu, 0x0000001fu, 0x00000019u, 0x00000001u,
+++    0x00050051u, 0x0000000cu, 0x00000020u, 0x00000019u, 0x00000002u, 0x00070050u, 0x0000000du, 0x00000021u,
+++    0x0000001eu, 0x0000001fu, 0x00000020u, 0x0000001du, 0x0003003eu, 0x00000003u, 0x00000021u, 0x000100fdu,
+++    0x00010038u,
+++};
+++
+++enum { PS5_TOAST_MAX_IMAGES = 16, PS5_TOAST_RING = 2, PS5_TOAST_MAX_WAITS = 16 };
+++
+++struct ps5_toast_slot
+++{
+++    VkCommandBuffer cmd;
+++    VkFence fence;
+++    VkSemaphore done_sem;
+++    uint32_t submitted;
+++};
+++
+++struct ps5_toast_swapchain
+++{
+++    struct ps5_toast_swapchain *next;
+++    struct vulkan_device *device;
+++    VkSwapchainKHR host_swapchain;
+++    VkFormat format;
+++    VkExtent2D extent;
+++    VkImageUsageFlags usage;
+++    uint32_t array_layers;
+++    PFN_vkGetInstanceProcAddr get_instance_proc;
+++    PFN_vkGetDeviceProcAddr get_device_proc;
+++
+++    int state; /* 0 = lazy uninit, 1 = ready, -1 = disabled/failed */
+++    uint32_t queue_family;
+++    uint32_t image_count;
+++    VkImage images[PS5_TOAST_MAX_IMAGES];
+++    VkImageView views[PS5_TOAST_MAX_IMAGES];
+++    VkFramebuffer framebuffers[PS5_TOAST_MAX_IMAGES];
+++
+++    VkRenderPass render_pass;
+++    VkDescriptorSetLayout desc_layout;
+++    VkDescriptorPool desc_pool;
+++    VkDescriptorSet desc_set;
+++    VkPipelineLayout pipe_layout;
+++    VkPipeline pipeline;
+++    VkSampler sampler;
+++
+++    VkImage toast_image;
+++    VkDeviceMemory toast_image_mem;
+++    VkImageView toast_view;
+++
+++    VkBuffer staging_buf;
+++    VkDeviceMemory staging_mem;
+++    uint8_t *staging_ptr;
+++    uint32_t staging_non_coherent;
+++    uint32_t texture_initialized;
+++    uint32_t uploaded_sequence;
+++
+++    VkCommandPool cmd_pool;
+++    struct ps5_toast_slot slots[PS5_TOAST_RING];
+++    uint32_t frame_cursor;
+++
+++    PFN_vkGetSwapchainImagesKHR p_vkGetSwapchainImagesKHR;
+++    PFN_vkCreateImageView p_vkCreateImageView;
+++    PFN_vkDestroyImageView p_vkDestroyImageView;
+++    PFN_vkCreateRenderPass p_vkCreateRenderPass;
+++    PFN_vkDestroyRenderPass p_vkDestroyRenderPass;
+++    PFN_vkCreateFramebuffer p_vkCreateFramebuffer;
+++    PFN_vkDestroyFramebuffer p_vkDestroyFramebuffer;
+++    PFN_vkCreateImage p_vkCreateImage;
+++    PFN_vkDestroyImage p_vkDestroyImage;
+++    PFN_vkGetImageMemoryRequirements p_vkGetImageMemoryRequirements;
+++    PFN_vkBindImageMemory p_vkBindImageMemory;
+++    PFN_vkCreateBuffer p_vkCreateBuffer;
+++    PFN_vkDestroyBuffer p_vkDestroyBuffer;
+++    PFN_vkGetBufferMemoryRequirements p_vkGetBufferMemoryRequirements;
+++    PFN_vkBindBufferMemory p_vkBindBufferMemory;
+++    PFN_vkAllocateMemory p_vkAllocateMemory;
+++    PFN_vkFreeMemory p_vkFreeMemory;
+++    PFN_vkMapMemory p_vkMapMemory;
+++    PFN_vkUnmapMemory p_vkUnmapMemory;
+++    PFN_vkFlushMappedMemoryRanges p_vkFlushMappedMemoryRanges;
+++    PFN_vkCreateSampler p_vkCreateSampler;
+++    PFN_vkDestroySampler p_vkDestroySampler;
+++    PFN_vkCreateDescriptorSetLayout p_vkCreateDescriptorSetLayout;
+++    PFN_vkDestroyDescriptorSetLayout p_vkDestroyDescriptorSetLayout;
+++    PFN_vkCreateDescriptorPool p_vkCreateDescriptorPool;
+++    PFN_vkDestroyDescriptorPool p_vkDestroyDescriptorPool;
+++    PFN_vkAllocateDescriptorSets p_vkAllocateDescriptorSets;
+++    PFN_vkUpdateDescriptorSets p_vkUpdateDescriptorSets;
+++    PFN_vkCreatePipelineLayout p_vkCreatePipelineLayout;
+++    PFN_vkDestroyPipelineLayout p_vkDestroyPipelineLayout;
+++    PFN_vkCreateShaderModule p_vkCreateShaderModule;
+++    PFN_vkDestroyShaderModule p_vkDestroyShaderModule;
+++    PFN_vkCreateGraphicsPipelines p_vkCreateGraphicsPipelines;
+++    PFN_vkDestroyPipeline p_vkDestroyPipeline;
+++    PFN_vkCreateCommandPool p_vkCreateCommandPool;
+++    PFN_vkDestroyCommandPool p_vkDestroyCommandPool;
+++    PFN_vkAllocateCommandBuffers p_vkAllocateCommandBuffers;
+++    PFN_vkResetCommandBuffer p_vkResetCommandBuffer;
+++    PFN_vkBeginCommandBuffer p_vkBeginCommandBuffer;
+++    PFN_vkEndCommandBuffer p_vkEndCommandBuffer;
+++    PFN_vkCmdPipelineBarrier p_vkCmdPipelineBarrier;
+++    PFN_vkCmdCopyBufferToImage p_vkCmdCopyBufferToImage;
+++    PFN_vkCmdBeginRenderPass p_vkCmdBeginRenderPass;
+++    PFN_vkCmdSetViewport p_vkCmdSetViewport;
+++    PFN_vkCmdSetScissor p_vkCmdSetScissor;
+++    PFN_vkCmdBindPipeline p_vkCmdBindPipeline;
+++    PFN_vkCmdBindDescriptorSets p_vkCmdBindDescriptorSets;
+++    PFN_vkCmdPushConstants p_vkCmdPushConstants;
+++    PFN_vkCmdDraw p_vkCmdDraw;
+++    PFN_vkCmdEndRenderPass p_vkCmdEndRenderPass;
+++    PFN_vkCreateFence p_vkCreateFence;
+++    PFN_vkDestroyFence p_vkDestroyFence;
+++    PFN_vkWaitForFences p_vkWaitForFences;
+++    PFN_vkResetFences p_vkResetFences;
+++    PFN_vkCreateSemaphore p_vkCreateSemaphore;
+++    PFN_vkDestroySemaphore p_vkDestroySemaphore;
+++    PFN_vkQueueSubmit p_vkQueueSubmit;
+++};
+++
+++static pthread_mutex_t ps5_toast_lock = PTHREAD_MUTEX_INITIALIZER;
+++static struct ps5_toast_swapchain *ps5_toast_list;
+++
+++static uint64_t ps5_toast_now_ns(void)
+++{
+++    struct timespec ts;
+++    if (clock_gettime( CLOCK_MONOTONIC, &ts ) != 0) return 0u;
+++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+++}
+++
+++static BOOL ps5_toast_is_srgb( VkFormat fmt )
+++{
+++    return fmt == VK_FORMAT_B8G8R8A8_SRGB || fmt == VK_FORMAT_R8G8B8A8_SRGB ||
+++           fmt == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+++}
+++
+++static int ps5_toast_find_memory_type( const VkPhysicalDeviceMemoryProperties *props,
+++                                       uint32_t type_bits, VkMemoryPropertyFlags required )
+++{
+++    for (uint32_t i = 0; i < props->memoryTypeCount; i++)
+++    {
+++        if ((type_bits & (1u << i)) &&
+++            (props->memoryTypes[i].propertyFlags & required) == required)
+++            return (int)i;
+++    }
+++    return -1;
+++}
+++
+++static void ps5_toast_destroy_gpu( struct ps5_toast_swapchain *ctx )
+++{
+++    VkDevice dev = ctx->device ? ctx->device->host.device : VK_NULL_HANDLE;
+++    if (!dev) return;
+++
+++    for (uint32_t i = 0; i < PS5_TOAST_RING; i++)
+++    {
+++        if (ctx->slots[i].submitted && ctx->slots[i].fence && ctx->p_vkWaitForFences)
+++            ctx->p_vkWaitForFences( dev, 1, &ctx->slots[i].fence, VK_TRUE, 1000000000ull );
+++        ctx->slots[i].submitted = 0;
+++    }
+++    for (uint32_t i = 0; i < PS5_TOAST_RING; i++)
+++    {
+++        if (ctx->slots[i].fence && ctx->p_vkDestroyFence)
+++            ctx->p_vkDestroyFence( dev, ctx->slots[i].fence, NULL );
+++        if (ctx->slots[i].done_sem && ctx->p_vkDestroySemaphore)
+++            ctx->p_vkDestroySemaphore( dev, ctx->slots[i].done_sem, NULL );
+++        ctx->slots[i].fence = VK_NULL_HANDLE;
+++        ctx->slots[i].done_sem = VK_NULL_HANDLE;
+++        ctx->slots[i].cmd = VK_NULL_HANDLE;
+++    }
+++    if (ctx->cmd_pool && ctx->p_vkDestroyCommandPool)
+++    {
+++        ctx->p_vkDestroyCommandPool( dev, ctx->cmd_pool, NULL );
+++        ctx->cmd_pool = VK_NULL_HANDLE;
+++    }
+++    for (uint32_t i = 0; i < ctx->image_count; i++)
+++    {
+++        if (ctx->framebuffers[i] && ctx->p_vkDestroyFramebuffer)
+++            ctx->p_vkDestroyFramebuffer( dev, ctx->framebuffers[i], NULL );
+++        if (ctx->views[i] && ctx->p_vkDestroyImageView)
+++            ctx->p_vkDestroyImageView( dev, ctx->views[i], NULL );
+++        ctx->framebuffers[i] = VK_NULL_HANDLE;
+++        ctx->views[i] = VK_NULL_HANDLE;
+++    }
+++    ctx->image_count = 0;
+++    if (ctx->pipeline && ctx->p_vkDestroyPipeline)
+++    {
+++        ctx->p_vkDestroyPipeline( dev, ctx->pipeline, NULL );
+++        ctx->pipeline = VK_NULL_HANDLE;
+++    }
+++    if (ctx->pipe_layout && ctx->p_vkDestroyPipelineLayout)
+++    {
+++        ctx->p_vkDestroyPipelineLayout( dev, ctx->pipe_layout, NULL );
+++        ctx->pipe_layout = VK_NULL_HANDLE;
+++    }
+++    if (ctx->desc_pool && ctx->p_vkDestroyDescriptorPool)
+++    {
+++        ctx->p_vkDestroyDescriptorPool( dev, ctx->desc_pool, NULL );
+++        ctx->desc_pool = VK_NULL_HANDLE;
+++    }
+++    if (ctx->desc_layout && ctx->p_vkDestroyDescriptorSetLayout)
+++    {
+++        ctx->p_vkDestroyDescriptorSetLayout( dev, ctx->desc_layout, NULL );
+++        ctx->desc_layout = VK_NULL_HANDLE;
+++    }
+++    if (ctx->sampler && ctx->p_vkDestroySampler)
+++    {
+++        ctx->p_vkDestroySampler( dev, ctx->sampler, NULL );
+++        ctx->sampler = VK_NULL_HANDLE;
+++    }
+++    if (ctx->toast_view && ctx->p_vkDestroyImageView)
+++    {
+++        ctx->p_vkDestroyImageView( dev, ctx->toast_view, NULL );
+++        ctx->toast_view = VK_NULL_HANDLE;
+++    }
+++    if (ctx->toast_image && ctx->p_vkDestroyImage)
+++    {
+++        ctx->p_vkDestroyImage( dev, ctx->toast_image, NULL );
+++        ctx->toast_image = VK_NULL_HANDLE;
+++    }
+++    if (ctx->toast_image_mem && ctx->p_vkFreeMemory)
+++    {
+++        ctx->p_vkFreeMemory( dev, ctx->toast_image_mem, NULL );
+++        ctx->toast_image_mem = VK_NULL_HANDLE;
+++    }
+++    if (ctx->staging_ptr && ctx->staging_mem && ctx->p_vkUnmapMemory)
+++    {
+++        ctx->p_vkUnmapMemory( dev, ctx->staging_mem );
+++        ctx->staging_ptr = NULL;
+++    }
+++    if (ctx->staging_buf && ctx->p_vkDestroyBuffer)
+++    {
+++        ctx->p_vkDestroyBuffer( dev, ctx->staging_buf, NULL );
+++        ctx->staging_buf = VK_NULL_HANDLE;
+++    }
+++    if (ctx->staging_mem && ctx->p_vkFreeMemory)
+++    {
+++        ctx->p_vkFreeMemory( dev, ctx->staging_mem, NULL );
+++        ctx->staging_mem = VK_NULL_HANDLE;
+++    }
+++    if (ctx->render_pass && ctx->p_vkDestroyRenderPass)
+++    {
+++        ctx->p_vkDestroyRenderPass( dev, ctx->render_pass, NULL );
+++        ctx->render_pass = VK_NULL_HANDLE;
+++    }
+++}
+++
+++static BOOL ps5_toast_resolve_procs( struct ps5_toast_swapchain *ctx )
+++{
+++    VkDevice dev = ctx->device->host.device;
+++#define LOAD_DEV_PROC( name ) \
+++    do { \
+++        ctx->p_##name = (PFN_##name)ctx->get_device_proc( dev, #name ); \
+++        if (!ctx->p_##name) return FALSE; \
+++    } while (0)
+++
+++    LOAD_DEV_PROC( vkGetSwapchainImagesKHR );
+++    LOAD_DEV_PROC( vkCreateImageView );
+++    LOAD_DEV_PROC( vkDestroyImageView );
+++    LOAD_DEV_PROC( vkCreateRenderPass );
+++    LOAD_DEV_PROC( vkDestroyRenderPass );
+++    LOAD_DEV_PROC( vkCreateFramebuffer );
+++    LOAD_DEV_PROC( vkDestroyFramebuffer );
+++    LOAD_DEV_PROC( vkCreateImage );
+++    LOAD_DEV_PROC( vkDestroyImage );
+++    LOAD_DEV_PROC( vkGetImageMemoryRequirements );
+++    LOAD_DEV_PROC( vkBindImageMemory );
+++    LOAD_DEV_PROC( vkCreateBuffer );
+++    LOAD_DEV_PROC( vkDestroyBuffer );
+++    LOAD_DEV_PROC( vkGetBufferMemoryRequirements );
+++    LOAD_DEV_PROC( vkBindBufferMemory );
+++    LOAD_DEV_PROC( vkAllocateMemory );
+++    LOAD_DEV_PROC( vkFreeMemory );
+++    LOAD_DEV_PROC( vkMapMemory );
+++    LOAD_DEV_PROC( vkUnmapMemory );
+++    LOAD_DEV_PROC( vkFlushMappedMemoryRanges );
+++    LOAD_DEV_PROC( vkCreateSampler );
+++    LOAD_DEV_PROC( vkDestroySampler );
+++    LOAD_DEV_PROC( vkCreateDescriptorSetLayout );
+++    LOAD_DEV_PROC( vkDestroyDescriptorSetLayout );
+++    LOAD_DEV_PROC( vkCreateDescriptorPool );
+++    LOAD_DEV_PROC( vkDestroyDescriptorPool );
+++    LOAD_DEV_PROC( vkAllocateDescriptorSets );
+++    LOAD_DEV_PROC( vkUpdateDescriptorSets );
+++    LOAD_DEV_PROC( vkCreatePipelineLayout );
+++    LOAD_DEV_PROC( vkDestroyPipelineLayout );
+++    LOAD_DEV_PROC( vkCreateShaderModule );
+++    LOAD_DEV_PROC( vkDestroyShaderModule );
+++    LOAD_DEV_PROC( vkCreateGraphicsPipelines );
+++    LOAD_DEV_PROC( vkDestroyPipeline );
+++    LOAD_DEV_PROC( vkCreateCommandPool );
+++    LOAD_DEV_PROC( vkDestroyCommandPool );
+++    LOAD_DEV_PROC( vkAllocateCommandBuffers );
+++    LOAD_DEV_PROC( vkResetCommandBuffer );
+++    LOAD_DEV_PROC( vkBeginCommandBuffer );
+++    LOAD_DEV_PROC( vkEndCommandBuffer );
+++    LOAD_DEV_PROC( vkCmdPipelineBarrier );
+++    LOAD_DEV_PROC( vkCmdCopyBufferToImage );
+++    LOAD_DEV_PROC( vkCmdBeginRenderPass );
+++    LOAD_DEV_PROC( vkCmdSetViewport );
+++    LOAD_DEV_PROC( vkCmdSetScissor );
+++    LOAD_DEV_PROC( vkCmdBindPipeline );
+++    LOAD_DEV_PROC( vkCmdBindDescriptorSets );
+++    LOAD_DEV_PROC( vkCmdPushConstants );
+++    LOAD_DEV_PROC( vkCmdDraw );
+++    LOAD_DEV_PROC( vkCmdEndRenderPass );
+++    LOAD_DEV_PROC( vkCreateFence );
+++    LOAD_DEV_PROC( vkDestroyFence );
+++    LOAD_DEV_PROC( vkWaitForFences );
+++    LOAD_DEV_PROC( vkResetFences );
+++    LOAD_DEV_PROC( vkCreateSemaphore );
+++    LOAD_DEV_PROC( vkDestroySemaphore );
+++    LOAD_DEV_PROC( vkQueueSubmit );
+++#undef LOAD_DEV_PROC
+++    return TRUE;
+++}
+++
+++static BOOL ps5_toast_init_gpu( struct ps5_toast_swapchain *ctx, const struct vulkan_queue *queue )
+++{
+++    struct vulkan_physical_device *phys = ctx->device->physical_device;
+++    struct vulkan_instance *instance = phys->instance;
+++    VkDevice dev = ctx->device->host.device;
+++    VkShaderModule vs_mod = VK_NULL_HANDLE, fs_mod = VK_NULL_HANDLE;
+++    PFN_vkGetPhysicalDeviceQueueFamilyProperties p_get_qf;
+++    VkQueueFamilyProperties qf_props[16];
+++    uint32_t qf_count = ARRAY_SIZE(qf_props);
+++    VkFormat toast_fmt = ps5_toast_is_srgb( ctx->format ) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+++    VkMemoryRequirements mem_req;
+++    int mem_type;
+++    VkResult res;
+++
+++    if (!(ctx->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || ctx->array_layers != 1 ||
+++        ctx->extent.width < 64 || ctx->extent.height < 64)
+++        return FALSE;
+++
+++    p_get_qf = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)ctx->get_instance_proc(
+++        instance->host.instance, "vkGetPhysicalDeviceQueueFamilyProperties" );
+++    if (!p_get_qf) return FALSE;
+++    p_get_qf( phys->host.physical_device, &qf_count, qf_props );
+++    if (queue->info.queueFamilyIndex >= qf_count ||
+++        !(qf_props[queue->info.queueFamilyIndex].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+++        return FALSE;
+++
+++    if (!ps5_toast_resolve_procs( ctx )) return FALSE;
+++
+++    ctx->queue_family = queue->info.queueFamilyIndex;
+++
+++    /* 1. Query swapchain images. */
+++    uint32_t count = 0;
+++    if (ctx->p_vkGetSwapchainImagesKHR( dev, ctx->host_swapchain, &count, NULL ) != VK_SUCCESS ||
+++        !count || count > PS5_TOAST_MAX_IMAGES)
+++        goto fail;
+++    if (ctx->p_vkGetSwapchainImagesKHR( dev, ctx->host_swapchain, &count, ctx->images ) != VK_SUCCESS)
+++        goto fail;
+++    ctx->image_count = count;
+++
+++    /* 2. Render pass: LOAD existing frame in PRESENT_SRC_KHR, blend overlay, store PRESENT_SRC_KHR. */
+++    {
+++        VkAttachmentDescription attach = {
+++            .format = ctx->format,
+++            .samples = VK_SAMPLE_COUNT_1_BIT,
+++            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+++            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+++            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+++            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+++            .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+++            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+++        };
+++        VkAttachmentReference color_ref = {
+++            .attachment = 0,
+++            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+++        };
+++        VkSubpassDescription subpass = {
+++            .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+++            .colorAttachmentCount = 1,
+++            .pColorAttachments = &color_ref,
+++        };
+++        VkSubpassDependency deps[2] = {
+++            {
+++                .srcSubpass = VK_SUBPASS_EXTERNAL,
+++                .dstSubpass = 0,
+++                .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+++                .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+++                .srcAccessMask = 0,
+++                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+++            },
+++            {
+++                .srcSubpass = 0,
+++                .dstSubpass = VK_SUBPASS_EXTERNAL,
+++                .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+++                .dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+++                .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+++                .dstAccessMask = 0,
+++            },
+++        };
+++        VkRenderPassCreateInfo rp_info = {
+++            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+++            .attachmentCount = 1,
+++            .pAttachments = &attach,
+++            .subpassCount = 1,
+++            .pSubpasses = &subpass,
+++            .dependencyCount = 2,
+++            .pDependencies = deps,
+++        };
+++        if (ctx->p_vkCreateRenderPass( dev, &rp_info, NULL, &ctx->render_pass ) != VK_SUCCESS)
+++            goto fail;
+++    }
+++
+++    /* 3. Image views and framebuffers per swapchain image. */
+++    for (uint32_t i = 0; i < ctx->image_count; i++)
+++    {
+++        VkImageViewCreateInfo iv_info = {
+++            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+++            .image = ctx->images[i],
+++            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+++            .format = ctx->format,
+++            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+++        };
+++        if (ctx->p_vkCreateImageView( dev, &iv_info, NULL, &ctx->views[i] ) != VK_SUCCESS)
+++            goto fail;
+++        VkFramebufferCreateInfo fb_info = {
+++            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+++            .renderPass = ctx->render_pass,
+++            .attachmentCount = 1,
+++            .pAttachments = &ctx->views[i],
+++            .width = ctx->extent.width,
+++            .height = ctx->extent.height,
+++            .layers = 1,
+++        };
+++        if (ctx->p_vkCreateFramebuffer( dev, &fb_info, NULL, &ctx->framebuffers[i] ) != VK_SUCCESS)
+++            goto fail;
+++    }
+++
+++    /* 4. Host-visible staging buffer for 560x54 RGBA8 pill. */
+++    {
+++        VkBufferCreateInfo buf_info = {
+++            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+++            .size = (VkDeviceSize)PW_TOAST_BYTES,
+++            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+++            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+++        };
+++        if (ctx->p_vkCreateBuffer( dev, &buf_info, NULL, &ctx->staging_buf ) != VK_SUCCESS)
+++            goto fail;
+++        ctx->p_vkGetBufferMemoryRequirements( dev, ctx->staging_buf, &mem_req );
+++        mem_type = ps5_toast_find_memory_type( &phys->memory_properties, mem_req.memoryTypeBits,
+++            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT );
+++        if (mem_type < 0)
+++        {
+++            mem_type = ps5_toast_find_memory_type( &phys->memory_properties, mem_req.memoryTypeBits,
+++                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT );
+++            ctx->staging_non_coherent = 1;
+++        }
+++        if (mem_type < 0) goto fail;
+++        VkMemoryAllocateInfo alloc_info = {
+++            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+++            .allocationSize = mem_req.size,
+++            .memoryTypeIndex = (uint32_t)mem_type,
+++        };
+++        if (ctx->p_vkAllocateMemory( dev, &alloc_info, NULL, &ctx->staging_mem ) != VK_SUCCESS)
+++            goto fail;
+++        if (ctx->p_vkBindBufferMemory( dev, ctx->staging_buf, ctx->staging_mem, 0 ) != VK_SUCCESS)
+++            goto fail;
+++        void *mapped = NULL;
+++        if (ctx->p_vkMapMemory( dev, ctx->staging_mem, 0, (VkDeviceSize)PW_TOAST_BYTES, 0, &mapped ) != VK_SUCCESS ||
+++            !mapped)
+++            goto fail;
+++        ctx->staging_ptr = (uint8_t *)mapped;
+++    }
+++
+++    /* 5. Sampled 560x54 RGBA8 toast texture + view + linear clamp sampler. */
+++    {
+++        VkImageCreateInfo img_info = {
+++            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+++            .imageType = VK_IMAGE_TYPE_2D,
+++            .format = toast_fmt,
+++            .extent = { PW_TOAST_WIDTH, PW_TOAST_HEIGHT, 1 },
+++            .mipLevels = 1,
+++            .arrayLayers = 1,
+++            .samples = VK_SAMPLE_COUNT_1_BIT,
+++            .tiling = VK_IMAGE_TILING_OPTIMAL,
+++            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+++            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+++            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+++        };
+++        if (ctx->p_vkCreateImage( dev, &img_info, NULL, &ctx->toast_image ) != VK_SUCCESS)
+++            goto fail;
+++        ctx->p_vkGetImageMemoryRequirements( dev, ctx->toast_image, &mem_req );
+++        mem_type = ps5_toast_find_memory_type( &phys->memory_properties, mem_req.memoryTypeBits,
+++            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+++        if (mem_type < 0)
+++            mem_type = ps5_toast_find_memory_type( &phys->memory_properties, mem_req.memoryTypeBits, 0 );
+++        if (mem_type < 0) goto fail;
+++        VkMemoryAllocateInfo alloc_info = {
+++            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+++            .allocationSize = mem_req.size,
+++            .memoryTypeIndex = (uint32_t)mem_type,
+++        };
+++        if (ctx->p_vkAllocateMemory( dev, &alloc_info, NULL, &ctx->toast_image_mem ) != VK_SUCCESS)
+++            goto fail;
+++        if (ctx->p_vkBindImageMemory( dev, ctx->toast_image, ctx->toast_image_mem, 0 ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkImageViewCreateInfo iv_info = {
+++            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+++            .image = ctx->toast_image,
+++            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+++            .format = toast_fmt,
+++            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+++        };
+++        if (ctx->p_vkCreateImageView( dev, &iv_info, NULL, &ctx->toast_view ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkSamplerCreateInfo samp_info = {
+++            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+++            .magFilter = VK_FILTER_LINEAR,
+++            .minFilter = VK_FILTER_LINEAR,
+++            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+++            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+++            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+++            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+++            .maxLod = 1.0f,
+++        };
+++        if (ctx->p_vkCreateSampler( dev, &samp_info, NULL, &ctx->sampler ) != VK_SUCCESS)
+++            goto fail;
+++    }
+++
+++    /* 6. Descriptor set (binding 0 = combined image sampler). */
+++    {
+++        VkDescriptorSetLayoutBinding binding = {
+++            .binding = 0,
+++            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+++            .descriptorCount = 1,
+++            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+++        };
+++        VkDescriptorSetLayoutCreateInfo dsl_info = {
+++            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+++            .bindingCount = 1,
+++            .pBindings = &binding,
+++        };
+++        if (ctx->p_vkCreateDescriptorSetLayout( dev, &dsl_info, NULL, &ctx->desc_layout ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkDescriptorPoolSize pool_size = {
+++            .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+++            .descriptorCount = 1,
+++        };
+++        VkDescriptorPoolCreateInfo pool_info = {
+++            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+++            .maxSets = 1,
+++            .poolSizeCount = 1,
+++            .pPoolSizes = &pool_size,
+++        };
+++        if (ctx->p_vkCreateDescriptorPool( dev, &pool_info, NULL, &ctx->desc_pool ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkDescriptorSetAllocateInfo alloc_info = {
+++            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+++            .descriptorPool = ctx->desc_pool,
+++            .descriptorSetCount = 1,
+++            .pSetLayouts = &ctx->desc_layout,
+++        };
+++        if (ctx->p_vkAllocateDescriptorSets( dev, &alloc_info, &ctx->desc_set ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkDescriptorImageInfo desc_img = {
+++            .sampler = ctx->sampler,
+++            .imageView = ctx->toast_view,
+++            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+++        };
+++        VkWriteDescriptorSet write = {
+++            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+++            .dstSet = ctx->desc_set,
+++            .dstBinding = 0,
+++            .descriptorCount = 1,
+++            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+++            .pImageInfo = &desc_img,
+++        };
+++        ctx->p_vkUpdateDescriptorSets( dev, 1, &write, 0, NULL );
+++    }
+++
+++    /* 7. Pipeline layout (32-byte push constants) and alpha-blending graphics pipeline. */
+++    {
+++        VkPushConstantRange pc_range = {
+++            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+++            .offset = 0,
+++            .size = 32,
+++        };
+++        VkPipelineLayoutCreateInfo pl_info = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+++            .setLayoutCount = 1,
+++            .pSetLayouts = &ctx->desc_layout,
+++            .pushConstantRangeCount = 1,
+++            .pPushConstantRanges = &pc_range,
+++        };
+++        if (ctx->p_vkCreatePipelineLayout( dev, &pl_info, NULL, &ctx->pipe_layout ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkShaderModuleCreateInfo vs_info = {
+++            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+++            .codeSize = sizeof(toast_vs_spv),
+++            .pCode = toast_vs_spv,
+++        };
+++        VkShaderModuleCreateInfo fs_info = {
+++            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+++            .codeSize = sizeof(toast_fs_spv),
+++            .pCode = toast_fs_spv,
+++        };
+++        if (ctx->p_vkCreateShaderModule( dev, &vs_info, NULL, &vs_mod ) != VK_SUCCESS ||
+++            ctx->p_vkCreateShaderModule( dev, &fs_info, NULL, &fs_mod ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkPipelineShaderStageCreateInfo stages[2] = {
+++            {
+++                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+++                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+++                .module = vs_mod,
+++                .pName = "main",
+++            },
+++            {
+++                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+++                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+++                .module = fs_mod,
+++                .pName = "main",
+++            },
+++        };
+++        VkPipelineVertexInputStateCreateInfo vi = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+++        };
+++        VkPipelineInputAssemblyStateCreateInfo ia = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+++            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+++        };
+++        VkPipelineViewportStateCreateInfo vp = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+++            .viewportCount = 1,
+++            .scissorCount = 1,
+++        };
+++        VkPipelineRasterizationStateCreateInfo rs = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+++            .polygonMode = VK_POLYGON_MODE_FILL,
+++            .cullMode = VK_CULL_MODE_NONE,
+++            .frontFace = VK_FRONT_FACE_CLOCKWISE,
+++            .lineWidth = 1.0f,
+++        };
+++        VkPipelineMultisampleStateCreateInfo ms = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+++            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+++        };
+++        VkPipelineColorBlendAttachmentState cb_attach = {
+++            .blendEnable = VK_TRUE,
+++            .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+++            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+++            .colorBlendOp = VK_BLEND_OP_ADD,
+++            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+++            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+++            .alphaBlendOp = VK_BLEND_OP_ADD,
+++            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+++                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+++        };
+++        VkPipelineColorBlendStateCreateInfo cb = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+++            .attachmentCount = 1,
+++            .pAttachments = &cb_attach,
+++        };
+++        static const VkDynamicState dyn_states[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+++        VkPipelineDynamicStateCreateInfo dyn = {
+++            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+++            .dynamicStateCount = 2,
+++            .pDynamicStates = dyn_states,
+++        };
+++        VkGraphicsPipelineCreateInfo gp_info = {
+++            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+++            .stageCount = 2,
+++            .pStages = stages,
+++            .pVertexInputState = &vi,
+++            .pInputAssemblyState = &ia,
+++            .pViewportState = &vp,
+++            .pRasterizationState = &rs,
+++            .pMultisampleState = &ms,
+++            .pColorBlendState = &cb,
+++            .pDynamicState = &dyn,
+++            .layout = ctx->pipe_layout,
+++            .renderPass = ctx->render_pass,
+++            .subpass = 0,
+++        };
+++        res = ctx->p_vkCreateGraphicsPipelines( dev, VK_NULL_HANDLE, 1, &gp_info, NULL, &ctx->pipeline );
+++        ctx->p_vkDestroyShaderModule( dev, vs_mod, NULL );
+++        ctx->p_vkDestroyShaderModule( dev, fs_mod, NULL );
+++        vs_mod = VK_NULL_HANDLE;
+++        fs_mod = VK_NULL_HANDLE;
+++        if (res != VK_SUCCESS) goto fail;
+++    }
+++
+++    /* 8. Command pool and 2-slot command buffer / fence / semaphore ring. */
+++    {
+++        VkCommandPoolCreateInfo cp_info = {
+++            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+++            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+++            .queueFamilyIndex = ctx->queue_family,
+++        };
+++        if (ctx->p_vkCreateCommandPool( dev, &cp_info, NULL, &ctx->cmd_pool ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkCommandBuffer cmds[PS5_TOAST_RING] = { 0 };
+++        VkCommandBufferAllocateInfo cb_alloc = {
+++            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+++            .commandPool = ctx->cmd_pool,
+++            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+++            .commandBufferCount = PS5_TOAST_RING,
+++        };
+++        if (ctx->p_vkAllocateCommandBuffers( dev, &cb_alloc, cmds ) != VK_SUCCESS)
+++            goto fail;
+++
+++        VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+++        VkSemaphoreCreateInfo sem_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+++        for (uint32_t i = 0; i < PS5_TOAST_RING; i++)
+++        {
+++            ctx->slots[i].cmd = cmds[i];
+++            if (ctx->p_vkCreateFence( dev, &fence_info, NULL, &ctx->slots[i].fence ) != VK_SUCCESS ||
+++                ctx->p_vkCreateSemaphore( dev, &sem_info, NULL, &ctx->slots[i].done_sem ) != VK_SUCCESS)
+++                goto fail;
+++        }
+++    }
+++
+++    ctx->state = 1;
+++    TRACE( "PS5 toast overlay ready: %ux%u format=%d images=%u qf=%u\n",
+++           ctx->extent.width, ctx->extent.height, ctx->format, ctx->image_count, ctx->queue_family );
+++    return TRUE;
+++
+++fail:
+++    if (vs_mod && ctx->p_vkDestroyShaderModule) ctx->p_vkDestroyShaderModule( dev, vs_mod, NULL );
+++    if (fs_mod && ctx->p_vkDestroyShaderModule) ctx->p_vkDestroyShaderModule( dev, fs_mod, NULL );
+++    ps5_toast_destroy_gpu( ctx );
+++    ctx->state = -1;
+++    WARN( "PS5 toast overlay disabled for swapchain %p (format=%d %ux%u)\n",
+++          ctx, ctx->format, ctx->extent.width, ctx->extent.height );
+++    return FALSE;
+++}
+++
+++void *ps5_toast_vk_create( struct vulkan_device *device, VkSwapchainKHR host_swapchain,
+++                           const VkSwapchainCreateInfoKHR *create_info,
+++                           PFN_vkGetInstanceProcAddr get_instance_proc,
+++                           PFN_vkGetDeviceProcAddr get_device_proc )
+++{
+++    struct ps5_toast_swapchain *ctx;
+++
+++    if (!device || !host_swapchain || !create_info || !get_instance_proc || !get_device_proc)
+++        return NULL;
+++    if (!(ctx = calloc( 1, sizeof(*ctx) ))) return NULL;
+++    ctx->device = device;
+++    ctx->host_swapchain = host_swapchain;
+++    ctx->format = create_info->imageFormat;
+++    ctx->extent = create_info->imageExtent;
+++    ctx->usage = create_info->imageUsage;
+++    ctx->array_layers = create_info->imageArrayLayers;
+++    ctx->get_instance_proc = get_instance_proc;
+++    ctx->get_device_proc = get_device_proc;
+++
+++    pthread_mutex_lock( &ps5_toast_lock );
+++    ctx->next = ps5_toast_list;
+++    ps5_toast_list = ctx;
+++    pthread_mutex_unlock( &ps5_toast_lock );
+++    return ctx;
+++}
+++
+++void ps5_toast_vk_destroy( void *opaque )
+++{
+++    struct ps5_toast_swapchain *ctx = opaque;
+++    struct ps5_toast_swapchain **pp;
+++
+++    if (!ctx) return;
+++    pthread_mutex_lock( &ps5_toast_lock );
+++    for (pp = &ps5_toast_list; *pp; pp = &(*pp)->next)
+++    {
+++        if (*pp == ctx)
+++        {
+++            *pp = ctx->next;
+++            break;
+++        }
+++    }
+++    ps5_toast_destroy_gpu( ctx );
+++    pthread_mutex_unlock( &ps5_toast_lock );
+++    free( ctx );
+++}
+++
+++void ps5_toast_vk_destroy_device( struct vulkan_device *device )
+++{
+++    struct ps5_toast_swapchain *ctx;
+++
+++    if (!device) return;
+++    pthread_mutex_lock( &ps5_toast_lock );
+++    for (ctx = ps5_toast_list; ctx; ctx = ctx->next)
+++    {
+++        if (ctx->device == device)
+++        {
+++            ps5_toast_destroy_gpu( ctx );
+++            ctx->device = NULL;
+++            ctx->state = -1;
+++        }
+++    }
+++    pthread_mutex_unlock( &ps5_toast_lock );
+++}
+++
+++BOOL ps5_toast_vk_present( void *opaque, const struct vulkan_queue *queue,
+++                           const VkPresentInfoKHR *present_info, VkSemaphore *out_wait_sem )
+++{
+++    static void (*read_toast)( struct pw_title_toast * );
+++    static BOOL looked;
+++    struct ps5_toast_swapchain *ctx = opaque;
+++    struct pw_title_toast toast;
+++    uint64_t now, elapsed_ms;
+++    uint8_t opacity;
+++    uint32_t image_index, slot_idx;
+++    struct ps5_toast_slot *slot;
+++    VkDevice dev;
+++    BOOL need_upload = FALSE;
+++    VkPipelineStageFlags wait_stages[PS5_TOAST_MAX_WAITS];
+++
+++    if (!ctx || !queue || !present_info || !out_wait_sem) return FALSE;
+++    if (present_info->swapchainCount != 1 || present_info->waitSemaphoreCount > PS5_TOAST_MAX_WAITS)
+++        return FALSE;
+++
+++    if (!looked)
+++    {
+++        looked = TRUE;
+++        read_toast = dlsym( RTLD_DEFAULT, "pw_wine_toast" );
+++    }
+++    if (!read_toast) return FALSE;
+++
+++    /* Fast path: zero GPU work and zero mutex locking when idle. */
+++    read_toast( &toast );
+++    if (toast.version != PW_TITLE_TOAST_VERSION || !toast.visible || !toast.line1[0])
+++        return FALSE;
+++
+++    now = ps5_toast_now_ns();
+++    elapsed_ms = (now > toast.created_ns) ? (now - toast.created_ns) / 1000000ull : 0u;
+++    opacity = pw_toast_opacity( elapsed_ms, toast.duration_ms );
+++    if (!opacity) return FALSE;
+++
+++    pthread_mutex_lock( &ps5_toast_lock );
+++    if (!ctx->device || ctx->state < 0)
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++    if (ctx->state == 0 && !ps5_toast_init_gpu( ctx, queue ))
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++    if (queue->info.queueFamilyIndex != ctx->queue_family)
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++    image_index = present_info->pImageIndices[0];
+++    if (image_index >= ctx->image_count)
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++
+++    dev = ctx->device->host.device;
+++    slot_idx = ctx->frame_cursor++ % PS5_TOAST_RING;
+++    slot = &ctx->slots[slot_idx];
+++
+++    if (slot->submitted)
+++    {
+++        if (ctx->p_vkWaitForFences( dev, 1, &slot->fence, VK_TRUE, UINT64_MAX ) != VK_SUCCESS ||
+++            ctx->p_vkResetFences( dev, 1, &slot->fence ) != VK_SUCCESS)
+++        {
+++            pthread_mutex_unlock( &ps5_toast_lock );
+++            return FALSE;
+++        }
+++        slot->submitted = 0;
+++    }
+++
+++    if (!ctx->texture_initialized || toast.sequence != ctx->uploaded_sequence)
+++    {
+++        /* Ensure the other ring slot is not still copying from staging_buf. */
+++        struct ps5_toast_slot *other = &ctx->slots[slot_idx ^ 1u];
+++        if (other->submitted)
+++        {
+++            if (ctx->p_vkWaitForFences( dev, 1, &other->fence, VK_TRUE, UINT64_MAX ) == VK_SUCCESS &&
+++                ctx->p_vkResetFences( dev, 1, &other->fence ) == VK_SUCCESS)
+++                other->submitted = 0;
+++        }
+++        if (pw_toast_render_rgba8( ctx->staging_ptr, PW_TOAST_BYTES,
+++                                   toast.line1, toast.line2, toast.accent ) != 0)
+++        {
+++            pthread_mutex_unlock( &ps5_toast_lock );
+++            return FALSE;
+++        }
+++        if (ctx->staging_non_coherent)
+++        {
+++            VkMappedMemoryRange range = {
+++                .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+++                .memory = ctx->staging_mem,
+++                .offset = 0,
+++                .size = VK_WHOLE_SIZE,
+++            };
+++            ctx->p_vkFlushMappedMemoryRanges( dev, 1, &range );
+++        }
+++        need_upload = TRUE;
+++    }
+++
+++    if (ctx->p_vkResetCommandBuffer( slot->cmd, 0 ) != VK_SUCCESS)
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++    {
+++        VkCommandBufferBeginInfo begin_info = {
+++            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+++            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+++        };
+++        if (ctx->p_vkBeginCommandBuffer( slot->cmd, &begin_info ) != VK_SUCCESS)
+++        {
+++            pthread_mutex_unlock( &ps5_toast_lock );
+++            return FALSE;
+++        }
+++    }
+++
+++    if (need_upload)
+++    {
+++        VkImageMemoryBarrier to_dst = {
+++            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+++            .srcAccessMask = ctx->texture_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+++            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+++            .oldLayout = ctx->texture_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+++            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+++            .image = ctx->toast_image,
+++            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+++        };
+++        ctx->p_vkCmdPipelineBarrier( slot->cmd,
+++            ctx->texture_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+++            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &to_dst );
+++
+++        VkBufferImageCopy region = {
+++            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+++            .imageExtent = { PW_TOAST_WIDTH, PW_TOAST_HEIGHT, 1 },
+++        };
+++        ctx->p_vkCmdCopyBufferToImage( slot->cmd, ctx->staging_buf, ctx->toast_image,
+++                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region );
+++
+++        VkImageMemoryBarrier to_read = {
+++            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+++            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+++            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+++            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+++            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+++            .image = ctx->toast_image,
+++            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+++        };
+++        ctx->p_vkCmdPipelineBarrier( slot->cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+++            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &to_read );
+++    }
+++
+++    {
+++        VkRenderPassBeginInfo rp_begin = {
+++            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+++            .renderPass = ctx->render_pass,
+++            .framebuffer = ctx->framebuffers[image_index],
+++            .renderArea = { { 0, 0 }, ctx->extent },
+++        };
+++        VkViewport viewport = {
+++            .x = 0.0f,
+++            .y = 0.0f,
+++            .width = (float)ctx->extent.width,
+++            .height = (float)ctx->extent.height,
+++            .minDepth = 0.0f,
+++            .maxDepth = 1.0f,
+++        };
+++        VkRect2D scissor = { { 0, 0 }, ctx->extent };
+++        struct { float rect[4]; float params[4]; } pc;
+++
+++        float sw_w = (float)ctx->extent.width;
+++        float sw_h = (float)ctx->extent.height;
+++        float scale = sw_h / 1080.0f;
+++        float draw_w = (float)PW_TOAST_WIDTH * scale;
+++        float draw_h = (float)PW_TOAST_HEIGHT * scale;
+++        float max_w = sw_w * 0.65f;
+++        if (draw_w > max_w && draw_w > 0.0f)
+++        {
+++            draw_h = draw_h * (max_w / draw_w);
+++            draw_w = max_w;
+++        }
+++        if (draw_w < 120.0f) draw_w = 120.0f;
+++        if (draw_h < 24.0f) draw_h = 24.0f;
+++        float margin_x = 36.0f * scale;
+++        float margin_y = 28.0f * scale;
+++        if (margin_x < 10.0f) margin_x = 10.0f;
+++        if (margin_y < 8.0f) margin_y = 8.0f;
+++        float px0 = sw_w - margin_x - draw_w;
+++        float py0 = margin_y;
+++        if (px0 < 0.0f) px0 = 0.0f;
+++        float px1 = px0 + draw_w;
+++        float py1 = py0 + draw_h;
+++
+++        pc.rect[0] = (2.0f * px0 / sw_w) - 1.0f;
+++        pc.rect[1] = (2.0f * py0 / sw_h) - 1.0f;
+++        pc.rect[2] = (2.0f * px1 / sw_w) - 1.0f;
+++        pc.rect[3] = (2.0f * py1 / sw_h) - 1.0f;
+++        pc.params[0] = (float)opacity / 255.0f;
+++        pc.params[1] = 0.0f;
+++        pc.params[2] = 0.0f;
+++        pc.params[3] = 0.0f;
+++
+++        ctx->p_vkCmdBeginRenderPass( slot->cmd, &rp_begin, VK_SUBPASS_CONTENTS_INLINE );
+++        ctx->p_vkCmdSetViewport( slot->cmd, 0, 1, &viewport );
+++        ctx->p_vkCmdSetScissor( slot->cmd, 0, 1, &scissor );
+++        ctx->p_vkCmdBindPipeline( slot->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline );
+++        ctx->p_vkCmdBindDescriptorSets( slot->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+++                                        ctx->pipe_layout, 0, 1, &ctx->desc_set, 0, NULL );
+++        ctx->p_vkCmdPushConstants( slot->cmd, ctx->pipe_layout,
+++                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+++                                   0, sizeof(pc), &pc );
+++        ctx->p_vkCmdDraw( slot->cmd, 4, 1, 0, 0 );
+++        ctx->p_vkCmdEndRenderPass( slot->cmd );
+++    }
+++
+++    if (ctx->p_vkEndCommandBuffer( slot->cmd ) != VK_SUCCESS)
+++    {
+++        pthread_mutex_unlock( &ps5_toast_lock );
+++        return FALSE;
+++    }
+++
+++    for (uint32_t i = 0; i < present_info->waitSemaphoreCount; i++)
+++        wait_stages[i] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+++
+++    {
+++        VkSubmitInfo submit = {
+++            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+++            .waitSemaphoreCount = present_info->waitSemaphoreCount,
+++            .pWaitSemaphores = present_info->waitSemaphoreCount ? present_info->pWaitSemaphores : NULL,
+++            .pWaitDstStageMask = present_info->waitSemaphoreCount ? wait_stages : NULL,
+++            .commandBufferCount = 1,
+++            .pCommandBuffers = &slot->cmd,
+++            .signalSemaphoreCount = 1,
+++            .pSignalSemaphores = &slot->done_sem,
+++        };
+++        if (ctx->p_vkQueueSubmit( queue->host.queue, 1, &submit, slot->fence ) != VK_SUCCESS)
+++        {
+++            pthread_mutex_unlock( &ps5_toast_lock );
+++            return FALSE;
+++        }
+++    }
+++
+++    slot->submitted = 1;
+++    if (need_upload)
+++    {
+++        ctx->texture_initialized = 1;
+++        ctx->uploaded_sequence = toast.sequence;
+++    }
+++    *out_wait_sem = slot->done_sem;
+++    pthread_mutex_unlock( &ps5_toast_lock );
+++    return TRUE;
+++}
+++
+++#endif /* WINE_PS5_USER_DRIVER && SONAME_LIBVULKAN */
++diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
++index 7fadce0..e4ac255 100644
++--- a/dlls/win32u/vulkan.c
+++++ b/dlls/win32u/vulkan.c
++@@ -155,8 +155,22 @@ struct swapchain
++     struct vulkan_swapchain obj;
++     struct surface *surface;
++     VkExtent2D extents;
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    void *ps5_toast;
+++#endif
++ };
++ 
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++extern void *ps5_toast_vk_create( struct vulkan_device *device, VkSwapchainKHR host_swapchain,
+++                                  const VkSwapchainCreateInfoKHR *create_info,
+++                                  PFN_vkGetInstanceProcAddr get_instance_proc,
+++                                  PFN_vkGetDeviceProcAddr get_device_proc );
+++extern void ps5_toast_vk_destroy( void *opaque );
+++extern void ps5_toast_vk_destroy_device( struct vulkan_device *device );
+++extern BOOL ps5_toast_vk_present( void *opaque, const struct vulkan_queue *queue,
+++                                  const VkPresentInfoKHR *present_info, VkSemaphore *out_wait_sem );
+++#endif
+++
++ static struct swapchain *swapchain_from_handle( VkSwapchainKHR handle )
++ {
++     struct vulkan_swapchain *obj = vulkan_swapchain_from_handle( handle );
++@@ -828,6 +842,10 @@ static void win32u_vkDestroyDevice( VkDevice client_device, const VkAllocationCa
++ 
++     if (!device) return;
++ 
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    ps5_toast_vk_destroy_device( device );
+++#endif
+++
++     device->p_vkDestroyDevice( device->host.device, NULL /* pAllocator */ );
++     for (i = 0; i < device->queue_count; i++)
++         instance->p_remove_object( instance, &device->queues[i].obj );
++@@ -1869,7 +1887,23 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
++ 
++     if (!(swapchain = calloc( 1, sizeof(*swapchain) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
++ 
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    {
+++        VkImageUsageFlags orig_usage = create_info_host.imageUsage;
+++        BOOL added_color = !(orig_usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+++                           (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+++        if (added_color) create_info_host.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+++        res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain );
+++        if (res && added_color)
+++        {
+++            create_info_host.imageUsage = orig_usage;
+++            res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain );
+++        }
+++    }
+++    if (res)
+++#else
++     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
+++#endif
++     {
++         free( swapchain );
++         return res;
++@@ -1878,6 +1912,10 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
++     vulkan_object_init( &swapchain->obj.obj, host_swapchain );
++     swapchain->surface = surface;
++     swapchain->extents = create_info->imageExtent;
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    swapchain->ps5_toast = ps5_toast_vk_create( device, host_swapchain, &create_info_host,
+++                                                p_vkGetInstanceProcAddr, p_vkGetDeviceProcAddr );
+++#endif
++     instance->p_insert_object( instance, &swapchain->obj.obj );
++ 
++     *ret = swapchain->obj.client.swapchain;
++@@ -1894,6 +1932,11 @@ static void win32u_vkDestroySwapchainKHR( VkDevice client_device, VkSwapchainKHR
++     if (allocator) FIXME( "Support for allocation callbacks not implemented yet\n" );
++     if (!swapchain) return;
++ 
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    ps5_toast_vk_destroy( swapchain->ps5_toast );
+++    swapchain->ps5_toast = NULL;
+++#endif
+++
++     device->p_vkDestroySwapchainKHR( device->host.device, swapchain->obj.host.swapchain, NULL );
++     instance->p_remove_object( instance, &swapchain->obj.obj );
++ 
++@@ -1992,7 +2035,27 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
++         client_surface_update( surface->client );
++     }
++ 
+++#if defined(WINE_PS5_USER_DRIVER) && defined(SONAME_LIBVULKAN)
+++    {
+++        VkPresentInfoKHR toast_present_info;
+++        VkSemaphore toast_wait_sem = VK_NULL_HANDLE;
+++        const VkPresentInfoKHR *submit_present = present_info;
+++        if (present_info->swapchainCount == 1)
+++        {
+++            struct swapchain *sc = swapchain_from_handle( client_swapchains[0] );
+++            if (ps5_toast_vk_present( sc->ps5_toast, queue, present_info, &toast_wait_sem ))
+++            {
+++                toast_present_info = *present_info;
+++                toast_present_info.waitSemaphoreCount = 1;
+++                toast_present_info.pWaitSemaphores = &toast_wait_sem;
+++                submit_present = &toast_present_info;
+++            }
+++        }
+++        res = device->p_vkQueuePresentKHR( queue->host.queue, submit_present );
+++    }
+++#else
++     res = device->p_vkQueuePresentKHR( queue->host.queue, present_info );
+++#endif
++ 
++     for (uint32_t i = 0; i < present_info->swapchainCount; i++)
++     {
++-- 
++2.48.1.windows.1
++
+diff --git a/wine/ps5/menu/pw_title_toast.h b/wine/ps5/menu/pw_title_toast.h
+new file mode 100644
+index 0000000..f2ac6cf
+--- /dev/null
++++ b/wine/ps5/menu/pw_title_toast.h
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_TITLE_TOAST_H
++#define PW_TITLE_TOAST_H
++#include <stdint.h>
++
++/* A short, non-blocking, semi-transparent in-game notification pill shown in
++ * the top-right corner. The title writes snapshots into the sink
++ * (pw_wine_set_toast) and win32u's PS5 Vulkan overlay (or the title's own GDI
++ * presenter) reads them with pw_wine_toast and alpha-blends them over the
++ * active frame with smooth fade-in and fade-out.
++ *
++ * Pointer-free wire layout, identical across modules. Text is ASCII,
++ * NUL-terminated. */
++enum {
++    PW_TITLE_TOAST_COLUMNS = 64,
++    PW_TITLE_TOAST_ACCENT_MINT = 0,
++    PW_TITLE_TOAST_ACCENT_AMBER = 1,
++    PW_TITLE_TOAST_ACCENT_CORAL = 2,
++};
++
++struct pw_title_toast
++{
++    uint32_t version;       /* PW_TITLE_TOAST_VERSION */
++    uint32_t sequence;      /* the sink's: incremented on every update */
++    uint32_t visible;       /* 0: draw nothing */
++    uint32_t accent;        /* PW_TITLE_TOAST_ACCENT_* */
++    uint32_t duration_ms;   /* total lifetime including fades (ms) */
++    uint32_t reserved;
++    uint64_t created_ns;    /* CLOCK_MONOTONIC timestamp in ns */
++    char line1[PW_TITLE_TOAST_COLUMNS];
++    char line2[PW_TITLE_TOAST_COLUMNS];
++};
++
++#define PW_TITLE_TOAST_VERSION 1u
++
++#endif
+diff --git a/wine/ps5/pw_wine_sink.c b/wine/ps5/pw_wine_sink.c
+index f768981..e336793 100644
+--- a/wine/ps5/pw_wine_sink.c
++++ b/wine/ps5/pw_wine_sink.c
+@@ -20,6 +20,8 @@ static int wake[2]={-1,-1};
+ static PwWinePad pad_state;
+ static uint32_t rumble_left,rumble_right,rumble_changed;
+ static struct pw_title_menu menu_state={.version=PW_TITLE_MENU_VERSION};
++static struct pw_title_toast toast_state={.version=PW_TITLE_TOAST_VERSION};
++static uint32_t toast_visible_atomic;
+ /* Audio has its own lock: its sink blocks for a grain, which must not hold
+  * up frames or input. */
+ static pthread_mutex_t audio_lock=PTHREAD_MUTEX_INITIALIZER;
+@@ -247,3 +249,42 @@ void pw_wine_menu(struct pw_title_menu *menu)
+     *menu=menu_state;
+     pthread_mutex_unlock(&lock);
+ }
++void pw_wine_set_toast(const struct pw_title_toast *toast)
++{
++    struct pw_title_toast next={.version=PW_TITLE_TOAST_VERSION};
++    if(toast && toast->visible && toast->line1[0]) {
++        next.visible=1;
++        next.accent=toast->accent<=PW_TITLE_TOAST_ACCENT_CORAL?toast->accent:PW_TITLE_TOAST_ACCENT_MINT;
++        next.duration_ms=toast->duration_ms?toast->duration_ms:3300u;
++        if(next.duration_ms<500u)next.duration_ms=500u;
++        if(next.duration_ms>15000u)next.duration_ms=15000u;
++        next.created_ns=toast->created_ns;
++        memcpy(next.line1,toast->line1,sizeof(next.line1));
++        next.line1[sizeof(next.line1)-1]=0;
++        memcpy(next.line2,toast->line2,sizeof(next.line2));
++        next.line2[sizeof(next.line2)-1]=0;
++    }
++    pthread_mutex_lock(&lock);
++    if(next.visible) {
++        next.sequence=toast_state.sequence+1;
++        toast_state=next;
++        __atomic_store_n(&toast_visible_atomic,1u,__ATOMIC_RELEASE);
++    } else if(toast_state.visible) {
++        next.sequence=toast_state.sequence+1;
++        toast_state=next;
++        __atomic_store_n(&toast_visible_atomic,0u,__ATOMIC_RELEASE);
++    }
++    pthread_mutex_unlock(&lock);
++}
++void pw_wine_toast(struct pw_title_toast *toast)
++{
++    if(!toast)return;
++    if(!__atomic_load_n(&toast_visible_atomic,__ATOMIC_ACQUIRE)) {
++        memset(toast,0,sizeof(*toast));
++        toast->version=PW_TITLE_TOAST_VERSION;
++        return;
++    }
++    pthread_mutex_lock(&lock);
++    *toast=toast_state;
++    pthread_mutex_unlock(&lock);
++}
+diff --git a/wine/ps5/pw_wine_sink.h b/wine/ps5/pw_wine_sink.h
+index f6a1f01..f0a6985 100644
+--- a/wine/ps5/pw_wine_sink.h
++++ b/wine/ps5/pw_wine_sink.h
+@@ -3,6 +3,7 @@
+ #define PW_WINE_SINK_H
+ #include <stdint.h>
+ #include "menu/pw_title_menu.h"
++#include "menu/pw_title_toast.h"
+ 
+ /* The meeting point between the title and Wine's PS5 user driver. ntdll
+  * links it: the title reaches the set/post calls through ntdll.prx's
+@@ -80,6 +81,10 @@ int pw_wine_rumble(uint32_t *left,uint32_t *right);
+ /* The menu to draw, or NULL to close it. The sink sets version and
+  * sequence, clamps lines and selected, and terminates every string. */
+ void pw_wine_set_menu(const struct pw_title_menu *menu);
++/* A short semi-transparent notification toast to draw, or NULL to hide it.
++ * The sink sets version and sequence, clamps accent and duration, and
++ * terminates every string. */
++void pw_wine_set_toast(const struct pw_title_toast *toast);
+ 
+ /* Driver side. -1 when no sink is set or the arguments are invalid. */
+ int pw_wine_present(const void *bgra,uint32_t width,uint32_t height,uint32_t stride);
+@@ -98,6 +103,9 @@ int pw_wine_pad(PwWinePad *pad);
+ /* The newest menu snapshot; a closed menu reads as zeros apart from
+  * version and sequence. */
+ void pw_wine_menu(struct pw_title_menu *menu);
++/* The newest toast snapshot; a hidden toast reads as zeros apart from
++ * version and sequence (fast atomic check when hidden). */
++void pw_wine_toast(struct pw_title_toast *toast);
+ /* The rumble a game asked for (XInputSetState); speeds are clamped. */
+ void pw_wine_set_rumble(uint32_t left,uint32_t right);
+ /* 1 when the title set an audio sink: the audio driver offers its device
+-- 
+2.48.1.windows.1
+

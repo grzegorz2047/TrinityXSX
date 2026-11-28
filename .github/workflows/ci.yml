@@ -132,12 +132,14 @@ jobs:
           done
           # The capture page the PS5 serves is generated from tools/netinput-sender/src/web/index.html.
           python3 tools/netinput-sender/make_page_c.py --check "$tmp/pw/src/pw_webinput_page.c"
-          # The network keyboard/mouse and Touchpad game menu host tests (patches 0012, 0013, 0015).
+          # The network keyboard/mouse, Touchpad menu, and in-game toast host tests.
           (cd "$tmp/pw" && for t in "tests/test_pw_netinput.c src/pw_netinput.c" \
                "tests/test_pw_webinput.c src/pw_webinput.c src/pw_webinput_page.c src/pw_netinput.c" \
                "-DPW_NETINPUT_PS5_HOST_TEST tests/test_pw_netinput_ps5.c native/pw_netinput_ps5.c src/pw_netinput.c" \
                "tests/test_pw_game_profile.c src/pw_game_profile.c src/pw_app_profile.c" \
-               "tests/test_pw_game_menu.c src/pw_game_menu.c"; do
+               "tests/test_pw_game_menu.c src/pw_game_menu.c" \
+               "tests/test_pw_launcher_render.c src/pw_launcher_render.c" \
+               "tests/test_pw_toast.c src/pw_toast.c"; do
              cc -std=c11 -O1 -Wall -Wextra -Werror $t -o test && ./test; done)
           rm -rf "$tmp"
 
@@ -435,7 +437,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .work/wine-cache
-          key: wine-cache-v3-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'patches/prospero-win/0014-*', 'standalone/native/build_prefix_seed.py') }}
+          key: wine-cache-v3-${{ hashFiles('pins.env', 'patches/prospero-win/0002-*', 'patches/prospero-win/0003-*', 'patches/prospero-win/0004-*', 'patches/prospero-win/0011-*', 'patches/prospero-win/0014-*', 'patches/prospero-win/0017-*', 'patches/prospero-win/0018-*', 'patches/prospero-win/0019-*', 'patches/prospero-win/0020-*', 'patches/prospero-win/0023-*', 'standalone/native/build_prefix_seed.py') }}
 
       - name: Fetch DXVK and DXC
         run: tools/fetch-deps.sh
