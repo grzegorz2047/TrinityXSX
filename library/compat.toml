@@ -161,3 +161,13 @@ status = "playable"
 release = "v0.2.20"
 notes = "MS-DOS classic running via bundled Windows DOSBox with automatic GOG .bat launcher and argument resolution plus DualSense Mouse & Keyboard controls."
 reports = []
+
+[[title]]
+title_id = "BDAC9E45"
+identity = "GOG.1207663903"
+name = "Neighbours From Hell"
+versions = ["1.00"]
+status = "playable"
+release = "v0.2.19"
+notes = "Smooth 32-bit classic gameplay with audio and DualSense Mouse & Keyboard controls via GOG PC handoff (~135 MiB dmem)."
+reports = []
