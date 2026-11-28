@@ -46,7 +46,8 @@ gets Esc, Alt+Tab and the Windows key too. Chrome or Edge work best.
 3. **Panic:** hold **Esc** for 1.5 s. Capture stops and the page leaves full screen. A short Esc goes to the game.
    A red bar along the bottom fills up while you hold it.
 
-Keep the console window open while you play. `txin-sender --web 192.168.1.170` fills in the address.
+Keep the console window open while you play. `txin-sender --web 192.168.1.170` fills in the address. If the page
+hangs or is paused (a dialog, the debugger) for 1.5 s while capturing, the helper stops and releases everything.
 
 Without a browser, `txin-sender 192.168.1.170` captures with low-level hooks: **Ctrl+Alt+F12** starts and stops
 everywhere in Windows, and holding **Esc** for 1.5 s stops it. `txin-sender 192.168.1.170 --test` sends a short

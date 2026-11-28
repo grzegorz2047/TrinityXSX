@@ -188,8 +188,8 @@ fn session(stream: TcpStream, udp_port: u16) {
 /// One command from the page; the reply to send back, if any.
 ///
 /// `target <host>` · `on` · `off` · `k <vk> <0|1>` · `b <button> <0|1>` · `m <dx> <dy>` · `w <detents>` ·
-/// `h` (the page's heartbeat, which the PS5's own server needs and this one does not: heartbeats go out by
-/// timer here)
+/// `h` (the page's heartbeat: it needs no answer, and like every frame it tells `session` the page is alive;
+/// the datagram heartbeats to the PS5 go out by timer)
 pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<String> {
     let mut words = text.split_whitespace();
     let verb = words.next()?;
