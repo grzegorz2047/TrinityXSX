@@ -111,6 +111,8 @@ struct Menu {
     active_show_fps: bool,
     /// `[input] remote` in the runtime profile; the runner applies it within two seconds.
     remote: library::RemoteInput,
+    remote_status: library::RemoteInputStatus,
+    remote_poll_ticks: u8,
     storage_line: String,
     app_row: usize,
     paths: Vec<String>,
@@ -189,6 +191,7 @@ impl Menu {
         self.framegen = library::read_framegen_setting(&self.profile_file);
         self.show_fps = library::read_show_fps_setting(&self.profile_file);
         self.remote = library::read_remote_input_setting(&self.profile_file);
+        self.remote_status = library::read_remote_input_status().unwrap_or_default();
         self.storage_line = library::format_storage_line(&library::storage_space_summary());
         self.catalog = library::scan_paths(&self.paths);
         self.ui.sort_games(&mut self.catalog.games);
@@ -989,6 +992,7 @@ impl Menu {
                                 library::RemoteInput::Browser => {
                                     "Open the address shown here or in the Touchpad menu on the PC"
                                 }
+                                library::RemoteInput::Both => "Open the address on the PC or run txin-sender.exe",
                             };
                             self.status = format!(
                                 "{}: {}  ·  {}",
@@ -1581,9 +1585,16 @@ unsafe fn paint(window: HWND, menu: &Menu) {
     } else {
         String::new()
     };
+    let pc_badge = if menu.remote_status.is_capturing() {
+        "  ·  PC K+M"
+    } else if menu.remote_status.is_connected() {
+        "  ·  PC READY"
+    } else {
+        ""
+    };
     let badge_color = if menu.framegen != menu.active_framegen {
         amber
-    } else if menu.active_framegen >= 2 {
+    } else if menu.active_framegen >= 2 || menu.remote_status.is_connected() {
         mint
     } else {
         muted
@@ -1591,11 +1602,11 @@ unsafe fn paint(window: HWND, menu: &Menu) {
     text_aligned(
         dc,
         &format!(
-            "{}{fg_badge}  ·  TrinityXSX {}  ·  PPSA83601",
+            "{}{fg_badge}{pc_badge}  ·  TrinityXSX {}  ·  PPSA83601",
             menu.ui.current_profile().name,
             library::TRINITYXSX_VERSION
         ),
-        region(right - scale(760), 68, right, 36),
+        region(right - scale(860), 68, right, 36),
         scale(23),
         600,
         badge_color,
@@ -1884,17 +1895,32 @@ unsafe fn paint(window: HWND, menu: &Menu) {
             } else {
                 count_noun(lang, pending_gog, "ready", "ready", "gotowy", "gotowe", "gotowych")
             };
-            // The row shows the mode; what the PC needs (address, PIN) gets its own line below the rows.
+            // The row shows the mode; what the PC needs (address, PIN) or live session status gets its own line below.
             let remote_val = t(menu.remote.label_key()).to_owned();
-            let remote_status = library::read_remote_input_status().unwrap_or_default();
-            let remote_line = match menu.remote {
-                library::RemoteInput::Browser if remote_status.mode == "browser" => {
-                    Some(format!("{}  {}     PIN {}", t("On the PC, open"), remote_status.url, remote_status.pin))
+            let remote_status = library::read_remote_input_status().unwrap_or_else(|| menu.remote_status.clone());
+            let remote_line = if remote_status.is_capturing() {
+                let peer = if remote_status.peer.is_empty() { "LAN" } else { remote_status.peer.as_str() };
+                let src = if remote_status.source.is_empty() { "PC" } else { remote_status.source.as_str() };
+                Some(format!("{}  ({peer} · {src})", t("PC session active")))
+            } else if remote_status.is_connected() {
+                let peer = if remote_status.peer.is_empty() { "LAN" } else { remote_status.peer.as_str() };
+                Some(format!("{}  ({peer})  ·  {}", t("PC connected"), t("Click the page to capture")))
+            } else {
+                match menu.remote {
+                    library::RemoteInput::Browser if remote_status.mode == "browser" => {
+                        Some(format!("{}  {}     PIN {}", t("On the PC, open"), remote_status.url, remote_status.pin))
+                    }
+                    library::RemoteInput::Both if remote_status.mode == "both" => Some(format!(
+                        "{}  {}     PIN {}   ·   UDP 9396",
+                        t("On the PC, open"),
+                        remote_status.url,
+                        remote_status.pin
+                    )),
+                    library::RemoteInput::Sender if remote_status.mode == "sender" => {
+                        Some(format!("{}:  {}", t("PS5 address for txin-sender"), remote_status.address))
+                    }
+                    _ => None,
                 }
-                library::RemoteInput::Sender if remote_status.mode == "sender" => {
-                    Some(format!("{}:  {}", t("PS5 address for txin-sender"), remote_status.address))
-                }
-                _ => None,
             };
             let rows = [
                 (t("Install GOG Games"), gog_val),
@@ -1944,7 +1970,7 @@ unsafe fn paint(window: HWND, menu: &Menu) {
                 ),
                 3 => t("Frame Generation creates smoother motion (requires restarting TrinityXSX)."),
                 4 => t("Show or hide the live FPS counter in the top-left corner (requires restart)."),
-                5 => t("Control games with a PC keyboard and mouse over LAN (Browser with PIN or txin-sender)."),
+                5 => t("Control games with a PC keyboard and mouse over LAN (Browser with PIN, txin-sender, or both)."),
                 _ => t("Restart TrinityXSX cleanly to apply display changes such as Frame Generation or FPS counter."),
             };
             text(dc, row_hint, region(left, 710, right, 44), scale(23), 400, snow);
@@ -2456,6 +2482,16 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lp
             if menu.poll_install_job() {
                 InvalidateRect(window, null(), 0);
             }
+            menu.remote_poll_ticks = menu.remote_poll_ticks.wrapping_add(1);
+            if menu.remote_poll_ticks % 20 == 0 {
+                let status_now = library::read_remote_input_status().unwrap_or_default();
+                let mode_now = library::read_remote_input_setting(&menu.profile_file);
+                if status_now != menu.remote_status || mode_now != menu.remote {
+                    menu.remote_status = status_now;
+                    menu.remote = mode_now;
+                    InvalidateRect(window, null(), 0);
+                }
+            }
             if menu.web.as_ref().is_some_and(|w| w.take_restart_requested()) {
                 let _ = library::request_app_restart();
                 menu.chosen = None;
@@ -2521,6 +2557,7 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, 
     let framegen = library::read_framegen_setting(&profile_file);
     let show_fps = library::read_show_fps_setting(&profile_file);
     let remote = library::read_remote_input_setting(&profile_file);
+    let remote_status = library::read_remote_input_status().unwrap_or_default();
     let active_framegen = std::env::var("PW_FRAMEGEN")
         .ok()
         .and_then(|v| v.trim().parse::<u8>().ok())
@@ -2544,6 +2581,8 @@ fn choose(primary_root: Option<PathBuf>) -> Result<Option<(String, PcInputMode, 
         show_fps,
         active_show_fps,
         remote,
+        remote_status,
+        remote_poll_ticks: 0,
         storage_line: String::new(),
         app_row: 0,
         paths,

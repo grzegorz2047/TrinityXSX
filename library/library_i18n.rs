@@ -130,35 +130,56 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "Off (USB on the PS5 only)") => "Wyłączone (tylko USB w PS5)",
         (Lang::Pl, "txin-sender program") => "Program txin-sender",
         (Lang::Pl, "Web browser") => "Przeglądarka",
+        (Lang::Pl, "Web browser + txin-sender") => "Przeglądarka + txin-sender",
         (Lang::Pl, "Plug a USB keyboard and mouse into the PS5") => "Podłącz klawiaturę i mysz USB do PS5",
         (Lang::Pl, "Run txin-sender.exe on the PC") => "Uruchom txin-sender.exe na komputerze",
         (Lang::Pl, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Otwórz na komputerze adres widoczny tutaj lub w menu Touchpada"
         }
+        (Lang::Pl, "Open the address on the PC or run txin-sender.exe") => {
+            "Otwórz adres na komputerze lub uruchom txin-sender.exe"
+        }
         (Lang::Pl, "On the PC, open") => "Na komputerze otwórz",
         (Lang::Pl, "PS5 address for txin-sender") => "Adres PS5 dla txin-sender",
+        (Lang::Pl, "PC session active") => "Aktywna sesja PC",
+        (Lang::Pl, "PC connected") => "Połączono z PC",
+        (Lang::Pl, "Click the page to capture") => "Kliknij stronę, aby przechwycić",
         (Lang::Pt, "PC keyboard & mouse") => "Teclado e mouse do PC",
         (Lang::Pt, "Off (USB on the PS5 only)") => "Desligado (só USB no PS5)",
         (Lang::Pt, "txin-sender program") => "Programa txin-sender",
         (Lang::Pt, "Web browser") => "Navegador",
+        (Lang::Pt, "Web browser + txin-sender") => "Navegador + txin-sender",
         (Lang::Pt, "Plug a USB keyboard and mouse into the PS5") => "Conecte um teclado e mouse USB ao PS5",
         (Lang::Pt, "Run txin-sender.exe on the PC") => "Execute o txin-sender.exe no PC",
         (Lang::Pt, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Abra no PC o endereço mostrado aqui ou no menu do Touchpad"
         }
+        (Lang::Pt, "Open the address on the PC or run txin-sender.exe") => {
+            "Abra o endereço no PC ou execute o txin-sender.exe"
+        }
         (Lang::Pt, "On the PC, open") => "No PC, abra",
         (Lang::Pt, "PS5 address for txin-sender") => "Endereço do PS5 para o txin-sender",
+        (Lang::Pt, "PC session active") => "Sessão do PC ativa",
+        (Lang::Pt, "PC connected") => "PC conectado",
+        (Lang::Pt, "Click the page to capture") => "Clique na página para capturar",
         (Lang::Es, "PC keyboard & mouse") => "Teclado y ratón del PC",
         (Lang::Es, "Off (USB on the PS5 only)") => "Desactivado (solo USB en la PS5)",
         (Lang::Es, "txin-sender program") => "Programa txin-sender",
         (Lang::Es, "Web browser") => "Navegador web",
+        (Lang::Es, "Web browser + txin-sender") => "Navegador + txin-sender",
         (Lang::Es, "Plug a USB keyboard and mouse into the PS5") => "Conecta un teclado y ratón USB a la PS5",
         (Lang::Es, "Run txin-sender.exe on the PC") => "Ejecuta txin-sender.exe en el PC",
         (Lang::Es, "Open the address shown here or in the Touchpad menu on the PC") => {
             "Abre en el PC la dirección que se ve aquí o en el menú del Touchpad"
         }
+        (Lang::Es, "Open the address on the PC or run txin-sender.exe") => {
+            "Abre la dirección en el PC o ejecuta txin-sender.exe"
+        }
         (Lang::Es, "On the PC, open") => "En el PC, abre",
         (Lang::Es, "PS5 address for txin-sender") => "Dirección de la PS5 para txin-sender",
+        (Lang::Es, "PC session active") => "Sesión de PC activa",
+        (Lang::Es, "PC connected") => "PC conectado",
+        (Lang::Es, "Click the page to capture") => "Haz clic en la página para capturar",
         (Lang::Pl, "Frame Generation creates smoother motion (requires restarting TrinityXSX).") => {
             "Generowanie klatek poprawia płynność obrazu (wymaga restartu aplikacji)."
         }
@@ -328,8 +349,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         (Lang::Pl, "Show or hide the live FPS counter in the top-left corner (requires restart).") => {
             "Pokazuje lub ukrywa licznik FPS w lewym górnym rogu ekranu (wymaga restartu)."
         }
-        (Lang::Pl, "Control games with a PC keyboard and mouse over LAN (Browser with PIN or txin-sender).") => {
-            "Steruj grami klawiaturą i myszą z PC po sieci LAN (Przeglądarka z PIN-em lub txin-sender)."
+        (Lang::Pl, "Control games with a PC keyboard and mouse over LAN (Browser with PIN, txin-sender, or both).") => {
+            "Steruj grami klawiaturą i myszą z PC po sieci LAN (Przeglądarka z PIN-em, txin-sender lub oba)."
         }
         (Lang::Pl, "Restart TrinityXSX cleanly to apply display changes such as Frame Generation or FPS counter.") => {
             "Restartuje TrinityXSX, aby zastosować zmiany wyświetlania (generowanie klatek, licznik FPS)."

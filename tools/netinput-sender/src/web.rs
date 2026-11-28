@@ -179,6 +179,11 @@ fn session(stream: TcpStream, udp_port: u16) {
             Ok(Frame::Close) | Err(_) => break,
         };
         if let Some(reply) = reply {
+            if reply.starts_with("target ") {
+                if let Some(target) = link.lock().unwrap().as_ref().map(|l| l.target) {
+                    crate::link::warn_if_ps5_browser_only(target);
+                }
+            }
             if ws::write_text(&mut *writer.lock().unwrap(), &reply).is_err() {
                 break;
             }
