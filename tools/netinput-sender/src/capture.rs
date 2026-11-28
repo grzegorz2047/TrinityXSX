@@ -92,6 +92,7 @@ impl Capture {
             Some(since) if self.on && now_ms.saturating_sub(since) >= PANIC_MS => {
                 self.stop();
                 self.swallow_esc_up = true;
+                self.esc_down_ms = now_ms;
                 PANIC
             }
             _ => PASS,
@@ -137,6 +138,10 @@ impl Capture {
         }
         if vk == VK_F12 && !down && self.swallow_f12_up {
             self.swallow_f12_up = false;
+            if key_held(&self.windows_keys, VK_F12) {
+                set_key(&mut self.windows_keys, VK_F12, false);
+                return PASS;
+            }
             return SWALLOW;
         }
         if vk == VK_ESCAPE && self.on {
@@ -437,5 +442,33 @@ mod tests {
         let o = c.key(VK_ESCAPE, false, 10_100);
         assert!(o.changed && o.verdict == Verdict::Swallow);
         assert!(!crate::protocol::key_held(&c.packet(1, 1).keys, VK_ESCAPE));
+    }
+
+    #[test]
+    fn esc_repeat_after_timer_panic_without_prior_repeats_is_swallowed() {
+        let mut c = Capture::default();
+        c.start();
+        c.key(VK_ESCAPE, true, 0);
+        assert!(c.tick(PANIC_MS).panic);
+        // Even if no auto-repeat arrived before the panic timer fired, repeats right after are swallowed.
+        assert_eq!(c.key(VK_ESCAPE, true, PANIC_MS + 33), SWALLOW);
+        assert_eq!(c.key(VK_ESCAPE, false, PANIC_MS + 100), SWALLOW);
+        // A later Esc press is Windows' again.
+        assert_eq!(c.key(VK_ESCAPE, true, PANIC_MS + 200), PASS);
+        assert_eq!(c.key(VK_ESCAPE, false, PANIC_MS + 250), PASS);
+    }
+
+    #[test]
+    fn f12_held_before_shortcut_still_releases_to_windows() {
+        let mut c = Capture::default();
+        // F12 pressed while not capturing (Windows owns it), then Ctrl+Alt added and F12 repeats.
+        assert_eq!(c.key(VK_F12, true, 0), PASS);
+        assert_eq!(c.key(0xa2, true, 100), PASS);
+        assert_eq!(c.key(0xa4, true, 120), PASS);
+        assert!(c.key(VK_F12, true, 500).toggled);
+        assert_eq!(c.key(VK_F12, true, 533), SWALLOW);
+        // Releasing F12 must pass the release back to Windows so F12 does not stay stuck there.
+        assert_eq!(c.key(VK_F12, false, 560), PASS);
+        assert!(!key_held(&c.packet(1, 1).keys, VK_F12));
     }
 }

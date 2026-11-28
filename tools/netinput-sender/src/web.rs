@@ -120,6 +120,14 @@ fn is_upgrade(request: &Request) -> bool {
         && request.header("sec-websocket-key").is_some()
 }
 
+fn release_if_silent(link: &mut Link, silent_ms: u64) -> bool {
+    if link.capture.on && silent_ms >= SILENT_MS {
+        link.release();
+        return true;
+    }
+    false
+}
+
 /// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats, watches for a long Esc, and
 /// releases everything if a capturing page goes silent.
 fn session(stream: TcpStream, udp_port: u16) {
@@ -140,8 +148,7 @@ fn session(stream: TcpStream, udp_port: u16) {
                 let mut note = None;
                 if let Some(link) = link.lock().unwrap().as_mut() {
                     let silent = now_ms().saturating_sub(heard.load(Ordering::SeqCst));
-                    if link.capture.on && silent >= SILENT_MS {
-                        link.release();
+                    if release_if_silent(link, silent) {
                         println!("page silent for {silent} ms - capture stopped, everything released");
                         note = Some("stopped".to_string());
                     } else if link.tick().panic {
@@ -198,7 +205,7 @@ pub fn command(link: &mut Option<Link>, text: &str, udp_port: u16) -> Option<Str
         return None;
     }
     if verb == "target" {
-        let host = text["target".len()..].trim();
+        let host = text.trim_start().strip_prefix("target").unwrap_or("").trim();
         if let Some(old) = link.as_mut() {
             old.release();
         }
@@ -285,5 +292,22 @@ mod tests {
         assert_eq!(command(&mut link, "off", 9).as_deref(), Some("off"));
         let p = link.as_ref().unwrap().capture.packet(0, 0);
         assert_eq!((p.flags, p.keys, p.buttons), (0, [0; 32], 0));
+        // Leading ASCII or Unicode whitespace before `target` must not panic or truncate the address.
+        assert!(command(&mut link, "\u{00a0} target 192.168.1.250", 9).unwrap().starts_with("target 192.168.1.250:9 "));
+    }
+
+    #[test]
+    fn silent_page_is_released_at_timeout() {
+        let mut link = Some(Link::connect("127.0.0.1", 9).unwrap());
+        assert_eq!(command(&mut link, "on", 9).as_deref(), Some("on"));
+        command(&mut link, "k 87 1", 9);
+        let l = link.as_mut().unwrap();
+        assert!(!release_if_silent(l, SILENT_MS - 1));
+        assert!(l.capture.on);
+        assert!(release_if_silent(l, SILENT_MS));
+        assert!(!l.capture.on);
+        assert_eq!(l.capture.packet(0, 0).keys, [0; 32]);
+        // Once stopped, further silence is a no-op.
+        assert!(!release_if_silent(l, SILENT_MS * 2));
     }
 }
