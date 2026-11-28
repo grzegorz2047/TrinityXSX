@@ -262,14 +262,23 @@ function connect(pin) {
   };
   ws.onmessage = (e) => {
     const [verb, ...rest] = String(e.data).split(" ");
+    // The helper answers each "target" in order, with "target ..." or "error ...": which click it answers.
+    const answers = (verb === "target" || verb === "error") && asked.length ? asked.shift() : attempt;
+    if (answers !== attempt) return;             // the answer to a click a later one replaced
     if (verb === "target") setStatus(HELPER ? T.target(rest[0]) : T.ps5(rest[0]), "good");
     else if (verb === "sent") setStatus(T.sent(rest[0]), "good");
     else if (verb === "panic") panic();
-    else if (verb === "error") { leave(); showNotice(T.err(rest.join(" ")), "bad"); }
+    // The helper released everything because this page went silent (it hung or was paused).
+    else if (verb === "stopped") { if (state === "capturing") stopCapture(T.interrupted); }
+    else if (verb === "error") { refused = answers; leave(); showNotice(T.err(rest.join(" ")), "bad"); }
   };
 }
-// Alive while open (the console drops a silent page and releases what it held); the helper ignores it.
+// Alive while open: the console and the helper both release what a silent page held.
 setInterval(() => send("h"), 500);
+// Each click of the button is an attempt; an error reply marks the one it answered, so the full-screen
+// request still pending for it does not carry on to the stage.
+let attempt = 0, refused = -1;
+const asked = [];                                // clicks whose "target" the helper has yet to answer
 
 function show() {
   if (state !== "ready") $("echo").textContent = "";
@@ -288,10 +297,12 @@ function show() {
 go.addEventListener("click", async () => {
   const value = field.value.trim();
   if (!value) { showNotice(HELPER ? T.needAddr : T.needPin, "bad"); field.focus(); return; }
+  const mine = ++attempt;
   if (HELPER) {
     if (!connected) return;
     localStorage.setItem("txin-ps5", value);
     showNotice("", "");
+    asked.push(mine);
     send("target " + value);
   } else {
     sessionStorage.setItem("txin-pin", value);
@@ -307,7 +318,14 @@ go.addEventListener("click", async () => {
   ]);
   full = granted && !!document.fullscreenElement;
   if (full && HELPER && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }
+  if (mine !== attempt) return;                // a later click took over (and owns full screen)
   if (!HELPER && !ws) { leave(); return; }   // the PS5 already refused
+  if (refused === mine) {                      // the helper refused the address: back to the card and its notice
+    const notice_text = notice.textContent, notice_kind = notice.className;
+    leave();
+    showNotice(notice_text, notice_kind);
+    return;
+  }
   state = "ready";
   show();
 });

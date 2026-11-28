@@ -1,0 +1,108 @@
+From 36875afea3791f77486c180d1ab893e8de77a33b Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 11:05:15 +0100
+Subject: [PATCH] Let the PC's F9 open the Touchpad menu after a left-half pad
+ click
+
+touch_left and touch_fingers describe the pad's last touchpad click and
+stay set after it, so judging every frame by them made the PC's F9 (patch
+0013) a game touchpad press after one left-half or two-finger pad click,
+and the menu stopped opening. They now only judge a click the pad makes
+in the same frame.
+
+The capture page (src/pw_webinput_page.c, from TrinityXSX's
+tools/netinput-sender/src/web/index.html) is regenerated: it goes back to
+its card when the helper refuses an address, and stops capturing when the
+helper reports the page went silent.
+---
+ native/wine64_main.c   |  9 +++++++--
+ src/pw_webinput_page.c | 24 +++++++++++++++++++++---
+ 2 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index e1fcc8a..f73cf69 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -2100,8 +2100,13 @@ int main(int argc, char **argv)
+ 
+                 /* Left-half touchpad clicks belong to the game as Xbox Back/Select
+                  * (0x0020); two-finger clicks open the PS5 OSK. Right-half clicks
+-                 * (or L3+R3, or either half while already open) toggle TrinityXSX menu. */
+-                int touchpad_for_game = pad.touch_fingers >= 2 || (!game_menu.open && pad.touch_left);
++                 * (or L3+R3, or either half while already open) toggle TrinityXSX menu.
++                 * touch_left and touch_fingers describe the pad's last click and stay
++                 * set after it, so they only judge a click the pad makes this frame:
++                 * the PC's F9 (remote_menu_held) always toggles the menu. */
++                int pad_click = (pad.core.pressed_edges & PW_PAD_PS5_TOUCHPAD) != 0;
++                int touchpad_for_game =
++                    pad_click && (pad.touch_fingers >= 2 || (!game_menu.open && pad.touch_left));
+                 pw_game_menu_tick(&game_menu, held, pressed, released,
+                                   touchpad_for_game, &menu_snapshot, &view);
+                 if (set_menu) set_menu(&menu_snapshot);
+diff --git a/src/pw_webinput_page.c b/src/pw_webinput_page.c
+index f81a471..2d472f3 100644
+--- a/src/pw_webinput_page.c
++++ b/src/pw_webinput_page.c
+@@ -268,14 +268,23 @@ const char pw_webinput_page[] =
+     "  };\012"
+     "  ws.onmessage = (e) => {\012"
+     "    const [verb, ...rest] = String(e.data).split(\042 \042);\012"
++    "    // The helper answers each \042target\042 in order, with \042target ...\042 or \042error ...\042: which click it answers.\012"
++    "    const answers = (verb === \042target\042 || verb === \042error\042) && asked.length \077 asked.shift() : attempt;\012"
++    "    if (answers !== attempt) return;             // the answer to a click a later one replaced\012"
+     "    if (verb === \042target\042) setStatus(HELPER \077 T.target(rest[0]) : T.ps5(rest[0]), \042good\042);\012"
+     "    else if (verb === \042sent\042) setStatus(T.sent(rest[0]), \042good\042);\012"
+     "    else if (verb === \042panic\042) panic();\012"
+-    "    else if (verb === \042error\042) { leave(); showNotice(T.err(rest.join(\042 \042)), \042bad\042); }\012"
++    "    // The helper released everything because this page went silent (it hung or was paused).\012"
++    "    else if (verb === \042stopped\042) { if (state === \042capturing\042) stopCapture(T.interrupted); }\012"
++    "    else if (verb === \042error\042) { refused = answers; leave(); showNotice(T.err(rest.join(\042 \042)), \042bad\042); }\012"
+     "  };\012"
+     "}\012"
+-    "// Alive while open (the console drops a silent page and releases what it held); the helper ignores it.\012"
++    "// Alive while open: the console and the helper both release what a silent page held.\012"
+     "setInterval(() => send(\042h\042), 500);\012"
++    "// Each click of the button is an attempt; an error reply marks the one it answered, so the full-screen\012"
++    "// request still pending for it does not carry on to the stage.\012"
++    "let attempt = 0, refused = -1;\012"
++    "const asked = [];                                // clicks whose \042target\042 the helper has yet to answer\012"
+     "\012"
+     "function show() {\012"
+     "  if (state !== \042ready\042) $(\042echo\042).textContent = \042\042;\012"
+@@ -294,10 +303,12 @@ const char pw_webinput_page[] =
+     "go.addEventListener(\042click\042, async () => {\012"
+     "  const value = field.value.trim();\012"
+     "  if (!value) { showNotice(HELPER \077 T.needAddr : T.needPin, \042bad\042); field.focus(); return; }\012"
++    "  const mine = ++attempt;\012"
+     "  if (HELPER) {\012"
+     "    if (!connected) return;\012"
+     "    localStorage.setItem(\042txin-ps5\042, value);\012"
+     "    showNotice(\042\042, \042\042);\012"
++    "    asked.push(mine);\012"
+     "    send(\042target \042 + value);\012"
+     "  } else {\012"
+     "    sessionStorage.setItem(\042txin-pin\042, value);\012"
+@@ -313,7 +324,14 @@ const char pw_webinput_page[] =
+     "  ]);\012"
+     "  full = granted && !!document.fullscreenElement;\012"
+     "  if (full && HELPER && navigator.keyboard && navigator.keyboard.lock) { try { await navigator.keyboard.lock(); } catch {} }\012"
++    "  if (mine !== attempt) return;                // a later click took over (and owns full screen)\012"
+     "  if (!HELPER && !ws) { leave(); return; }   // the PS5 already refused\012"
++    "  if (refused === mine) {                      // the helper refused the address: back to the card and its notice\012"
++    "    const notice_text = notice.textContent, notice_kind = notice.className;\012"
++    "    leave();\012"
++    "    showNotice(notice_text, notice_kind);\012"
++    "    return;\012"
++    "  }\012"
+     "  state = \042ready\042;\012"
+     "  show();\012"
+     "});\012"
+@@ -423,4 +441,4 @@ const char pw_webinput_page[] =
+     "</script>\012"
+     "</body>\012"
+     "</html>\012";
+-const size_t pw_webinput_page_length = 21434;
++const size_t pw_webinput_page_length = 22634;
+-- 
+2.48.1.windows.1
+

@@ -12,7 +12,7 @@ use crate::link::{now_ms, Link};
 use crate::ws::{self, Frame, Request};
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -20,6 +20,9 @@ use std::time::Duration;
 pub const WEB_PORT: u16 = 9397;
 const PAGE: &str = include_str!("web/index.html");
 const TICK: Duration = Duration::from_millis(25);
+/// A capturing page that says nothing for this long (it sends `h` every 500 ms) has hung or is paused:
+/// what it held is released, as the PS5's own server does, so no key stays down on the console.
+const SILENT_MS: u64 = 1500;
 
 #[link(name = "shell32")]
 extern "system" {
@@ -117,15 +120,17 @@ fn is_upgrade(request: &Request) -> bool {
         && request.header("sec-websocket-key").is_some()
 }
 
-/// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats and watches for a long Esc.
+/// One page: commands in, TXIN datagrams out; a timer thread sends heartbeats, watches for a long Esc, and
+/// releases everything if a capturing page goes silent.
 fn session(stream: TcpStream, udp_port: u16) {
     println!("page connected");
     let Ok(writer) = stream.try_clone() else { return };
     let writer = Arc::new(Mutex::new(writer));
     let link: Arc<Mutex<Option<Link>>> = Arc::new(Mutex::new(None));
     let closed = Arc::new(AtomicBool::new(false));
+    let heard = Arc::new(AtomicU64::new(now_ms()));
     {
-        let (link, writer, closed) = (link.clone(), writer.clone(), closed.clone());
+        let (link, writer, closed, heard) = (link.clone(), writer.clone(), closed.clone(), heard.clone());
         thread::spawn(move || {
             let mut reported = u64::MAX;
             let mut ticks = 0u32;
@@ -134,7 +139,12 @@ fn session(stream: TcpStream, udp_port: u16) {
                 ticks += 1;
                 let mut note = None;
                 if let Some(link) = link.lock().unwrap().as_mut() {
-                    if link.tick().panic {
+                    let silent = now_ms().saturating_sub(heard.load(Ordering::SeqCst));
+                    if link.capture.on && silent >= SILENT_MS {
+                        link.release();
+                        println!("page silent for {silent} ms - capture stopped, everything released");
+                        note = Some("stopped".to_string());
+                    } else if link.tick().panic {
                         println!("PANIC: Esc held - capture stopped ({} datagrams sent)", link.sent);
                         note = Some("panic".to_string());
                     } else if ticks.is_multiple_of(20) && link.sent != reported {
@@ -150,7 +160,9 @@ fn session(stream: TcpStream, udp_port: u16) {
     }
     let mut reader = stream;
     loop {
-        let reply = match ws::read_frame(&mut reader) {
+        let frame = ws::read_frame(&mut reader);
+        heard.store(now_ms(), Ordering::SeqCst);
+        let reply = match frame {
             Ok(Frame::Text(text)) => command(&mut link.lock().unwrap(), &text, udp_port),
             Ok(Frame::Ping(payload)) => {
                 let _ = ws::write_pong(&mut *writer.lock().unwrap(), &payload);
