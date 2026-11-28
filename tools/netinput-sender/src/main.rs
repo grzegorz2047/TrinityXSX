@@ -412,6 +412,7 @@ fn main() {
         eprintln!("txin-sender: {host}:{port}: {e}");
         std::process::exit(1);
     });
+    link::warn_if_ps5_browser_only(link.target);
     if test {
         test_pattern(link);
     } else {

@@ -1,0 +1,1190 @@
+From d200f3772b0e655b34ae97e74ccc2e240752c892 Mon Sep 17 00:00:00 2001
+From: TrinityXSX <trinityxsx@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 13:58:36 +0100
+Subject: [PATCH] Add live Touchpad PC input switching and session handoff
+
+Allow switching [input] remote live from the Touchpad quick menu (OFF, BROWSER + PIN, BROWSER + SENDER) and persisting the change to trinityxsx-library.profile. Support remote = both so TCP 8361 and UDP 9396 can run concurrently without dropping an open browser session. Report live PC session state (idle/connected/capturing, source, peer IP) in the Touchpad menu and netinput.txt, expose a PIN-free LAN-only GET /status endpoint for txin-sender diagnostics, automatically mute DualSense stick drift during active PC capture with instant pad reclaim, and offer a one-click temporary XInput hide override that auto-restores when the PC session ends.
+---
+ native/wine64_main.c         | 409 +++++++++++++++++++++++++++++------
+ src/pw_game_menu.c           |  76 ++++++-
+ src/pw_game_menu.h           |   8 +-
+ src/pw_game_profile.c        |  89 ++++++++
+ src/pw_game_profile.h        |  13 +-
+ src/pw_launcher_render.c     |  33 ++-
+ src/pw_netinput.c            |   2 +
+ src/pw_netinput.h            |   1 +
+ src/pw_webinput.c            |   5 +
+ src/pw_webinput.h            |   1 +
+ tests/test_pw_game_menu.c    |  47 ++++
+ tests/test_pw_game_profile.c |  29 +++
+ tests/test_pw_netinput.c     |   5 +-
+ tests/test_pw_webinput.c     |  14 ++
+ 14 files changed, 642 insertions(+), 90 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index f73cf69..2d46ef0 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1140,23 +1140,38 @@ static void post_netinput(int (*post_input)(const PwWineInput *), const PwNetInp
+ }
+ 
+ /* A PC's keyboard and mouse ([input] remote in the game's profile): the
+- * txin-sender datagrams, the title's own web page, or neither. The profile
+- * is read again every few seconds, so TrinityXSX's settings switch it while
+- * the title runs. The setting is the console's, not a game's: it lives in the
+- * library's profile, which a game started from the library reads too. What the
+- * mode is, and the page's address and PIN, go to <data>/netinput.txt for the
+- * library to show and to the in-game menu. The PIN is kept in
+- * <data>/netinput.pin, so the library and the games it starts share it and a
+- * page carries on across them. */
++ * txin-sender datagrams, the title's own web page, both, or neither. The
++ * profile is read again every few seconds, so TrinityXSX's settings switch it
++ * while the title runs, and the Touchpad menu can also switch it live and save
++ * it back to the library's profile. What the mode is, the page's address and
++ * PIN, and live PC session state go to <data>/netinput.txt for the library to
++ * show and to the in-game menu. The PIN is kept in <data>/netinput.pin, so the
++ * library and the games it starts share it and a page carries on across them. */
+ #define REMOTE_SETTINGS_PROFILE "trinityxsx-library"
++enum {
++    PC_SESSION_NONE = 0,
++    PC_SESSION_CONNECTED = 1,
++    PC_SESSION_CAPTURING = 2,
++};
++enum {
++    PC_SOURCE_NONE = 0,
++    PC_SOURCE_BROWSER = 1,
++    PC_SOURCE_SENDER = 2,
++};
+ static struct {
+     int mode;                   /* PW_GAME_REMOTE_* in use */
+-    int status;                 /* the source's open result */
++    int status;                 /* PW_OK when requested listener(s) are open */
++    int last_profile_mode;      /* last value seen in trinityxsx-library.profile, or -1 */
++    int udp_open;               /* 1 when UDP 9396 listener is open */
++    int web_open;               /* 1 when TCP 8361 web listener is open */
+     PwNetInputPs5 udp;
+     PwWebInput web;
+     PwNetInputPoll poll;
+     char address[16], pin[8];
+-} remote_input = { .mode = PW_GAME_REMOTE_OFF, .status = PW_ERR_STATE };
++    int session_state;          /* PC_SESSION_* */
++    int session_source;         /* PC_SOURCE_* */
++    uint32_t session_peer;      /* IPv4 host order */
++} remote_input = { .mode = PW_GAME_REMOTE_OFF, .status = PW_ERR_STATE, .last_profile_mode = -1 };
+ 
+ enum { REMOTE_PROFILE_MAX = PW_APP_PROFILE_MAX_BYTES };
+ 
+@@ -1165,40 +1180,151 @@ static void webinput_log(const char *line)
+     PS5LOG_LOG("PW_WINE64 webinput %s", line);
+ }
+ 
++static const char *remote_mode_name(int mode)
++{
++    switch (mode) {
++    case PW_GAME_REMOTE_SENDER: return "sender";
++    case PW_GAME_REMOTE_BROWSER: return "browser";
++    case PW_GAME_REMOTE_BOTH: return "both";
++    default: return "off";
++    }
++}
++
++static const char *remote_session_state_name(int state)
++{
++    switch (state) {
++    case PC_SESSION_CONNECTED: return "connected";
++    case PC_SESSION_CAPTURING: return "capturing";
++    default: return "idle";
++    }
++}
++
++static const char *remote_session_source_name(int source)
++{
++    switch (source) {
++    case PC_SOURCE_BROWSER: return "browser";
++    case PC_SOURCE_SENDER: return "sender";
++    default: return "none";
++    }
++}
++
++static void remote_format_ip(uint32_t ip, char out[16])
++{
++    if (!ip) { out[0] = '\0'; return; }
++    snprintf(out, 16, "%u.%u.%u.%u", ip >> 24, (ip >> 16) & 255u, (ip >> 8) & 255u, ip & 255u);
++}
++
+ static void remote_note(void)
+ {
+-    char path[256], text[160];
+-    int fd, n;
++    char path[256], text[256], peer[16];
++    const char *addr = remote_input.address[0] ? remote_input.address : "PS5";
++    int fd, n = 0;
+ 
+     snprintf(path, sizeof(path), "%s/netinput.txt", PW_WINE64_ROOT_DATA);
+-    if (remote_input.mode == PW_GAME_REMOTE_BROWSER && remote_input.status == PW_OK)
+-        n = snprintf(text, sizeof(text), "mode=browser\nurl=http://%s:%u\npin=%s\n",
+-                     remote_input.address[0] ? remote_input.address : "PS5", (unsigned)PW_WEBINPUT_PORT,
+-                     remote_input.pin);
+-    else if (remote_input.mode == PW_GAME_REMOTE_SENDER && remote_input.status == PW_OK)
+-        n = snprintf(text, sizeof(text), "mode=sender\naddress=%s\nport=%u\n",
+-                     remote_input.address[0] ? remote_input.address : "PS5", (unsigned)PW_NETINPUT_PORT);
+-    else
+-        n = snprintf(text, sizeof(text), "mode=%s\n", remote_input.mode == PW_GAME_REMOTE_OFF ? "off" : "failed");
++    n += snprintf(text + n, sizeof(text) - (size_t)n, "mode=%s\n",
++                  remote_input.mode == PW_GAME_REMOTE_OFF ? "off" :
++                  remote_input.status == PW_OK ? remote_mode_name(remote_input.mode) : "failed");
++    if (remote_input.web_open && n > 0 && (size_t)n < sizeof(text))
++        n += snprintf(text + n, sizeof(text) - (size_t)n, "url=http://%s:%u\npin=%s\n",
++                      addr, (unsigned)PW_WEBINPUT_PORT, remote_input.pin);
++    if (remote_input.udp_open && n > 0 && (size_t)n < sizeof(text))
++        n += snprintf(text + n, sizeof(text) - (size_t)n, "address=%s\nport=%u\n",
++                      addr, (unsigned)PW_NETINPUT_PORT);
++    if (n > 0 && (size_t)n < sizeof(text))
++        n += snprintf(text + n, sizeof(text) - (size_t)n, "state=%s\nsource=%s\n",
++                      remote_session_state_name(remote_input.session_state),
++                      remote_session_source_name(remote_input.session_source));
++    remote_format_ip(remote_input.session_peer, peer);
++    if (remote_input.session_state != PC_SESSION_NONE && peer[0] && n > 0 && (size_t)n < sizeof(text))
++        n += snprintf(text + n, sizeof(text) - (size_t)n, "peer=%s\n", peer);
+     fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+     if (fd < 0) return;
+-    if (n > 0 && write(fd, text, (size_t)n) < 0) {}
++    if (n > 0) {
++        size_t len = (size_t)n >= sizeof(text) ? sizeof(text) - 1 : (size_t)n;
++        if (write(fd, text, len) < 0) {}
++    }
+     close(fd);
+ }
+ 
+-/* The menu's line for it, or "" when it is off. */
+-static void remote_menu_line(char *out, size_t capacity)
++static int remote_session_refresh(void)
+ {
++    int state = PC_SESSION_NONE, source = PC_SOURCE_NONE;
++    uint32_t peer = 0;
++
++    if (remote_input.web_open && remote_input.web.controller >= 0 && remote_input.web.capturing) {
++        state = PC_SESSION_CAPTURING;
++        source = PC_SOURCE_BROWSER;
++        peer = remote_input.web.clients[remote_input.web.controller].address;
++    } else if (remote_input.udp_open && remote_input.udp.input.linked &&
++               !remote_input.udp.input.released && remote_input.udp.input.capturing) {
++        state = PC_SESSION_CAPTURING;
++        source = PC_SOURCE_SENDER;
++        peer = remote_input.udp.input.address;
++    } else if (remote_input.web_open && remote_input.web.controller >= 0) {
++        state = PC_SESSION_CONNECTED;
++        source = PC_SOURCE_BROWSER;
++        peer = remote_input.web.clients[remote_input.web.controller].address;
++    }
++    if (state == remote_input.session_state && source == remote_input.session_source &&
++        peer == remote_input.session_peer)
++        return 0;
++    remote_input.session_state = state;
++    remote_input.session_source = source;
++    remote_input.session_peer = peer;
++    {
++        char ip[16];
++        remote_format_ip(peer, ip);
++        PS5LOG_LOG("PW_WINE64 remote session state=%s source=%s peer=%s",
++                   remote_session_state_name(state), remote_session_source_name(source),
++                   ip[0] ? ip : "-");
++    }
++    remote_note();
++    return 1;
++}
++
++/* The Touchpad menu notice line for PC remote input, or "" when off. */
++static void remote_menu_line(char *out, size_t capacity, int allow_input_toggle, int live_mouse_kb,
++                             int pc_hide_pad)
++{
++    const char *addr = remote_input.address[0] ? remote_input.address : "PS5";
++    char peer[16];
++
+     out[0] = 0;
+-    if (remote_input.status != PW_OK) return;
+-    if (remote_input.mode == PW_GAME_REMOTE_BROWSER)
+-        snprintf(out, capacity, "PC: HTTP://%s:%u  PIN %s", remote_input.address[0] ? remote_input.address : "PS5",
++    if (remote_input.mode == PW_GAME_REMOTE_OFF) return;
++    if (remote_input.status != PW_OK) {
++        snprintf(out, capacity, "PC INPUT: FAILED TO OPEN PORT");
++        return;
++    }
++    remote_format_ip(remote_input.session_peer, peer);
++    if (remote_input.session_state == PC_SESSION_CAPTURING) {
++        const char *src = remote_input.session_source == PC_SOURCE_SENDER ? "SENDER" : "BROWSER";
++        if (allow_input_toggle && pc_hide_pad)
++            snprintf(out, capacity, "PC ACTIVE (%s) - PAD HIDDEN FOR SESSION", peer[0] ? peer : src);
++        else if (allow_input_toggle && !live_mouse_kb)
++            snprintf(out, capacity, "PC ACTIVE (%s) - PAD MUTED, OR HIDE PAD ABOVE", src);
++        else
++            snprintf(out, capacity, "PC ACTIVE (%s %s) - F9 MENU", peer[0] ? peer : "LAN", src);
++        return;
++    }
++    if (remote_input.session_state == PC_SESSION_CONNECTED) {
++        if (allow_input_toggle && pc_hide_pad)
++            snprintf(out, capacity, "PC CONNECTED (%s) - PAD HIDDEN FOR SESSION", peer[0] ? peer : "BROWSER");
++        else
++            snprintf(out, capacity, "PC CONNECTED (%s) - CLICK PAGE TO CAPTURE", peer[0] ? peer : "BROWSER");
++        return;
++    }
++    if (remote_input.mode == PW_GAME_REMOTE_BOTH)
++        snprintf(out, capacity, "PC READY: HTTP://%s:%u PIN %s + UDP %u", addr,
++                 (unsigned)PW_WEBINPUT_PORT, remote_input.pin, (unsigned)PW_NETINPUT_PORT);
++    else if (remote_input.mode == PW_GAME_REMOTE_BROWSER)
++        snprintf(out, capacity, "PC READY: HTTP://%s:%u  PIN %s", addr,
+                  (unsigned)PW_WEBINPUT_PORT, remote_input.pin);
+     else if (remote_input.mode == PW_GAME_REMOTE_SENDER)
+-        snprintf(out, capacity, "PC: TXIN-SENDER %s", remote_input.address[0] ? remote_input.address : "");
++        snprintf(out, capacity, "PC READY: TXIN-SENDER %s (UDP %u)", addr, (unsigned)PW_NETINPUT_PORT);
+ }
+ 
+-/* Closes the source in use and opens mode's; what was held is posted as released. */
++/* Closes unused sources and opens mode's without dropping a still-wanted
++ * listener (e.g. switching browser <-> both keeps an open page connected). */
+ /* The page's PIN: the one in <data>/netinput.pin, or a new one written there. */
+ static void remote_pin(uint64_t seed)
+ {
+@@ -1224,32 +1350,51 @@ static void remote_pin(uint64_t seed)
+ static void remote_switch(int mode, uint64_t now, int (*post_input)(const PwWineInput *), uint64_t *posted,
+                           uint64_t *refused)
+ {
++    int want_udp = mode == PW_GAME_REMOTE_SENDER || mode == PW_GAME_REMOTE_BOTH;
++    int want_web = mode == PW_GAME_REMOTE_BROWSER || mode == PW_GAME_REMOTE_BOTH;
++    int udp_status = PW_OK, web_status = PW_OK;
++
+     /* the same mode stays; one that failed to open (a port in use) is tried again */
+     if (mode == remote_input.mode && remote_input.status == PW_OK) return;
+-    memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+-    if (remote_input.status == PW_OK && remote_input.mode == PW_GAME_REMOTE_SENDER)
++    if (remote_input.udp_open && !want_udp) {
++        memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+         pw_netinput_ps5_close(&remote_input.udp, &remote_input.poll);
+-    if (remote_input.status == PW_OK && remote_input.mode == PW_GAME_REMOTE_BROWSER)
++        remote_menu_keys(&remote_input.poll);
++        if (post_input) post_netinput(post_input, &remote_input.poll, 0, posted, refused);
++        remote_input.udp_open = 0;
++    }
++    if (remote_input.web_open && !want_web) {
++        memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+         pw_webinput_close(&remote_input.web, &remote_input.poll);
+-    if (post_input) post_netinput(post_input, &remote_input.poll, 0, posted, refused);
++        remote_menu_keys(&remote_input.poll);
++        if (post_input) post_netinput(post_input, &remote_input.poll, 0, posted, refused);
++        remote_input.web_open = 0;
++    }
+     remote_input.mode = mode;
+-    remote_input.status = PW_OK;
+     pw_webinput_ps5_address(remote_input.address);
+-    if (mode == PW_GAME_REMOTE_SENDER) {
+-        remote_input.status = pw_netinput_ps5_open(&remote_input.udp, pw_netinput_ps5_system_ops(netinput_log),
+-                                                   PW_NETINPUT_PORT);
+-    } else if (mode == PW_GAME_REMOTE_BROWSER) {
++    if (want_udp && !remote_input.udp_open) {
++        udp_status = pw_netinput_ps5_open(&remote_input.udp, pw_netinput_ps5_system_ops(netinput_log),
++                                          PW_NETINPUT_PORT);
++        remote_input.udp_open = udp_status == PW_OK;
++    }
++    if (want_web && !remote_input.web_open) {
+         int listener = pw_webinput_ps5_listen(PW_WEBINPUT_PORT);
+         remote_pin(now ^ (uint64_t)listener << 32);
+-        remote_input.status = listener < 0 ? PW_ERR_NOT_FOUND :
++        web_status = listener < 0 ? PW_ERR_NOT_FOUND :
+             pw_webinput_open(&remote_input.web, pw_webinput_ps5_system_ops(webinput_log), listener, remote_input.pin);
++        remote_input.web_open = web_status == PW_OK;
+         PS5LOG_LOG("PW_WINE64 webinput listen tcp port=%u socket=%d status=%s address=%s",
+-                   (unsigned)PW_WEBINPUT_PORT, listener, pw_result_name(remote_input.status),
++                   (unsigned)PW_WEBINPUT_PORT, listener, pw_result_name(web_status),
+                    remote_input.address[0] ? remote_input.address : "?");
+     }
+-    PS5LOG_LOG("PW_WINE64 remote input mode=%s status=%s", mode == PW_GAME_REMOTE_SENDER ? "sender" :
+-               mode == PW_GAME_REMOTE_BROWSER ? "browser" : "off", pw_result_name(remote_input.status));
+-    remote_note();
++    if (remote_input.web_open) remote_input.web.udp_open = remote_input.udp_open;
++    if (!remote_input.udp_open && !remote_input.web_open) remote_menu_held = 0;
++    remote_input.status = (want_udp && !remote_input.udp_open) ? udp_status :
++                          (want_web && !remote_input.web_open) ? web_status : PW_OK;
++    PS5LOG_LOG("PW_WINE64 remote input mode=%s status=%s udp=%d web=%d",
++               remote_mode_name(mode), pw_result_name(remote_input.status),
++               remote_input.udp_open, remote_input.web_open);
++    if (!remote_session_refresh()) remote_note();
+ }
+ 
+ /* [input] remote as the library's profile says now, or -1 when it cannot be read. */
+@@ -1270,6 +1415,59 @@ static int remote_profile_mode(void)
+     return (int)parsed.input.remote;
+ }
+ 
++/* Persists a live Touchpad-menu PC INPUT mode change back to the library profile. */
++static void remote_save_profile_mode(int mode)
++{
++    static uint8_t src[REMOTE_PROFILE_MAX], dst[REMOTE_PROFILE_MAX];
++    char path[256], tmp[272];
++    size_t src_len = 0, dst_len = 0;
++    int fd;
++
++    snprintf(path, sizeof(path), "%s/profiles/%s.profile", PW_WINE64_ROOT_DATA, REMOTE_SETTINGS_PROFILE);
++    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
++    fd = open(path, O_RDONLY);
++    if (fd >= 0) {
++        ssize_t got = read(fd, src, sizeof(src));
++        close(fd);
++        if (got > 0) src_len = (size_t)got;
++    }
++    if (pw_game_profile_set_value(src, src_len, "input", "remote", remote_mode_name(mode),
++                                  dst, sizeof(dst), &dst_len) != PW_OK)
++        return;
++    fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++    if (fd >= 0) {
++        ssize_t wrote = write(fd, dst, dst_len);
++        close(fd);
++        if (wrote == (ssize_t)dst_len && rename(tmp, path) == 0) {
++            remote_input.last_profile_mode = mode;
++            return;
++        }
++        (void)unlink(tmp);
++    }
++    fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
++    if (fd >= 0) {
++        if (write(fd, dst, dst_len) == (ssize_t)dst_len)
++            remote_input.last_profile_mode = mode;
++        close(fd);
++    }
++}
++
++/* Deliberate DualSense input (ignoring minor stick drift) to reclaim control
++ * from automatic PC-session stick-drift muting. */
++static int pad_user_active(const PwPadPs5 *p)
++{
++    int lx, ly, rx, ry;
++    if (!p || !p->core.connected || p->intercepted) return 0;
++    if (p->core.pressed_edges & ~(uint32_t)PW_PAD_PS5_TOUCHPAD) return 1;
++    if (p->l2 > 64 || p->r2 > 64) return 1;
++    lx = (int)p->left_stick.x - 0x80;
++    ly = (int)p->left_stick.y - 0x80;
++    rx = (int)p->right_stick.x - 0x80;
++    ry = (int)p->right_stick.y - 0x80;
++    return lx > 48 || lx < -48 || ly > 48 || ly < -48 ||
++           rx > 48 || rx < -48 || ry > 48 || ry < -48;
++}
++
+ /* The process's CPU time, user and system, in milliseconds: a stall that
+  * waits shows no growth, one that spins grows by a core a second. */
+ static unsigned long long cpu_ms(void)
+@@ -1587,7 +1785,8 @@ int main(int argc, char **argv)
+     static PwHidPs5 hid;
+     static PwGameInput game_input;
+     static PwGameInput mouse_kb_input;
+-    int live_mouse_kb = 0;
++    int live_mouse_kb = 0, allow_input_toggle = 0;
++    int pc_pad_handoff = 0, pc_hide_pad = 0;
+     /* [input] player2: a second signed-in user's DualSense as more keys. */
+     static PwPadPs5 pad2;
+     static PwGameInput game_input2;
+@@ -1851,7 +2050,7 @@ int main(int argc, char **argv)
+         /* Resolve XInput controller hooks even when starting in keyboard/mouse
+          * mode for games so the Touchpad menu can toggle live between Gamepad
+          * and Mouse & Keyboard without restarting. */
+-        int allow_input_toggle = launch.app && strcmp(launch.app->id, "trinityxsx-library") != 0;
++        allow_input_toggle = launch.app && strcmp(launch.app->id, "trinityxsx-library") != 0;
+         if (game_input.mode == PW_GAME_INPUT_XINPUT || allow_input_toggle) {
+             set_pad = (void (*)(const PwWinePad *))
+                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
+@@ -1867,6 +2066,7 @@ int main(int argc, char **argv)
+         }
+         game_menu.input_toggle = allow_input_toggle && set_pad != NULL && post_input != NULL;
+         game_menu.input_mouse_kb = live_mouse_kb;
++        game_menu.remote_toggle = post_input != NULL;
+         set_menu = (void (*)(const struct pw_title_menu *))
+             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_menu");
+         PS5LOG_LOG("PW_WINE64 menu=%s", set_menu ? "touchpad" : "local-only");
+@@ -1894,8 +2094,11 @@ int main(int argc, char **argv)
+              * (remote_input); without them, as this program's own profile says. */
+             {
+                 int mode = remote_profile_mode();
++                remote_input.last_profile_mode = mode;
+                 if (mode < 0) mode = game ? (int)game->input.remote : PW_GAME_REMOTE_OFF;
+                 remote_switch(mode, now_ns(), NULL, NULL, NULL);
++                game_menu.remote_mode = remote_input.mode;
++                game_menu.remote_session = remote_input.session_state;
+             }
+         }
+         {
+@@ -2001,24 +2204,58 @@ int main(int argc, char **argv)
+             }
+         }
+         /* The PC's keyboard and mouse, as the USB ones; the profile's mode is
+-         * looked at again every two seconds. */
++         * looked at again every two seconds, and Touchpad menu changes also
++         * switch it live and persist it to the profile. */
++        int remote_session_changed = 0;
++        int pc_activity_this_tick = 0;
+         if (post_input) {
+             if (tick % (2 * PW_WINE64_TICKS_PER_S) == 0) {
+                 int mode = remote_profile_mode();
+-                if (mode >= 0) remote_switch(mode, now, post_input, &posted, &refused);
++                if (mode >= 0 && (mode != remote_input.last_profile_mode ||
++                                  (mode == remote_input.mode && remote_input.status != PW_OK))) {
++                    remote_input.last_profile_mode = mode;
++                    remote_switch(mode, now, post_input, &posted, &refused);
++                    game_menu.remote_mode = remote_input.mode;
++                    remote_session_changed = 1;
++                }
+             }
+-            if (remote_input.status == PW_OK && remote_input.mode != PW_GAME_REMOTE_OFF) {
+-                memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+-                if (remote_input.mode == PW_GAME_REMOTE_SENDER)
++            if (remote_input.udp_open || remote_input.web_open) {
++                int dialog = osk_ps5.showing || game_menu.open;
++                if (remote_input.udp_open) {
++                    memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+                     pw_netinput_ps5_poll(&remote_input.udp, now, &remote_input.poll);
+-                else
++                    if (remote_input.poll.count || remote_input.poll.dx || remote_input.poll.dy ||
++                        remote_input.poll.wheel)
++                        pc_activity_this_tick = 1;
++                    remote_menu_keys(&remote_input.poll);
++                    post_netinput(post_input, &remote_input.poll, dialog, &posted, &refused);
++                }
++                if (remote_input.web_open) {
++                    memset(&remote_input.poll, 0, sizeof(remote_input.poll));
+                     pw_webinput_poll(&remote_input.web, now, &remote_input.poll);
+-                remote_menu_keys(&remote_input.poll);
+-                post_netinput(post_input, &remote_input.poll, osk_ps5.showing || game_menu.open, &posted,
+-                              &refused);
++                    if (remote_input.poll.count || remote_input.poll.dx || remote_input.poll.dy ||
++                        remote_input.poll.wheel)
++                        pc_activity_this_tick = 1;
++                    remote_menu_keys(&remote_input.poll);
++                    post_netinput(post_input, &remote_input.poll, dialog, &posted, &refused);
++                }
+             } else {
+                 remote_menu_held = 0;
+             }
++            if (remote_session_refresh()) remote_session_changed = 1;
++            game_menu.remote_session = remote_input.session_state;
++            if (remote_input.session_state == PC_SESSION_CAPTURING) {
++                if (remote_session_changed || pc_activity_this_tick) pc_pad_handoff = 1;
++            } else {
++                pc_pad_handoff = 0;
++            }
++            if ((remote_input.session_state == PC_SESSION_NONE || remote_input.mode == PW_GAME_REMOTE_OFF) &&
++                pc_hide_pad) {
++                pc_hide_pad = 0;
++                game_menu.pc_hide_pad = 0;
++                PS5LOG_LOG("PW_WINE64 pc session ended: gamepad restored");
++                remote_session_changed = 1;
++            }
+         }
+ #if PW_WINE64_SCRIPT
+         while (post_input && script_key_next < script_key_count &&
+@@ -2074,8 +2311,9 @@ int main(int argc, char **argv)
+         static struct pw_title_menu menu_snapshot;
+         static int menu_drawn_open = 0;
+         static int menu_drawn_cursor = -1;
++        static uint32_t menu_drawn_lines = 0;
+         static char menu_telemetry[128] = "";
+-        static char menu_notice[96] = "";
++        static char menu_notice[128] = "";
+         const PwPadPs5 *seen = &pad;
+         if (pad_read) {
+             uint32_t held = pad.core.previous_buttons, pressed = pad.core.pressed_edges,
+@@ -2118,7 +2356,8 @@ int main(int argc, char **argv)
+                     /* Refresh compact FPS/VRAM telemetry snapshot when opening menu. */
+                     menu_telemetry[0] = '\0';
+                     menu_notice[0] = '\0';
+-                    remote_menu_line(menu_notice, sizeof(menu_notice));
++                    remote_menu_line(menu_notice, sizeof(menu_notice), allow_input_toggle, live_mouse_kb,
++                                     pc_hide_pad);
+                     char hud_path[256];
+                     snprintf(hud_path, sizeof(hud_path), "%s/hud_stats.txt", PW_WINE64_ROOT_DATA);
+                     int hfd = open(hud_path, O_RDONLY);
+@@ -2135,6 +2374,10 @@ int main(int argc, char **argv)
+                             }
+                         }
+                     }
++                } else if (game_menu.open && remote_session_changed) {
++                    remote_menu_line(menu_notice, sizeof(menu_notice), allow_input_toggle, live_mouse_kb,
++                                     pc_hide_pad);
++                    menu_drawn_open = 0;
+                 }
+                 if (was_open && !game_menu.open) {
+                     menu_drawn_open = 0;
+@@ -2144,9 +2387,31 @@ int main(int argc, char **argv)
+                 }
+                 if (view.action == PW_GAME_MENU_ACTION_TOGGLE_INPUT) {
+                     live_mouse_kb = game_menu.input_mouse_kb;
++                    pc_hide_pad = game_menu.pc_hide_pad;
++                    pc_pad_handoff = 0;
+                     pointer = (PwWinePointer){ 0, 0 };
+-                    PS5LOG_LOG("PW_WINE64 menu action=toggle-input mode=%s",
+-                               live_mouse_kb ? "mouse_kb" : "xinput");
++                    PS5LOG_LOG("PW_WINE64 menu action=toggle-input mode=%s pc_hide_pad=%d",
++                               live_mouse_kb ? "mouse_kb" : "xinput", pc_hide_pad);
++                } else if (view.action == PW_GAME_MENU_ACTION_TOGGLE_PC_PAD) {
++                    pc_hide_pad = game_menu.pc_hide_pad;
++                    pointer = (PwWinePointer){ 0, 0 };
++                    if (pc_hide_pad && rumble) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
++                    PS5LOG_LOG("PW_WINE64 menu action=toggle-pc-pad hide=%d", pc_hide_pad);
++                } else if (view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE) {
++                    remote_switch(game_menu.remote_mode, now, post_input, &posted, &refused);
++                    remote_save_profile_mode(remote_input.mode);
++                    game_menu.remote_mode = remote_input.mode;
++                    game_menu.remote_session = remote_input.session_state;
++                    if (remote_input.mode == PW_GAME_REMOTE_OFF) {
++                        pc_hide_pad = 0;
++                        pc_pad_handoff = 0;
++                        game_menu.pc_hide_pad = 0;
++                    }
++                    remote_menu_line(menu_notice, sizeof(menu_notice), allow_input_toggle, live_mouse_kb,
++                                     pc_hide_pad);
++                    PS5LOG_LOG("PW_WINE64 menu action=cycle-remote mode=%s status=%s",
++                               remote_mode_name(remote_input.mode), pw_result_name(remote_input.status));
++                    menu_drawn_open = 0; /* redraw menu with updated mode and notice */
+                 } else if (view.action == PW_GAME_MENU_ACTION_DUMP_DIAG) {
+                     char req_path[256];
+                     snprintf(req_path, sizeof(req_path), "%s/dump_diag.req", PW_WINE64_ROOT_DATA);
+@@ -2207,15 +2472,26 @@ int main(int argc, char **argv)
+                 game_pad.l2 = game_pad.r2 = 0;
+             }
+             seen = &game_pad;
++            if (!game_menu.open && !osk_ps5.showing && pc_pad_handoff && !pc_hide_pad &&
++                pad_user_active(seen)) {
++                pc_pad_handoff = 0;
++            }
+         }
+         /* XInput controller 0: the DualSense, and in a script build the
+          * macro's controller added to it, every frame, so a scripted press
+-         * stays down until its release. In live Mouse & Keyboard mode keep
+-         * XInput connected but neutral so games do not pause on disconnect. */
++         * stays down until its release.
++         * - In live Mouse & Keyboard mode (or automatic PC-session drift mute)
++         *   keep XInput connected but neutral so games do not pause on
++         *   disconnect and stick drift cannot fight the PC mouse.
++         * - When the user picks "USE PC K+M FOR SESSION (HIDE GAMEPAD)" in the
++         *   Touchpad menu, report XInput disconnected until the PC session ends. */
+         if (set_pad) {
+             PwWinePad state;
+-            int connected = pw_wine_game_pad((pad_read && !live_mouse_kb) ? seen : NULL, &state), scripted = 0;
+-            if (live_mouse_kb && pad_read && (seen->core.connected || seen->intercepted)) {
++            int pad_muted = live_mouse_kb || pc_pad_handoff;
++            int connected = (pad_read && !pc_hide_pad && !pad_muted)
++                ? pw_wine_game_pad(seen, &state) : 0;
++            int scripted = 0;
++            if (!pc_hide_pad && pad_muted && pad_read && (seen->core.connected || seen->intercepted)) {
+                 memset(&state, 0, sizeof(state));
+                 state.connected = 1;
+                 connected = 1;
+@@ -2226,7 +2502,7 @@ int main(int argc, char **argv)
+ #endif
+             if (pad_read || scripted) set_pad(connected ? &state : NULL);
+         }
+-        if (pad_read) {
++        if (pad_read && !pc_hide_pad) {
+             const PwGameInput *active_input = live_mouse_kb
+                 ? &mouse_kb_input
+                 : (game_input.mode == PW_GAME_INPUT_XINPUT ? &game_input : NULL);
+@@ -2235,7 +2511,7 @@ int main(int argc, char **argv)
+                                       seen->core.released_edges, events,
+                                       sizeof(events) / sizeof(events[0]) - 1)
+                 : 0;
+-            if (active_input && active_input->mouse != PW_GAME_STICK_NONE) {
++            if (active_input && active_input->mouse != PW_GAME_STICK_NONE && !pc_pad_handoff) {
+                 const PwPadPs5Stick *stick = active_input->mouse == PW_GAME_STICK_LEFT ?
+                                              &seen->left_stick : &seen->right_stick;
+                 count += (size_t)pw_wine_pointer_step(&pointer, stick->x, stick->y,
+@@ -2323,7 +2599,8 @@ int main(int argc, char **argv)
+                        pw_result_name(closed), (unsigned long long)shown);
+         }
+         if (game_menu.open && frame_shown) {
+-            if (!menu_drawn_open || menu_drawn_cursor != game_menu.cursor) {
++            if (!menu_drawn_open || menu_drawn_cursor != game_menu.cursor ||
++                menu_drawn_lines != menu_snapshot.lines) {
+                 const PwPresentTarget menu_target = {
+                     frame_shown, PW_LAUNCHER_RENDER_WIDTH, PW_LAUNCHER_RENDER_HEIGHT,
+                     PW_LAUNCHER_RENDER_WIDTH * 4u, PW_WINE64_MAX_FRAME
+@@ -2337,6 +2614,7 @@ int main(int argc, char **argv)
+                         if (pw_videoout_ps5_present_scaled(&video, &menu_frame, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
+                             menu_drawn_open = 1;
+                             menu_drawn_cursor = game_menu.cursor;
++                            menu_drawn_lines = menu_snapshot.lines;
+                             presented = 1;
+                         }
+                     } else if (__atomic_load_n(&display_closed, __ATOMIC_ACQUIRE)) {
+@@ -2345,6 +2623,7 @@ int main(int argc, char **argv)
+                             vulkan_frames_flip(&vulkan_frames, &menu_frame, PW_PRESENT_SCALE_FIT)) {
+                             menu_drawn_open = 1;
+                             menu_drawn_cursor = game_menu.cursor;
++                            menu_drawn_lines = menu_snapshot.lines;
+                             presented = 1;
+                         }
+                     }
+diff --git a/src/pw_game_menu.c b/src/pw_game_menu.c
+index bea9767..dc28b3b 100644
+--- a/src/pw_game_menu.c
++++ b/src/pw_game_menu.c
+@@ -1,11 +1,14 @@
+ /* SPDX-License-Identifier: LGPL-2.1-or-later */
+ #include "pw_game_menu.h"
++#include <stdio.h>
+ #include <string.h>
+ 
+ enum {
+     ACTION_NONE,
+     ACTION_CLOSE,
+     ACTION_TOGGLE_INPUT,
++    ACTION_TOGGLE_PC_PAD,
++    ACTION_CYCLE_REMOTE,
+     ACTION_RESTART_GAME,
+     ACTION_DUMP_DIAG,
+     ACTION_LIBRARY,
+@@ -14,18 +17,48 @@ enum {
+ };
+ typedef struct MenuLine { const char *text; int action; } MenuLine;
+ 
+-enum { MAX_MENU_LINES = 8 };
++enum { MAX_MENU_LINES = 10 };
++
++static const char *remote_line_text(int mode)
++{
++    switch (mode) {
++    case 1: return "PC INPUT: TXIN-SENDER UDP (X TO CHANGE)";
++    case 2: return "PC INPUT: BROWSER + PIN (X TO CHANGE)";
++    case 3: return "PC INPUT: BROWSER + SENDER (X TO CHANGE)";
++    default: return "PC INPUT: OFF (X TO ENABLE)";
++    }
++}
++
++static int next_remote_mode(int mode)
++{
++    switch (mode) {
++    case 0: return 2;  /* OFF -> BROWSER (PIN) */
++    case 2: return 3;  /* BROWSER -> BOTH (BROWSER + SENDER) */
++    case 1: return 3;  /* SENDER -> BOTH */
++    default: return 0; /* BOTH -> OFF */
++    }
++}
+ 
+ static int build_lines(const PwGameMenu *menu, MenuLine *out)
+ {
+     int n = 0;
+     out[n++] = (MenuLine){ "RESUME", ACTION_CLOSE };
+     if (menu->input_toggle) {
+-        out[n++] = (MenuLine){
+-            menu->input_mouse_kb ? "INPUT MODE: MOUSE+KB (X TO GAMEPAD)"
+-                                 : "INPUT MODE: GAMEPAD (X TO MOUSE+KB)",
+-            ACTION_TOGGLE_INPUT
+-        };
++        const char *label = menu->pc_hide_pad
++            ? "INPUT MODE: PC K+M SESSION (PAD HIDDEN)"
++            : (menu->input_mouse_kb ? "INPUT MODE: MOUSE+KB (X TO GAMEPAD)"
++                                    : "INPUT MODE: GAMEPAD (X TO MOUSE+KB)");
++        out[n++] = (MenuLine){ label, ACTION_TOGGLE_INPUT };
++        if (menu->remote_session > 0 || menu->pc_hide_pad) {
++            out[n++] = (MenuLine){
++                menu->pc_hide_pad ? "RESTORE GAMEPAD (END PC K+M OVERRIDE)"
++                                  : "USE PC K+M FOR SESSION (HIDE GAMEPAD)",
++                ACTION_TOGGLE_PC_PAD
++            };
++        }
++    }
++    if (menu->remote_toggle) {
++        out[n++] = (MenuLine){ remote_line_text(menu->remote_mode), ACTION_CYCLE_REMOTE };
+     }
+     out[n++] = (MenuLine){ "RESTART GAME", ACTION_RESTART_GAME };
+     out[n++] = (MenuLine){ "SAVE DIAGNOSTIC DUMP", ACTION_DUMP_DIAG };
+@@ -60,9 +93,10 @@ static void snapshot_of(const PwGameMenu *menu, struct pw_title_menu *snapshot)
+     if (!menu->open) return;
+     snapshot->open = 1;
+     snapshot->lines = (uint32_t)count;
+-    snapshot->selected = menu->cursor;
+-    strcpy(snapshot->title, "TRINITYXSX MENU");
+-    for (int i = 0; i < count; i++) strcpy(snapshot->line[i], lines[i].text);
++    snapshot->selected = menu->cursor >= count ? count - 1 : menu->cursor;
++    snprintf(snapshot->title, sizeof(snapshot->title), "TRINITYXSX MENU");
++    for (int i = 0; i < count; i++)
++        snprintf(snapshot->line[i], sizeof(snapshot->line[i]), "%s", lines[i].text);
+ }
+ 
+ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_t released,
+@@ -77,6 +111,8 @@ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_
+ 
+     if (!menu || !snapshot || !view) return 0;
+     count = build_lines(menu, lines);
++    if (menu->open && (menu->cursor < 0 || menu->cursor >= count))
++        menu->cursor = move(lines, count, -1, 1);
+     view->action = PW_GAME_MENU_ACTION_NONE;
+     if (!menu->open) {
+         if (toggle) {
+@@ -91,10 +127,30 @@ int pw_game_menu_tick(PwGameMenu *menu, uint32_t held, uint32_t pressed, uint32_
+         if ((pressed & PW_GAME_MENU_CROSS) && selectable(lines, count, menu->cursor)) {
+             switch (lines[menu->cursor].action) {
+             case ACTION_TOGGLE_INPUT:
+-                menu->input_mouse_kb = !menu->input_mouse_kb;
++                if (menu->pc_hide_pad) {
++                    menu->pc_hide_pad = 0;
++                } else {
++                    menu->input_mouse_kb = !menu->input_mouse_kb;
++                }
+                 view->action = PW_GAME_MENU_ACTION_TOGGLE_INPUT;
+                 menu->open = 0;
+                 break;
++            case ACTION_TOGGLE_PC_PAD:
++                menu->pc_hide_pad = !menu->pc_hide_pad;
++                view->action = PW_GAME_MENU_ACTION_TOGGLE_PC_PAD;
++                menu->open = 0;
++                break;
++            case ACTION_CYCLE_REMOTE: {
++                int had_session = menu->input_toggle && (menu->remote_session > 0 || menu->pc_hide_pad);
++                menu->remote_mode = next_remote_mode(menu->remote_mode);
++                if (menu->remote_mode == 0) {
++                    menu->pc_hide_pad = 0;
++                    menu->remote_session = 0;
++                    if (had_session && menu->cursor > 0) menu->cursor--;
++                }
++                view->action = PW_GAME_MENU_ACTION_CYCLE_REMOTE;
++                break;
++            }
+             case ACTION_RESTART_GAME:
+                 view->action = PW_GAME_MENU_ACTION_RESTART_GAME;
+                 menu->open = 0;
+diff --git a/src/pw_game_menu.h b/src/pw_game_menu.h
+index e0fa2f8..86dc967 100644
+--- a/src/pw_game_menu.h
++++ b/src/pw_game_menu.h
+@@ -13,6 +13,10 @@ typedef struct PwGameMenu {
+     int keyboard;           /* 1: the console's on-screen keyboard can be opened */
+     int input_toggle;       /* 1: allow toggling Gamepad <-> Mouse & Keyboard live */
+     int input_mouse_kb;     /* 0: Gamepad (XInput), 1: Mouse & Keyboard on DualSense */
++    int remote_toggle;      /* 1: allow cycling PC remote input live from the menu */
++    int remote_mode;        /* 0: off, 1: sender, 2: browser, 3: both */
++    int remote_session;     /* 0: idle, 1: connected, 2: capturing */
++    int pc_hide_pad;        /* 1: XInput hidden for the active PC session */
+     uint32_t withheld;      /* buttons the game must not see yet */
+     uint32_t game_held;     /* what the game saw held last tick */
+ } PwGameMenu;
+@@ -25,7 +29,9 @@ enum {
+     PW_GAME_MENU_ACTION_RESTART_GAME,
+     PW_GAME_MENU_ACTION_LIBRARY,
+     PW_GAME_MENU_ACTION_EXIT,
+-    PW_GAME_MENU_ACTION_TOGGLE_INPUT
++    PW_GAME_MENU_ACTION_TOGGLE_INPUT,
++    PW_GAME_MENU_ACTION_CYCLE_REMOTE,
++    PW_GAME_MENU_ACTION_TOGGLE_PC_PAD
+ };
+ 
+ /* The pad as the game should see it this tick. */
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 825bdf2..464bffa 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -132,6 +132,7 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
+         if (is(v, n, "off")) input->remote = PW_GAME_REMOTE_OFF;
+         else if (is(v, n, "sender")) input->remote = PW_GAME_REMOTE_SENDER;
+         else if (is(v, n, "browser")) input->remote = PW_GAME_REMOTE_BROWSER;
++        else if (is(v, n, "both")) input->remote = PW_GAME_REMOTE_BOTH;
+         else return PW_ERR_UNSUPPORTED;
+         input->set |= SET_REMOTE;
+         return PW_OK;
+@@ -587,3 +588,91 @@ uint32_t pw_game_button_mask(size_t index)
+ {
+     return index < PW_GAME_BUTTON_COUNT ? buttons[index].mask : 0u;
+ }
++
++static int append_bytes(uint8_t *out, size_t cap, size_t *used, const void *data, size_t n)
++{
++    if (n > cap - *used) return PW_ERR_LIMIT;
++    if (n) memcpy(out + *used, data, n);
++    *used += n;
++    return PW_OK;
++}
++
++static int append_kv(uint8_t *out, size_t cap, size_t *used, const char *key, const char *value,
++                     const char *eol, size_t eol_len)
++{
++    if (append_bytes(out, cap, used, key, strlen(key)) != PW_OK) return PW_ERR_LIMIT;
++    if (append_bytes(out, cap, used, " = ", 3) != PW_OK) return PW_ERR_LIMIT;
++    if (append_bytes(out, cap, used, value, strlen(value)) != PW_OK) return PW_ERR_LIMIT;
++    return append_bytes(out, cap, used, eol, eol_len);
++}
++
++int pw_game_profile_set_value(const uint8_t *src, size_t src_length,
++                              const char *section, const char *key, const char *value,
++                              uint8_t *out, size_t out_capacity, size_t *out_length)
++{
++    size_t pos = 0, used = 0;
++    int in_section = 0, found_section = 0, written = 0;
++
++    if (!section || !*section || !key || !*key || !value || !out || !out_length)
++        return PW_ERR_PRECONDITION;
++    if (!src && src_length > 0) return PW_ERR_PRECONDITION;
++
++    while (pos < src_length) {
++        size_t line_start = pos, line_end = pos, raw_end;
++        while (line_end < src_length && src[line_end] != '\n' && src[line_end] != '\r') line_end++;
++        raw_end = line_end;
++        if (raw_end < src_length && src[raw_end] == '\r') raw_end++;
++        if (raw_end < src_length && src[raw_end] == '\n') raw_end++;
++        const char *eol = (raw_end - line_end == 2) ? "\r\n" : "\n";
++        size_t eol_len = (raw_end - line_end == 2) ? 2 : 1;
++
++        const uint8_t *b = src + line_start, *e = src + line_end;
++        trim(&b, &e);
++        if (b < e && *b == '[' && e[-1] == ']') {
++            const uint8_t *sb = b + 1, *se = e - 1;
++            trim(&sb, &se);
++            int matches = is(sb, (size_t)(se - sb), section);
++            if (in_section && !written) {
++                if (append_kv(out, out_capacity, &used, key, value, "\n", 1) != PW_OK)
++                    return PW_ERR_LIMIT;
++                written = 1;
++            }
++            in_section = matches;
++            if (matches) found_section = 1;
++        } else if (in_section && !written && b < e && *b != ';' && *b != '#') {
++            const uint8_t *eq = memchr(b, '=', (size_t)(e - b));
++            if (eq) {
++                const uint8_t *kb = b, *ke = eq;
++                trim(&kb, &ke);
++                if (is(kb, (size_t)(ke - kb), key)) {
++                    if (append_kv(out, out_capacity, &used, key, value, eol, eol_len) != PW_OK)
++                        return PW_ERR_LIMIT;
++                    written = 1;
++                    pos = raw_end;
++                    continue;
++                }
++            }
++        }
++        if (append_bytes(out, out_capacity, &used, src + line_start, raw_end - line_start) != PW_OK)
++            return PW_ERR_LIMIT;
++        pos = raw_end;
++    }
++
++    if (!written) {
++        if (used > 0 && out[used - 1] != '\n') {
++            if (append_bytes(out, out_capacity, &used, "\n", 1) != PW_OK) return PW_ERR_LIMIT;
++        }
++        if (!found_section) {
++            if (used > 0 && append_bytes(out, out_capacity, &used, "\n", 1) != PW_OK)
++                return PW_ERR_LIMIT;
++            if (append_bytes(out, out_capacity, &used, "[", 1) != PW_OK ||
++                append_bytes(out, out_capacity, &used, section, strlen(section)) != PW_OK ||
++                append_bytes(out, out_capacity, &used, "]\n", 2) != PW_OK)
++                return PW_ERR_LIMIT;
++        }
++        if (append_kv(out, out_capacity, &used, key, value, "\n", 1) != PW_OK) return PW_ERR_LIMIT;
++    }
++
++    *out_length = used;
++    return PW_OK;
++}
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index 2c02325..561cab2 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -98,7 +98,12 @@ typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
+                              PW_GAME_SCALING_STRETCH } PwGameScaling;
+ typedef enum PwGameView { PW_GAME_VIEW_WINDOW = 0, PW_GAME_VIEW_DESKTOP } PwGameView;
+ typedef enum PwGameInputMode { PW_GAME_INPUT_KEYBOARD = 0, PW_GAME_INPUT_XINPUT } PwGameInputMode;
+-typedef enum PwGameRemote { PW_GAME_REMOTE_OFF = 0, PW_GAME_REMOTE_SENDER, PW_GAME_REMOTE_BROWSER } PwGameRemote;
++typedef enum PwGameRemote {
++    PW_GAME_REMOTE_OFF = 0,
++    PW_GAME_REMOTE_SENDER,
++    PW_GAME_REMOTE_BROWSER,
++    PW_GAME_REMOTE_BOTH
++} PwGameRemote;
+ typedef enum PwGameStick { PW_GAME_STICK_NONE = 0, PW_GAME_STICK_LEFT, PW_GAME_STICK_RIGHT } PwGameStick;
+ typedef enum PwGameBindKind { PW_GAME_BIND_UNSET = 0, PW_GAME_BIND_NONE, PW_GAME_BIND_KEY,
+                               PW_GAME_BIND_MOUSE } PwGameBindKind;
+@@ -172,6 +177,12 @@ typedef struct PwGameProfile {
+  * [input], [debug] and [runtime] are optional, once each. PW_OK or a
+  * PW_ERR_* status. */
+ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *profile);
++/* Update or insert `key = value` inside `[section]` of an INI-style profile
++ * buffer, preserving all other sections, keys and comments. Returns PW_OK or
++ * PW_ERR_LIMIT if `out_capacity` is too small. */
++int pw_game_profile_set_value(const uint8_t *src, size_t src_length,
++                              const char *section, const char *key, const char *value,
++                              uint8_t *out, size_t out_capacity, size_t *out_length);
+ /* The variables runtime sets in Wine's environment, into env, which has
+  * room for PW_GAME_RUNTIME_ENV_MAX; how many. fast_clock is not among them:
+  * its frequency is measured at launch (src/pw_tsc_calibrate.h), and the
+diff --git a/src/pw_launcher_render.c b/src/pw_launcher_render.c
+index b595a7a..113d2c3 100644
+--- a/src/pw_launcher_render.c
++++ b/src/pw_launcher_render.c
+@@ -348,34 +348,43 @@ int pw_launcher_render_menu(const struct pw_title_menu *menu,const char *telemet
+ 
+     fill(&c,0,0,W,H,bg);
+ 
+-    const int32_t pw=1040,ph=816;
++    uint32_t count=menu->lines>PW_TITLE_MENU_LINES?PW_TITLE_MENU_LINES:menu->lines;
++    if(count>10u)count=10u;
++    const int32_t pw=1160;
++    const int32_t row_h=count<=7u?66:(count<=8u?60:54);
++    const int32_t row_step=row_h+(count<=7u?12:10);
++    const int32_t top_pad=152;
++    const int32_t bottom_pad=128;
++    int32_t ph=top_pad+(int32_t)count*row_step+bottom_pad;
++    if(ph<560)ph=560;
++    if(ph>1020)ph=1020;
+     const int32_t px=(W-pw)/2,py=(H-ph)/2;
+     rounded(&c,px,py,pw,ph,18,panel,panel);
+     fill(&c,px,py,pw,6,mint);
+ 
+     const char *heading=menu->title[0]?menu->title:"TRINITYXSX MENU";
+-    text(&c,px+52,py+36,heading,5,snow,pw-104);
++    text(&c,px+52,py+34,heading,5,snow,pw-104);
+ 
+     /* Live FPS / VRAM telemetry pill written by XCL (or LIBRARY / IDLE). */
+     const char *stats=(telemetry && telemetry[0])?telemetry:"LIBRARY / IDLE  -  GAME PAUSED";
+-    rounded(&c,px+48,py+92,pw-96,44,8,pill,pill);
+-    text(&c,px+66,py+106,stats,3,mint,pw-132);
++    rounded(&c,px+48,py+90,pw-96,44,8,pill,pill);
++    text(&c,px+66,py+104,stats,3,mint,pw-132);
+ 
+-    uint32_t count=menu->lines>PW_TITLE_MENU_LINES?PW_TITLE_MENU_LINES:menu->lines;
++    const int32_t text_y_off=(row_h-28)/2;
+     for(uint32_t i=0;i<count;i++) {
+-        int32_t ry=py+156+(int32_t)i*78;
++        int32_t ry=py+top_pad+(int32_t)i*row_step;
+         int selected=(int32_t)i==menu->selected;
+-        rounded(&c,px+48,ry,pw-96,66,10,selected?card_sel:card,selected?card_sel:card);
+-        if(selected)fill(&c,px+48,ry,8,66,mint);
+-        text(&c,px+80,ry+20,menu->line[i],4,selected?snow:muted,pw-160);
++        rounded(&c,px+48,ry,pw-96,row_h,10,selected?card_sel:card,selected?card_sel:card);
++        if(selected)fill(&c,px+48,ry,8,row_h,mint);
++        text(&c,px+80,ry+text_y_off,menu->line[i],4,selected?snow:muted,pw-160);
+     }
+ 
+     if(notice && notice[0]) {
+-        rounded(&c,px+48,py+ph-120,pw-96,48,8,card_sel,card_sel);
+-        text(&c,px+66,py+ph-106,notice,3,snow,pw-132);
++        rounded(&c,px+48,py+ph-118,pw-96,46,8,card_sel,card_sel);
++        text(&c,px+66,py+ph-105,notice,3,snow,pw-132);
+     }
+ 
+     const char *hint="D-PAD MOVE    X SELECT    O / TOUCHPAD RESUME";
+-    text(&c,px+52,py+ph-52,hint,3,muted,pw-104);
++    text(&c,px+52,py+ph-48,hint,3,muted,pw-104);
+     return PW_OK;
+ }
+diff --git a/src/pw_netinput.c b/src/pw_netinput.c
+index d24b745..51bd709 100644
+--- a/src/pw_netinput.c
++++ b/src/pw_netinput.c
+@@ -100,6 +100,7 @@ static void change(PwNetInput *input, const uint8_t *keys, uint8_t buttons, PwNe
+ static void release_all(PwNetInput *input, PwNetInputPoll *poll)
+ {
+     static const uint8_t none[32];
++    input->capturing = 0;
+     change(input, none, 0, poll);
+ }
+ 
+@@ -158,6 +159,7 @@ int pw_netinput_receive(PwNetInput *input, const uint8_t *bytes, size_t length,
+     input->released = 0;
+     input->packets++;
+     if (packet.flags & PW_NETINPUT_CAPTURING) {
++        input->capturing = 1;
+         fold(packet.keys, keys);
+         change(input, keys, packet.buttons, poll);
+     } else {
+diff --git a/src/pw_netinput.h b/src/pw_netinput.h
+index d56b222..63b1eab 100644
+--- a/src/pw_netinput.h
++++ b/src/pw_netinput.h
+@@ -56,6 +56,7 @@ typedef struct PwNetInputPacket {
+ typedef struct PwNetInput {
+     int linked;                 /* a sender was accepted */
+     int released;               /* its timeout already released everything */
++    int capturing;              /* the newest packet had PW_NETINPUT_CAPTURING */
+     uint32_t address;           /* IPv4, host order */
+     uint16_t port;
+     uint32_t session, sequence;
+diff --git a/src/pw_webinput.c b/src/pw_webinput.c
+index 8ff9868..d3c877d 100644
+--- a/src/pw_webinput.c
++++ b/src/pw_webinput.c
+@@ -308,6 +308,11 @@ static void request(PwWebInput *web, int index, uint64_t now_ns, PwNetInputPoll
+     if (!strcmp(target, "/") || !strncmp(target, "/?", 2)) {
+         web->pages++;
+         respond(c, "200 OK", "text/html; charset=utf-8", pw_webinput_page, pw_webinput_page_length);
++    } else if (!strcmp(target, "/status") || !strncmp(target, "/status?", 8)) {
++        static const char status_both[] = "mode=both\nudp=1\n";
++        static const char status_browser[] = "mode=browser\nudp=0\n";
++        const char *body = web->udp_open ? status_both : status_browser;
++        respond(c, "200 OK", "text/plain; charset=utf-8", body, strlen(body));
+     } else if (!strcmp(target, "/ws") || !strncmp(target, "/ws?", 4)) {
+         handshake(web, index, head, target, now_ns, poll);
+     } else {
+diff --git a/src/pw_webinput.h b/src/pw_webinput.h
+index 1903cbf..5e55a34 100644
+--- a/src/pw_webinput.h
++++ b/src/pw_webinput.h
+@@ -76,6 +76,7 @@ typedef struct PwWebInput {
+     PwWebInputClient clients[PW_WEBINPUT_CLIENTS];
+     int controller;                  /* the client whose page drives input, or -1 */
+     int capturing;
++    int udp_open;                    /* 1 when UDP TXIN listener is also open (mode=both) */
+     uint8_t keys[32], buttons;       /* as the page holds them, sides kept */
+     PwNetInput delivered;            /* what the game was given */
+     uint32_t wrong_pins;
+diff --git a/tests/test_pw_game_menu.c b/tests/test_pw_game_menu.c
+index 39a212a..a189f37 100644
+--- a/tests/test_pw_game_menu.c
++++ b/tests/test_pw_game_menu.c
+@@ -83,6 +83,53 @@ int main(void)
+     assert(tick(TOUCHPAD) && shown.lines == 5);
+     assert(!strcmp(shown.line[0], "RESUME") && !strcmp(shown.line[1], "RESTART GAME"));
+ 
++    /* Remote PC input toggle cycles OFF -> BROWSER -> BOTH -> OFF while keeping menu open. */
++    memset(&menu, 0, sizeof(menu));
++    menu.keyboard = 1;
++    menu.input_toggle = 1;
++    menu.remote_toggle = 1;
++    menu.remote_mode = 0;
++    held = 0;
++    assert(tick(TOUCHPAD) && shown.open && shown.lines == 8);
++    assert(strstr(shown.line[2], "PC INPUT: OFF") != NULL);
++    assert(tick(0) && tick(DOWN) && tick(0) && tick(DOWN) && shown.selected == 2);
++    assert(tick(0) && tick(CROSS));
++    assert(menu.open && view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE && menu.remote_mode == 2);
++    assert(strstr(shown.line[2], "BROWSER + PIN") != NULL);
++    assert(tick(0) && tick(CROSS));
++    assert(menu.open && view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE && menu.remote_mode == 3);
++    assert(strstr(shown.line[2], "BROWSER + SENDER") != NULL);
++    assert(tick(0) && tick(CROSS));
++    assert(menu.open && view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE && menu.remote_mode == 0);
++
++    /* Active PC session surfaces one-click session gamepad hide and restores cleanly. */
++    menu.remote_mode = 3;
++    menu.remote_session = 2;
++    assert(tick(0) && shown.lines == 9);
++    assert(strstr(shown.line[2], "USE PC K+M FOR SESSION") != NULL);
++    assert(shown.selected == 2);
++    assert(!tick(CROSS) && !menu.open);
++    assert(view.action == PW_GAME_MENU_ACTION_TOGGLE_PC_PAD && menu.pc_hide_pad == 1);
++    assert(!tick(0) && tick(TOUCHPAD) && shown.open);
++    assert(strstr(shown.line[1], "PAD HIDDEN") != NULL);
++    assert(strstr(shown.line[2], "RESTORE GAMEPAD") != NULL);
++    /* Selecting INPUT MODE clears the temporary PC pad-hide override. */
++    assert(tick(0) && tick(DOWN) && shown.selected == 1);
++    assert(tick(0) && !tick(CROSS));
++    assert(view.action == PW_GAME_MENU_ACTION_TOGGLE_INPUT && menu.pc_hide_pad == 0);
++
++    /* Turning PC INPUT OFF while a session is active drops the session row and keeps cursor on PC INPUT. */
++    menu.remote_mode = 3;
++    menu.remote_session = 2;
++    menu.pc_hide_pad = 1;
++    assert(!tick(0) && tick(TOUCHPAD) && shown.open && shown.lines == 9);
++    assert(tick(0) && tick(DOWN) && tick(0) && tick(DOWN) && tick(0) && tick(DOWN) && shown.selected == 3);
++    assert(strstr(shown.line[3], "PC INPUT: BROWSER + SENDER") != NULL);
++    assert(tick(0) && tick(CROSS));
++    assert(menu.open && view.action == PW_GAME_MENU_ACTION_CYCLE_REMOTE);
++    assert(menu.remote_mode == 0 && menu.remote_session == 0 && menu.pc_hide_pad == 0);
++    assert(shown.lines == 8 && shown.selected == 2 && strstr(shown.line[2], "PC INPUT: OFF") != NULL);
++
+     /* Two-finger touchpad click is reserved for the on-screen keyboard. */
+     memset(&menu, 0, sizeof(menu));
+     assert(!pw_game_menu_tick(&menu, TOUCHPAD, TOUCHPAD, 0, 1, &shown, &view));
+diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
+index 5dd99cd..f85435b 100644
+--- a/tests/test_pw_game_profile.c
++++ b/tests/test_pw_game_profile.c
+@@ -391,8 +391,37 @@ static void test_presets(void)
+     assert(parse(APP "[input]\nmode = xinput\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_OFF);
+     assert(parse(APP "[input]\nremote = sender\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_SENDER);
+     assert(parse(APP "[input]\nremote = browser\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BROWSER);
++    assert(parse(APP "[input]\nremote = both\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BOTH);
+     assert(parse(APP "[input]\nremote = off\n", &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_OFF);
+ 
++    /* Updating [input] remote in place, inserting into [input], or appending [input]. */
++    {
++        uint8_t out[1024];
++        size_t len = 0;
++        const char *with_key = APP "[display]\nshow_fps = true\n[input]\nmode = xinput\nremote = browser\n";
++        assert(pw_game_profile_set_value((const uint8_t *)with_key, strlen(with_key),
++                                         "input", "remote", "both", out, sizeof(out), &len) == PW_OK);
++        assert(pw_game_profile_parse(out, len, &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BOTH &&
++               p.input.mode == PW_GAME_INPUT_XINPUT && p.display.show_fps == 1);
++
++        const char *without_key = APP "[input]\nmode = xinput\n[display]\nshow_fps = false\n";
++        assert(pw_game_profile_set_value((const uint8_t *)without_key, strlen(without_key),
++                                         "input", "remote", "sender", out, sizeof(out), &len) == PW_OK);
++        assert(pw_game_profile_parse(out, len, &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_SENDER &&
++               p.input.mode == PW_GAME_INPUT_XINPUT && p.display.show_fps == 0);
++
++        const char *without_section = APP "[display]\nshow_fps = true\n";
++        assert(pw_game_profile_set_value((const uint8_t *)without_section, strlen(without_section),
++                                         "input", "remote", "browser", out, sizeof(out), &len) == PW_OK);
++        assert(pw_game_profile_parse(out, len, &p) == PW_OK && p.input.remote == PW_GAME_REMOTE_BROWSER &&
++               p.display.show_fps == 1);
++
++        assert(pw_game_profile_set_value((const uint8_t *)with_key, strlen(with_key),
++                                         "input", "remote", "both", out, 16, &len) == PW_ERR_LIMIT);
++        assert(pw_game_profile_set_value(NULL, 1, "input", "remote", "off", out, sizeof(out), &len) ==
++               PW_ERR_PRECONDITION);
++    }
++
+     /* A preset holds only [input] and cannot chain another preset. */
+     assert(preset("[input]\npreset = other\n", &input) == PW_ERR_MALFORMED);
+     assert(preset("[input]\nplayer2 = other\n", &input) == PW_ERR_MALFORMED);
+diff --git a/tests/test_pw_netinput.c b/tests/test_pw_netinput.c
+index 38a20ec..292e2e2 100644
+--- a/tests/test_pw_netinput.c
++++ b/tests/test_pw_netinput.c
+@@ -62,6 +62,7 @@ static void test_keys_and_motion(void)
+     p.motion_x = 1000; p.motion_y = 2000;              /* the first totals are the baseline */
+     key(&p, 'W', 1);
+     assert(deliver(&in, &p, LAN, 5000, 1 * MS, &poll) == PW_OK);
++    assert(in.capturing == 1);
+     assert(poll.count == 1 && poll.events[0].kind == PW_HID_EVENT_KEY && poll.events[0].down &&
+            poll.events[0].code == 'W' && poll.dx == 0 && poll.dy == 0);
+ 
+@@ -87,6 +88,7 @@ static void test_keys_and_motion(void)
+     /* Capture off: everything released, motion ignored. */
+     p.sequence = 5; p.flags = 0; p.motion_x = 99999;
+     assert(deliver(&in, &p, LAN, 5000, 5 * MS, &poll) == PW_OK);
++    assert(in.capturing == 0);
+     assert(poll.count == 2 && !poll.events[0].down && !poll.events[1].down && poll.dx == 0);
+ }
+ 
+@@ -129,7 +131,8 @@ static void test_senders_and_timeout(void)
+     pw_netinput_tick(&in, 100 * MS, &poll);
+     assert(poll.count == 0);
+     pw_netinput_tick(&in, MS + PW_NETINPUT_TIMEOUT_NS, &poll);
+-    assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'W' && in.timeouts == 1);
++    assert(poll.count == 1 && !poll.events[0].down && poll.events[0].code == 'W' && in.timeouts == 1 &&
++           in.capturing == 0);
+     memset(&poll, 0, sizeof(poll));
+     pw_netinput_tick(&in, 2 * PW_NETINPUT_TIMEOUT_NS, &poll);
+     assert(poll.count == 0);
+diff --git a/tests/test_pw_webinput.c b/tests/test_pw_webinput.c
+index 7399ac2..e6df81b 100644
+--- a/tests/test_pw_webinput.c
++++ b/tests/test_pw_webinput.c
+@@ -146,7 +146,21 @@ static void test_page_and_refusals(void)
+     assert(!memcmp(fakes[s].out + fakes[s].out_used - pw_webinput_page_length, pw_webinput_page,
+                    pw_webinput_page_length));
+ 
++    /* Status endpoint reports mode/udp on LAN without ever exposing the PIN. */
++    s = connect_client(LAN, "GET /status HTTP/1.1\r\nHost: 192.168.1.170:8361\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && strstr(fakes[s].out, "HTTP/1.1 200 OK"));
++    assert(strstr(fakes[s].out, "mode=browser\nudp=0\n") && !strstr(fakes[s].out, "4821"));
++    web.udp_open = 1;
++    s = connect_client(LAN, "GET /status HTTP/1.1\r\nHost: 192.168.1.170:8361\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && strstr(fakes[s].out, "mode=both\nudp=1\n") && !strstr(fakes[s].out, "4821"));
++    web.udp_open = 0;
++
+     /* Not from the LAN: closed unanswered. */
++    s = connect_client(0x08080808u, "GET /status HTTP/1.1\r\n\r\n");
++    pw_webinput_poll(&web, MS, &poll);
++    assert(fakes[s].closed && !fakes[s].out_used);
+     s = connect_client(0x08080808u, "GET / HTTP/1.1\r\n\r\n");
+     pw_webinput_poll(&web, MS, &poll);
+     assert(fakes[s].closed && !fakes[s].out_used);
+-- 
+2.48.1.windows.1
+

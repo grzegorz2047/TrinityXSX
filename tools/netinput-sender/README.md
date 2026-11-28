@@ -1,16 +1,24 @@
 # PC keyboard & mouse for TrinityXSX
 
 TrinityXSX can take a Windows PC's keyboard and mouse over the LAN, as well as a USB keyboard and mouse plugged
-into the PS5. Pick how in the library: **Settings → PC keyboard & mouse**. The setting is
-`[input] remote = off | browser | sender` in the runtime profile, and the PS5 applies a change within two seconds.
+into the PS5. Pick how in the library (**Settings → PC keyboard & mouse**) or live inside any running game from
+the **Touchpad quick menu** (`PC INPUT`). The setting is `[input] remote = off | browser | sender | both` in the
+runtime profile, and changes apply immediately without restarting the game.
 
 | Setting | On the PC | Captures |
 |---|---|---|
 | **Off** (default) | nothing: plug a USB keyboard and mouse into the PS5 | everything; no port is open on the console |
 | **Web browser** | open the address the Touchpad menu (and the setting) shows, e.g. `http://192.168.1.170:8361`, and enter the PIN | everything except Esc, Alt+Tab and the Windows key, which the browser keeps; the `` ` `` key (below Esc) sends Esc to the game |
+| **Web browser + txin-sender** (`both`) | use either the PS5 browser page (PIN) or `txin-sender.exe` (UDP 9396) without switching modes | both listeners run side by side; switching between `browser` and `both` keeps an open page connected |
 | **txin-sender program** | run `txin-sender.exe` (every release ships `txin-sender-<tag>.exe`) | everything, Esc, Alt+Tab and the Windows key included |
 
-A USB keyboard and mouse plugged into the PS5 work in every mode, and so does the pad: they all add up.
+A USB keyboard and mouse plugged into the PS5 work in every mode, and so does the pad: they all add up. While a
+PC session is actively capturing, TrinityXSX automatically mutes DualSense stick drift so a resting controller
+cannot fight the mouse (picking up the pad reclaims it immediately). For older games that ignore the mouse while
+an XInput controller is present, the Touchpad menu shows live PC session status and offers a one-click
+**USE PC K+M FOR SESSION (HIDE GAMEPAD)** override that automatically restores the DualSense when the PC session
+ends. If `txin-sender.exe` is started while the PS5 is in Browser-only mode, it checks `http://<ps5>:8361/status`
+(read-only, no PIN exposed) and prints a clear hint.
 
 **F9** on the PC is the Touchpad in every mode: it opens and closes TrinityXSX's quick menu in a game. While the
 menu is open, the ↑ and ↓ arrows choose, **Enter** confirms and **Backspace** (or Esc, `` ` `` from the page)

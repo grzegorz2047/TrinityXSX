@@ -1747,6 +1747,8 @@ pub enum RemoteInput {
     Sender,
     /// The PS5 serves a page on port 8361; the PIN is in the Touchpad menu.
     Browser,
+    /// Both the PS5 web page (TCP 8361 with PIN) and `txin-sender.exe` (UDP 9396) listen together.
+    Both,
 }
 
 impl RemoteInput {
@@ -1755,6 +1757,7 @@ impl RemoteInput {
             RemoteInput::Off => "off",
             RemoteInput::Sender => "sender",
             RemoteInput::Browser => "browser",
+            RemoteInput::Both => "both",
         }
     }
 
@@ -1762,6 +1765,7 @@ impl RemoteInput {
         match raw.trim().to_ascii_lowercase().as_str() {
             "sender" => RemoteInput::Sender,
             "browser" => RemoteInput::Browser,
+            "both" => RemoteInput::Both,
             _ => RemoteInput::Off,
         }
     }
@@ -1771,13 +1775,15 @@ impl RemoteInput {
             RemoteInput::Off => "Off (USB on the PS5 only)",
             RemoteInput::Sender => "txin-sender program",
             RemoteInput::Browser => "Web browser",
+            RemoteInput::Both => "Web browser + txin-sender",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             RemoteInput::Off => RemoteInput::Browser,
-            RemoteInput::Browser => RemoteInput::Sender,
+            RemoteInput::Browser => RemoteInput::Both,
+            RemoteInput::Both => RemoteInput::Sender,
             RemoteInput::Sender => RemoteInput::Off,
         }
     }
@@ -1785,7 +1791,8 @@ impl RemoteInput {
     pub fn prev(self) -> Self {
         match self {
             RemoteInput::Off => RemoteInput::Sender,
-            RemoteInput::Sender => RemoteInput::Browser,
+            RemoteInput::Sender => RemoteInput::Both,
+            RemoteInput::Both => RemoteInput::Browser,
             RemoteInput::Browser => RemoteInput::Off,
         }
     }
@@ -1796,19 +1803,32 @@ pub fn read_remote_input_setting(profile_path: &Path) -> RemoteInput {
     read_profile_value(profile_path, "input", "remote").map(|v| RemoteInput::parse(&v)).unwrap_or_default()
 }
 
-/// Update `[input] remote = off | sender | browser` inside a prospero-win `.profile` file.
+/// Update `[input] remote = off | sender | browser | both` inside a prospero-win `.profile` file.
 pub fn save_remote_input_setting(profile_path: &Path, mode: RemoteInput) -> io::Result<()> {
     save_profile_value(profile_path, "input", "remote", mode.code())
 }
 
 /// What the PS5 runner says it opened for the PC keyboard and mouse (`<storage>/netinput.txt`): the mode in
-/// use and, for the browser, the page's address and PIN.
+/// use, address/PIN, and live PC session status (`idle`, `connected`, or `capturing`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoteInputStatus {
     pub mode: String,
     pub url: String,
     pub pin: String,
     pub address: String,
+    pub state: String,
+    pub source: String,
+    pub peer: String,
+}
+
+impl RemoteInputStatus {
+    pub fn is_capturing(&self) -> bool {
+        self.state == "capturing"
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.state == "connected" || self.state == "capturing"
+    }
 }
 
 pub fn parse_remote_input_status(text: &str) -> RemoteInputStatus {
@@ -1821,6 +1841,9 @@ pub fn parse_remote_input_status(text: &str) -> RemoteInputStatus {
                 "url" => status.url = v,
                 "pin" => status.pin = v,
                 "address" => status.address = v,
+                "state" => status.state = v,
+                "source" => status.source = v,
+                "peer" => status.peer = v,
                 _ => {}
             }
         }
@@ -2411,6 +2434,8 @@ mod tests {
             SAMPLE_PROFILE.replace("mode = xinput\n", "mode = xinput\nremote = browser\n")
         );
         assert_eq!(read_remote_input_setting(&profile), RemoteInput::Browser);
+        save_remote_input_setting(&profile, RemoteInput::Both).unwrap();
+        assert_eq!(read_remote_input_setting(&profile), RemoteInput::Both);
         save_remote_input_setting(&profile, RemoteInput::Sender).unwrap();
         assert_eq!(read_remote_input_setting(&profile), RemoteInput::Sender);
         assert_eq!(fs::read_to_string(&profile).unwrap().matches("remote =").count(), 1);
@@ -2430,17 +2455,29 @@ mod tests {
     #[test]
     fn remote_input_cycles_and_reads_the_runner_status() {
         let mut m = RemoteInput::Off;
-        for _ in 0..3 {
+        for _ in 0..4 {
             m = m.next();
         }
         assert_eq!(m, RemoteInput::Off);
-        assert_eq!(RemoteInput::Off.next().prev(), RemoteInput::Off);
+        for mode in [RemoteInput::Off, RemoteInput::Browser, RemoteInput::Both, RemoteInput::Sender] {
+            assert_eq!(mode.next().prev(), mode);
+            assert_eq!(mode.prev().next(), mode);
+        }
         assert_eq!(RemoteInput::parse(" Browser "), RemoteInput::Browser);
+        assert_eq!(RemoteInput::parse("BOTH"), RemoteInput::Both);
         assert_eq!(RemoteInput::parse("usb"), RemoteInput::Off);
-        let s = parse_remote_input_status("mode=browser\nurl=http://192.168.1.170:8361\npin=4821\n");
-        assert_eq!((s.mode.as_str(), s.url.as_str(), s.pin.as_str()), ("browser", "http://192.168.1.170:8361", "4821"));
-        let s = parse_remote_input_status("mode=sender\naddress=192.168.1.170\nport=9396\n");
+        let s = parse_remote_input_status(
+            "mode=both\nurl=http://192.168.1.170:8361\npin=4821\naddress=192.168.1.170\nport=9396\nstate=capturing\nsource=browser\npeer=192.168.1.50\n",
+        );
+        assert_eq!(
+            (s.mode.as_str(), s.url.as_str(), s.pin.as_str(), s.address.as_str()),
+            ("both", "http://192.168.1.170:8361", "4821", "192.168.1.170")
+        );
+        assert!(s.is_capturing() && s.is_connected());
+        assert_eq!((s.source.as_str(), s.peer.as_str()), ("browser", "192.168.1.50"));
+        let s = parse_remote_input_status("mode=sender\naddress=192.168.1.170\nport=9396\nstate=idle\nsource=none\n");
         assert_eq!((s.mode.as_str(), s.address.as_str()), ("sender", "192.168.1.170"));
+        assert!(!s.is_connected() && !s.is_capturing());
     }
 
     #[test]
